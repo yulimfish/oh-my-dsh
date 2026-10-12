@@ -7,4 +7,5 @@
         maxDepth: 1
         maxTaskChars: 12000
         maxResultChars: 8000
+        enableContinuableTasks: false
         roleRoutes: []
