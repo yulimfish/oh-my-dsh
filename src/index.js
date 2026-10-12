@@ -3,9 +3,10 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { buildWorkerPrompt, ROLE_NAMES } from './roles.js'
 import { SKILLS } from './skills.js'
+import { DEFAULT_PROJECT_SKILL_DIRS, normalizeProjectSkillDirs, registerProjectSkillProvider } from './project-skills.js'
 
 export const name = 'dsh-omo'
-export const inject = ['tools', 'subagents', 'systemPrompt', 'commands', 'skills']
+export const inject = ['tools', 'subagents', 'systemPrompt', 'commands', 'skills', 'fs']
 
 const DEFAULT_PROVIDER = 'spawn'
 const DEFAULT_MAX_CONCURRENT = 4
@@ -19,6 +20,8 @@ export const Config = z.object({
   maxTaskChars: z.number().default(DEFAULT_MAX_TASK_CHARS),
   maxResultChars: z.number().default(8_000),
   enableContinuableTasks: z.boolean().default(false),
+  projectSkillDirs: z.array(z.string()).default([...DEFAULT_PROJECT_SKILL_DIRS]),
+  disabledSkills: z.array(z.string()).default([]),
   roleRoutes: z.array(z.object({
     role: z.string().required(),
     provider: z.string(),
@@ -401,7 +404,7 @@ async function listOmoLabelChildren(ctx, agent, signal) {
   return descendants.filter(child => child.parentId === agent.id && matchesOmoLabelNamespace(child))
 }
 
-function registerCommands(ctx, config) {
+function registerCommands(ctx, config, projectSkills) {
   const queueTask = (agent, rawInput, mode) => {
     const task = rawInput.trim()
     if (!task) return { kind: 'error', text: `Usage: /${mode.command} ${mode.hint}` }
@@ -491,11 +494,19 @@ function registerCommands(ctx, config) {
       },
     },
     {
+      name: 'omo-skills-refresh',
+      description: 'Refresh the project skill catalog from configured local directories.',
+      handler: () => {
+        projectSkills.refresh()
+        return { kind: 'success', text: 'Project skill catalog invalidated; the next skill lookup will discover current files.' }
+      },
+    },
+    {
       name: 'omo',
       description: 'Show the installed DSH OMO-inspired specialist roles and available commands.',
       handler: () => ({
         kind: 'success',
-        text: `dsh-omo is active. Roles: ${ROLE_NAMES.join(', ')}. Commands: /ulw, /ultrawork, /architect, /review, /omo-tasks, /omo-interrupt. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. /omo-tasks uses a caller-supplied label prefix, not verified plugin origin, and DSH reports residency rather than completion. Skills: ${SKILLS.map(skill => skill.name).join(', ')}. allowTools filters inherited global tools only; enforce hard boundaries with DSH policy/guards.`,
+        text: `dsh-omo is active. Roles: ${ROLE_NAMES.join(', ')}. Commands: /ulw, /ultrawork, /architect, /review, /omo-tasks, /omo-interrupt, /omo-skills-refresh. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. /omo-tasks uses a caller-supplied label prefix, not verified plugin origin, and DSH reports residency rather than completion. Bundled skills: ${SKILLS.map(skill => skill.name).join(', ')}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}; use /omo-skills-refresh to invalidate catalog cache. allowTools filters inherited global tools only; enforce hard boundaries with DSH policy/guards.`,
       }),
     },
   ]
@@ -510,6 +521,10 @@ export function apply(ctx, rawConfig) {
   assertPositiveInteger('maxResultChars', config.maxResultChars)
   const providerName = normalizeProvider(config.provider)
   const roleRoutes = normalizeRoleRoutes(config.roleRoutes)
+  const projectSkillDirs = normalizeProjectSkillDirs(config.projectSkillDirs)
+  const disabledSkills = Array.isArray(config.disabledSkills) ? [...config.disabledSkills] : []
+  const projectSkills = registerProjectSkillProvider(ctx, { projectSkillDirs, disabledSkills })
+  const disabledSkillSet = new Set(disabledSkills)
   const activeChildren = new Set()
   const activeRuns = new Map()
   const lifecycle = { disposed: false }
@@ -520,7 +535,10 @@ export function apply(ctx, rawConfig) {
     ctx.skills.register({
       ...skill,
       source: 'bundled',
-      invocation: { modelInvocable: true, userInvocable: true },
+      invocation: {
+        modelInvocable: !disabledSkillSet.has(skill.name),
+        userInvocable: !disabledSkillSet.has(skill.name),
+      },
     })
   }
   ctx.systemPrompt.section({
@@ -529,7 +547,7 @@ export function apply(ctx, rawConfig) {
     interpolate: false,
     text: ULTRAWORK_GUIDANCE,
   })
-  registerCommands(ctx, config)
+  registerCommands(ctx, config, projectSkills)
   ctx.effect(() => async () => {
     lifecycle.disposed = true
     const settled = await Promise.allSettled([...activeRuns.values()].map(run => run.dispose()))

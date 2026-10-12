@@ -6,13 +6,13 @@ const nodeMajor = Number(process.versions.node.split('.')[0])
 
 const report = {
   plugin: 'dsh-omo',
-  pluginVersion: '0.1.7',
+  pluginVersion: '0.1.9',
   expectedDsh,
   node: process.versions.node,
   compatibleNode: Number.isInteger(nodeMajor) && nodeMajor >= minimumNodeMajor,
   notes: [
     'This is an independent, early-stage DSH plugin inspired by documented Oh My OpenCode workflows.',
-    'It does not change DSH permission, approval, sandbox, or credential policy.',
+    'It does not change DSH permission, approval, sandbox, or credential policy; project-skill reads call ctx.fs directly and bypass tool-level read prompts.',
     'Run `dsh --profile <name> --dump-config` after installation to verify the bundle is composed.',
   ],
 }

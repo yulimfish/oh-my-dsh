@@ -17,6 +17,8 @@ function makeContext(options = {}) {
   const followups = []
   const disposals = []
   const effects = []
+  const skillProviders = new Map()
+  const skillInvalidations = []
   const ctx = {
     tools: { register: definition => { tools.set(definition.name, definition); return () => tools.delete(definition.name) } },
     subagents: {
@@ -46,7 +48,19 @@ function makeContext(options = {}) {
     },
     systemPrompt: { section: section => { sections.push(section); return () => {} } },
     commands: { register: command => { commands.set(command.name, command); return () => commands.delete(command.name) } },
-    skills: { register: skill => { skills.set(skill.name, skill); return () => skills.delete(skill.name) } },
+    fs: {},
+    skills: {
+      register: skill => { skills.set(skill.name, skill); return () => skills.delete(skill.name) },
+      registerProvider: create => {
+        const lifetime = new AbortController()
+        const provider = create({ signal: lifetime.signal, invalidate: () => skillInvalidations.push(true) })
+        skillProviders.set(provider.name, provider)
+        return () => {
+          lifetime.abort()
+          skillProviders.delete(provider.name)
+        }
+      },
+    },
     effect: (execute, label) => {
       const dispose = execute()
       effects.push({ label, dispose })
@@ -54,7 +68,7 @@ function makeContext(options = {}) {
     },
     logger: { warn: () => {} },
   }
-  return { ctx, tools, sections, commands, skills, starts, continuableStarts, continuableChildren, descendantCalls, interrupts, followups, disposals, effects }
+  return { ctx, tools, sections, commands, skills, skillProviders, skillInvalidations, starts, continuableStarts, continuableChildren, descendantCalls, interrupts, followups, disposals, effects }
 }
 
 const baseConfig = {
@@ -64,13 +78,16 @@ const baseConfig = {
   maxTaskChars: 12_000,
   maxResultChars: 8_000,
   enableContinuableTasks: false,
+  projectSkillDirs: ['.opencode/skills', '.claude/skills'],
+  disabledSkills: [],
   roleRoutes: [],
 }
 
 test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(name, 'dsh-omo')
-  assert.deepEqual(inject, ['tools', 'subagents', 'systemPrompt', 'commands', 'skills'])
-  assert.ok(Config)
+  assert.deepEqual(inject, ['tools', 'subagents', 'systemPrompt', 'commands', 'skills', 'fs'])
+  assert.deepEqual(Config({}).projectSkillDirs, ['.opencode/skills', '.claude/skills'])
+  assert.deepEqual(Config({}).disabledSkills, [])
 })
 
 test('verifies RC2 parent option inheritance and continuable descriptor omissions', () => {
@@ -115,8 +132,11 @@ test('mounts specialist controls and caps the untrusted worker body', async () =
   assert.ok(fixture.tools.has('dsh_omo_task'))
   assert.equal(fixture.sections.length, 1)
   assert.match(fixture.sections[0].text, /ULTRAWORK/i)
-  assert.deepEqual([...fixture.commands.keys()], ['ulw', 'ultrawork', 'architect', 'review', 'omo-tasks', 'omo-interrupt', 'omo'])
+  assert.deepEqual([...fixture.commands.keys()], ['ulw', 'ultrawork', 'architect', 'review', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'omo'])
   assert.deepEqual([...fixture.skills.keys()], ['omo-ultrawork', 'omo-code-review', 'omo-security-review', 'omo-research'])
+  assert.deepEqual([...fixture.skillProviders.keys()], ['dsh-omo-project-skills'])
+  assert.equal(fixture.commands.get('omo-skills-refresh').handler().kind, 'success')
+  assert.equal(fixture.skillInvalidations.length, 1)
   assert.ok([...fixture.skills.values()].every(skill => skill.source === 'bundled' && skill.invocation.modelInvocable && skill.invocation.userInvocable))
 
   const tool = fixture.tools.get('dsh_omo_task')
@@ -150,6 +170,13 @@ test('mounts specialist controls and caps the untrusted worker body', async () =
   assert.equal(relay.content.slice(1).map(block => block.text).join('').length, 64)
   assert.equal(relay.content[1].text, 'worker-output-'.repeat(4) + 'worker-o')
   assert.deepEqual(fixture.disposals, ['child-1'])
+})
+
+test('disabledSkills turns off both model and user invocation for bundled skills', () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, { ...baseConfig, disabledSkills: ['omo-research'] })
+  assert.deepEqual(fixture.skills.get('omo-research').invocation, { modelInvocable: false, userInvocable: false })
+  assert.deepEqual(fixture.skills.get('omo-code-review').invocation, { modelInvocable: true, userInvocable: true })
 })
 
 test('attributes infrastructure failure notices to the DSH settlement source', async () => {
