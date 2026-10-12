@@ -89,10 +89,12 @@ This project is staged. The following are working or deferred, not claims that t
 | Per-role model selection | Static per-role override; otherwise inherit the parent model |
 | Retry/fallback | Delegated to DSH's provider retry policy; no OMO-specific fallback chains yet |
 | Permissions/tool scoping | DSH remains authoritative; explicit role allowlists are supported |
-| Native Goals, todo/task tracking, Ralph loops, workflows | Reuse DSH features; no replacement implementations |
+| Native Goals, todo/task tracking, Ralph loops, workflows | Left to DSH; profile enablement and parity have not yet been audited |
 | Broader upstream skills, hooks, memory, notifications, browser/MCP, LSP | Not yet implemented as OMO-compatible adapters |
 | Background task dashboard, persistent DAG, advanced recovery | Not yet implemented |
 | Full agent/category roster and one-to-one command parity | Not yet implemented |
+
+The pinned, detailed feature inventory and iterative acceptance loop are in [docs/feature-parity.md](docs/feature-parity.md). Its audit is ongoing; no missing row is silently treated as out of scope.
 
 ## License and attribution
 
