@@ -511,14 +511,15 @@ test('lists direct dsh-omo label-matched children with resident activity only', 
   assert.deepEqual(fixture.descendantCalls, [{ parentId: agent.id, signal }])
 })
 
-test('interrupts direct label-matched children, including spoof labels, under exact parent authority', async () => {
+test('attempts interruption only for resident label-matched children under exact parent authority', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, baseConfig)
   fixture.continuableChildren.push(
     { kind: 'child', id: 'omo-durable-1', parentId: 'parent-agent', depth: 1, mode: 'continuable', label: 'dsh-omo:explore', activity: 'running', hasChildren: false },
     { kind: 'child', id: 'omo-one-shot', parentId: 'parent-agent', depth: 1, mode: 'one-shot', label: 'dsh-omo:reviewer', activity: 'inactive', hasChildren: false },
     { kind: 'child', id: 'native-child', parentId: 'parent-agent', depth: 1, mode: 'continuable', label: 'native:research', activity: 'inactive', hasChildren: false },
-    { kind: 'child', id: 'spoofed-native', parentId: 'parent-agent', depth: 1, mode: 'continuable', label: 'dsh-omo:spoof', activity: 'inactive', hasChildren: false },
+    { kind: 'child', id: 'spoofed-native', parentId: 'parent-agent', depth: 1, mode: 'continuable', label: 'dsh-omo:spoof', activity: 'running', hasChildren: false },
+    { kind: 'child', id: 'inactive-child', parentId: 'parent-agent', depth: 1, mode: 'continuable', label: 'dsh-omo:idle', activity: 'inactive', hasChildren: false },
     { kind: 'child', id: 'omo-grandchild', parentId: 'native-child', depth: 2, mode: 'continuable', label: 'dsh-omo:grandchild', activity: 'running', hasChildren: false },
   )
   const agent = { id: 'parent-agent' }
@@ -527,15 +528,21 @@ test('interrupts direct label-matched children, including spoof labels, under ex
     agent, rawInput: ' omo-durable-1 ', signal,
   })
   assert.equal(result.kind, 'success')
-  assert.match(result.text, /Interruption requested/)
+  assert.match(result.text, /Interruption attempted/)
   assert.match(result.text, /not verified plugin origin/)
-  assert.match(result.text, /may take time/)
+  assert.match(result.text, /may no-op if its Activation has no current turn/)
   assert.deepEqual(fixture.interrupts[0], { childId: 'omo-durable-1', authority: { kind: 'ancestor', agent } })
 
   const spoofedResult = await fixture.commands.get('omo-interrupt').handler({ agent, rawInput: 'spoofed-native', signal })
   assert.equal(spoofedResult.kind, 'success')
   assert.match(spoofedResult.text, /not verified plugin origin/)
   assert.deepEqual(fixture.interrupts[1], { childId: 'spoofed-native', authority: { kind: 'ancestor', agent } })
+
+  const inactiveResult = await fixture.commands.get('omo-interrupt').handler({ agent, rawInput: 'inactive-child', signal })
+  assert.equal(inactiveResult.kind, 'error')
+  assert.match(inactiveResult.text, /No interruption requested/)
+  assert.match(inactiveResult.text, /inactive/)
+  assert.equal(fixture.interrupts.length, 2)
 
   assert.equal((await fixture.commands.get('omo-interrupt').handler({ agent, rawInput: 'native-child', signal })).kind, 'error')
   assert.equal((await fixture.commands.get('omo-interrupt').handler({ agent, rawInput: 'omo-one-shot', signal })).kind, 'error')

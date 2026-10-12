@@ -6,7 +6,7 @@ const nodeMajor = Number(process.versions.node.split('.')[0])
 
 const report = {
   plugin: 'dsh-omo',
-  pluginVersion: '0.1.6',
+  pluginVersion: '0.1.7',
   expectedDsh,
   node: process.versions.node,
   compatibleNode: Number.isInteger(nodeMajor) && nodeMajor >= minimumNodeMajor,

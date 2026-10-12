@@ -39,7 +39,7 @@ When the user says **ultrawork**, **ulw**, or requests a substantial multi-step 
 3. Inspect every worker's evidence and diff; do not accept a worker's completion claim as verification.
 4. Run the relevant project checks yourself (or have a test worker provide exact command output), fix failures, and report what was and was not verified.
 
-Use the **reviewer** or **security** role for review tasks, but a role prompt does not enforce read-only behavior. allowTools restricts inherited global tools only; child-scoped registrations may remain available. For a hard boundary, enforce DSH-native permission, sandbox, or monotonic tool-guard policy; dsh-omo does not install a per-worker hard guard. DSH retains authority over filesystem, shell, network, and approvals. One-shot delegation is the default and sends a host-attributed settlement notice followed by a bounded child-authored relay (untrusted evidence); use dsh_omo_task_continuable only when that optional tool is enabled and a durable child session is needed. omo-tasks lists direct children by caller-supplied dsh-omo label, with DSH running/inactive residency only; the label does not prove plugin origin and inactive does not mean completed. omo-interrupt requests a signal without guaranteeing termination.`
+Use the **reviewer** or **security** role for review tasks, but a role prompt does not enforce read-only behavior. allowTools restricts inherited global tools only; child-scoped registrations may remain available. For a hard boundary, enforce DSH-native permission, sandbox, or monotonic tool-guard policy; dsh-omo does not install a per-worker hard guard. DSH retains authority over filesystem, shell, network, and approvals. One-shot delegation is the default and sends a host-attributed settlement notice followed by a bounded child-authored relay (untrusted evidence); use dsh_omo_task_continuable only when that optional tool is enabled and a durable child session is needed. omo-tasks lists direct children by caller-supplied dsh-omo label, with DSH running/inactive residency only; the label does not prove plugin origin and inactive does not mean completed. omo-interrupt rejects inactive rows and only attempts resident-child signals; DSH is fire-and-return and may no-op.`
 
 function assertPositiveInteger(field, value) {
   if (!Number.isSafeInteger(value) || value < 1) {
@@ -465,7 +465,7 @@ function registerCommands(ctx, config) {
     },
     {
       name: 'omo-interrupt',
-      description: 'Request interruption of a direct continuable child whose caller-supplied label starts dsh-omo:; label does not prove plugin origin or guarantee it has stopped.',
+      description: 'Attempt interruption of a resident direct continuable child whose caller-supplied dsh-omo: label does not prove plugin origin; inactive children are rejected as DSH no-ops.',
       input: { hint: '<child-id>' },
       async handler({ agent, rawInput, signal }) {
         const childId = typeof rawInput === 'string' ? rawInput.trim() : ''
@@ -474,10 +474,16 @@ function registerCommands(ctx, config) {
           const children = await listOmoLabelChildren(ctx, agent, signal)
           const child = children.find(entry => entry.id === childId)
           if (!child) return { kind: 'error', text: 'That ID is not a direct continuable child with a dsh-omo: label prefix under this agent.' }
+          if (child.activity !== 'running') {
+            return {
+              kind: 'error',
+              text: `No interruption requested: DSH reports ${child.id} as ${String(child.activity)}; an inactive or unknown resident session is an accepted no-op. The durable child session is retained.`,
+            }
+          }
           ctx.subagents.interrupt(child.id, { kind: 'ancestor', agent })
           return {
             kind: 'success',
-            text: `Interruption requested for ${child.id}. It is a direct child matching the caller-supplied dsh-omo: label namespace, not verified plugin origin. It may take time to observe the signal; the durable session and queued work are retained.`,
+            text: `Interruption attempted for resident child ${child.id}. It matches the caller-supplied dsh-omo: label namespace, not verified plugin origin. DSH is fire-and-return and may no-op if its Activation has no current turn or settles during the race; this does not confirm termination. The durable session and queued work are retained.`,
           }
         } catch (error) {
           return { kind: 'error', text: `Could not request child interruption (${safeErrorName(error)}).` }
