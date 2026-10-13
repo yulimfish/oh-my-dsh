@@ -88,6 +88,7 @@ const baseConfig = {
   enableJobTools: false,
   projectSkillDirs: ['.opencode/skills', '.claude/skills'],
   disabledSkills: [],
+  disabledOmoCommands: [],
   categoryRoutes: [],
   roleRoutes: [],
 }
@@ -97,6 +98,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(inject, ['tools', 'subagents', 'systemPrompt', 'commands', 'skills', 'fs'])
   assert.deepEqual(Config({}).projectSkillDirs, ['.opencode/skills', '.claude/skills'])
   assert.deepEqual(Config({}).disabledSkills, [])
+  assert.deepEqual(Config({}).disabledOmoCommands, [])
+  assert.deepEqual(Config({ disabledOmoCommands: ['refactor', 'ulw'] }).disabledOmoCommands, ['refactor', 'ulw'])
   assert.deepEqual(Config({}).categoryRoutes, [])
   const categoryConfig = Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true, promptAppend: 'Use a bounded budget.', description: 'A short chooser description.', tools: { read: false, bash: true } }] })
   assert.equal(categoryConfig.categoryRoutes[0].maxTokens, 128)
@@ -117,6 +120,117 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableSessionInfo: true }).enableSessionInfo, true)
   assert.equal(Config({}).enableJobTools, false)
   assert.equal(Config({ enableJobTools: true }).enableJobTools, true)
+})
+
+test('disabledOmoCommands filters only local registrations and updates /omo help', () => {
+  const fixture = makeContext()
+  const externalRefactor = { name: 'refactor', description: 'registered elsewhere', handler: () => ({ kind: 'success' }) }
+  const externalNative = { name: 'native-command', description: 'native', handler: () => ({ kind: 'success' }) }
+  fixture.commands.set('refactor', externalRefactor)
+  fixture.commands.set('native-command', externalNative)
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    disabledOmoCommands: ['refactor', 'ultrawork', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'goal', 'omo-models'],
+  })
+
+  assert.strictEqual(fixture.commands.get('refactor'), externalRefactor)
+  assert.strictEqual(fixture.commands.get('native-command'), externalNative)
+  for (const name of ['ultrawork', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh']) {
+    assert.equal(fixture.commands.has(name), false)
+  }
+  const help = fixture.commands.get('omo').handler({}).text
+  const helpCommandList = help.match(/Commands: ([^.]+)\. Native Agent Teams/u)?.[1]
+  assert.equal(helpCommandList, '/ulw, /architect, /review, /handoff, /remove-ai-slops')
+  const disabledHelpNames = /\/refactor|\/ultrawork|\/omo-tasks|\/omo-interrupt|\/omo-skills-refresh|\/goal|\/omo-models/u
+  assert.doesNotMatch(helpCommandList, disabledHelpNames)
+  assert.doesNotMatch(help, disabledHelpNames)
+  const continuable = fixture.tools.get('dsh_omo_task_continuable')
+  assert.match(continuable.description, /dsh-omo \/omo-tasks is disabled by configuration/u)
+  assert.match(continuable.description, /dsh-omo \/omo-interrupt is disabled by configuration/u)
+  const acceptedText = continuable.output.render({}, {
+    childId: 'child-1', messageId: 'message-1', role: 'quick', status: 'accepted',
+  })[0].text
+  assert.match(acceptedText, /dsh-omo \/omo-tasks is disabled by configuration/u)
+  assert.doesNotMatch(acceptedText, /Use \/omo-tasks/u)
+  const orchestrationGuidance = fixture.sections[0].text
+  assert.match(orchestrationGuidance, /dsh-omo \/omo-tasks is disabled by configuration/u)
+  assert.match(orchestrationGuidance, /dsh-omo \/omo-interrupt is disabled by configuration/u)
+  assert.doesNotMatch(orchestrationGuidance, /\/omo-tasks lists direct children|\/omo-interrupt rejects inactive/u)
+  for (const disabledOmoCommands of [[], ['omo-tasks'], ['omo-interrupt'], ['omo-tasks', 'omo-interrupt']]) {
+    const partial = makeContext()
+    apply(partial.ctx, { ...baseConfig, enableContinuableTasks: true, disabledOmoCommands })
+    const help = partial.commands.get('omo').handler({}).text
+    const helpCommandList = help.match(/Commands: ([^.]+)\. Native Agent Teams/u)?.[1]
+    const description = partial.tools.get('dsh_omo_task_continuable').description
+    const acceptedText = partial.tools.get('dsh_omo_task_continuable').output.render({}, {
+      childId: 'child-2', messageId: 'message-2', role: 'quick', status: 'accepted',
+    })[0].text
+    const guidance = partial.sections[0].text
+
+    for (const name of ['omo-tasks', 'omo-interrupt']) {
+      if (disabledOmoCommands.includes(name)) {
+        assert.equal(help.includes(`/${name}`), false)
+        if (name === 'omo-tasks') {
+          assert.equal(help.includes('/omo-tasks uses a caller-supplied label prefix'), false)
+        }
+        assert.ok(description.includes(`dsh-omo /${name} is disabled by configuration`))
+        assert.ok(guidance.includes(`dsh-omo /${name} is disabled by configuration`))
+      } else {
+        assert.ok(helpCommandList.includes(`/${name}`))
+        if (name === 'omo-tasks') {
+          assert.ok(help.includes('/omo-tasks uses a caller-supplied label prefix'))
+          assert.ok(description.includes('dsh-omo lists this child with /omo-tasks'))
+          assert.ok(guidance.includes('/omo-tasks lists direct children'))
+        } else {
+          assert.ok(description.includes('dsh-omo /omo-interrupt can request interruption'))
+          assert.ok(guidance.includes('/omo-interrupt rejects inactive'))
+        }
+      }
+    }
+    assert.equal(acceptedText.includes('dsh-omo /omo-tasks is disabled by configuration'), disabledOmoCommands.includes('omo-tasks'))
+    assert.equal(acceptedText.includes('Use /omo-tasks to list it'), !disabledOmoCommands.includes('omo-tasks'))
+    assert.equal(acceptedText.includes('/omo-interrupt'), false)
+  }
+
+  const noHelp = makeContext()
+  apply(noHelp.ctx, { ...baseConfig, disabledOmoCommands: ['omo'] })
+  assert.equal(noHelp.commands.has('omo'), false)
+})
+
+test('disabledOmoCommands filters optional commands when their services are mounted', () => {
+  const services = {
+    goals: { get() {}, create() {}, pause() {}, resume() {}, complete() {}, clear() {} },
+    llm: {},
+  }
+  const enabledFixture = makeContext({ services })
+  apply(enabledFixture.ctx, baseConfig)
+  for (const name of ['goal', 'stop-continuation', 'omo-models']) {
+    assert.equal(enabledFixture.commands.has(name), true)
+  }
+
+  const fixture = makeContext({ services })
+  apply(fixture.ctx, { ...baseConfig, disabledOmoCommands: ['goal', 'stop-continuation', 'omo-models'] })
+  for (const name of ['goal', 'stop-continuation', 'omo-models']) {
+    assert.equal(fixture.commands.has(name), false)
+  }
+  const help = fixture.commands.get('omo').handler({}).text
+  const helpCommandList = help.match(/Commands: ([^.]+)\. Native Agent Teams/u)?.[1]
+  assert.equal(helpCommandList, '/ulw, /ultrawork, /architect, /review, /handoff, /refactor, /remove-ai-slops, /omo-tasks, /omo-interrupt, /omo-skills-refresh')
+  assert.doesNotMatch(help, /\/goal|\/stop-continuation|\/omo-models/u)
+})
+
+test('rejects invalid disabledOmoCommands before plugin registration', () => {
+  for (const disabledOmoCommands of ['refactor', ['unknown'], ['/refactor'], ['refactor', 'refactor'], Array(15).fill('refactor')]) {
+    const fixture = makeContext()
+    assert.throws(() => apply(fixture.ctx, { ...baseConfig, disabledOmoCommands }), /disabledOmoCommands/u)
+    assert.equal(fixture.tools.size, 0)
+    assert.equal(fixture.commands.size, 0)
+    assert.equal(fixture.skills.size, 0)
+    assert.equal(fixture.skillProviders.size, 0)
+    assert.equal(fixture.sections.length, 0)
+    assert.equal(fixture.effects.length, 0)
+  }
 })
 
 test('verifies RC2 parent option inheritance and continuable descriptor omissions', () => {
@@ -161,6 +275,8 @@ test('mounts specialist controls and caps the untrusted worker body', async () =
   assert.ok(fixture.tools.has('dsh_omo_task'))
   assert.equal(fixture.sections.length, 1)
   assert.match(fixture.sections[0].text, /ULTRAWORK/i)
+  assert.match(fixture.sections[0].text, /\/omo-tasks lists direct children/u)
+  assert.match(fixture.sections[0].text, /\/omo-interrupt rejects inactive/u)
   assert.deepEqual([...fixture.commands.keys()], ['ulw', 'ultrawork', 'architect', 'review', 'handoff', 'refactor', 'remove-ai-slops', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'omo'])
   assert.deepEqual([...fixture.skills.keys()], SKILLS.map(skill => skill.name))
   assert.deepEqual([...fixture.skillProviders.keys()], ['dsh-omo-project-skills'])
