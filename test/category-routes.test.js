@@ -202,6 +202,50 @@ test('normalizes bounded single-line category descriptions for chooser prompts',
   }
 })
 
+test('normalizes category tool maps to bounded false-only deny rules', () => {
+  const categoryRoutes = normalizeCategoryRoutes([
+    { name: 'restricted', provider: 'p', model: 'm', tools: { read: false, grep: true } },
+    { name: 'grants-none', provider: 'p2', model: 'm2', tools: { read: true } },
+  ])
+  assert.deepEqual(categoryRoutes.get('restricted').categoryDenyTools, ['read'])
+  assert.equal(Object.isFrozen(categoryRoutes.get('restricted').categoryDenyTools), true)
+  assert.equal(categoryRoutes.get('grants-none').categoryDenyTools, undefined)
+  const exactByteLimitName = 'é'.repeat(64)
+  assert.deepEqual(normalizeCategoryRoutes([
+    { name: 'byte-limit', provider: 'p3', model: 'm3', tools: { [exactByteLimitName]: false } },
+  ]).get('byte-limit').categoryDenyTools, [exactByteLimitName])
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'byte-over-limit', provider: 'p3', model: 'm3', tools: { ['é'.repeat(65)]: false } },
+  ]), /invalid tool name/u)
+  for (const toolName of ['read\u009f', 'read\u2028', 'read\u2029']) {
+    assert.throws(() => normalizeCategoryRoutes([
+      { name: 'bad-control', provider: 'p3', model: 'm3', tools: { [toolName]: false } },
+    ]), /invalid tool name/u)
+  }
+  const resolved = resolveCategoryRoute(categoryRoutes, 'restricted', {
+    allowTools: Object.freeze(['read', 'grep']), denyTools: Object.freeze(['bash']),
+  })
+  assert.deepEqual(resolved.categoryDenyTools, ['read'])
+  assert.deepEqual(resolved.allowTools, ['read', 'grep'])
+  assert.deepEqual(resolved.denyTools, ['bash'])
+
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', tools: [] },
+  ]), /tools must be a plain object/u)
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', tools: { read: 'false' } },
+  ]), /tools values must be booleans/u)
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', tools: { ' read': false } },
+  ]), /invalid tool name/u)
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', tools: { 'read\n': false } },
+  ]), /invalid tool name/u)
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', tools: Object.fromEntries(Array.from({ length: 65 }, (_, index) => [`tool-${index}`, true])) },
+  ]), /at most 64 tool rules/u)
+})
+
 test('normalizer registry, category routes, and resolved routes are immutable', () => {
   const categoryRoutes = routes()
   const categoryRoute = categoryRoutes.get('build')

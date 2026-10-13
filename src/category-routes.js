@@ -3,11 +3,14 @@ import { normalizeCategoryPromptAppend } from './roles.js'
 const MAX_CATEGORY_ROUTES = 32
 const MAX_CATEGORY_NAME_CHARS = 64
 const MAX_CATEGORY_DESCRIPTION_BYTES = 512
+const MAX_CATEGORY_TOOL_RULES = 64
+const MAX_CATEGORY_TOOL_NAME_BYTES = 128
 const MAX_PROVIDER_CHARS = 128
 const MAX_MODEL_CHARS = 256
 const MAX_REASONING_EFFORT_CHARS = 64
-const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'disable', 'promptAppend', 'description'])
+const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'disable', 'promptAppend', 'description', 'tools'])
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u
+const CATEGORY_TOOL_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u
 const DESCRIPTION_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u
 const CATEGORY_ROUTE_DATA = new WeakMap()
 
@@ -45,6 +48,33 @@ function normalizeCategoryDescription(value, categoryName) {
     throw new TypeError(`${label} must be a single line without control characters`)
   }
   return normalized
+}
+
+function normalizeCategoryTools(value, categoryName) {
+  if (value === undefined) return undefined
+  const label = `category route "${categoryName}" tools`
+  if (!isRecord(value)) {
+    throw new TypeError(`${label} must be a plain object of boolean tool rules`)
+  }
+  const keys = Reflect.ownKeys(value)
+  if (keys.length > MAX_CATEGORY_TOOL_RULES) {
+    throw new TypeError(`${label} must contain at most ${MAX_CATEGORY_TOOL_RULES} tool rules`)
+  }
+  const disabledTools = []
+  for (const key of keys) {
+    if (typeof key !== 'string' || !key || key.trim() !== key
+      || key.length > MAX_CATEGORY_TOOL_NAME_BYTES
+      || new TextEncoder().encode(key).byteLength > MAX_CATEGORY_TOOL_NAME_BYTES
+      || CATEGORY_TOOL_NAME_CONTROL_CHARACTERS.test(key)) {
+      throw new TypeError(`${label} contains an invalid tool name`)
+    }
+    const enabled = value[key]
+    if (typeof enabled !== 'boolean') {
+      throw new TypeError(`${label} values must be booleans`)
+    }
+    if (!enabled) disabledTools.push(key)
+  }
+  return disabledTools.length > 0 ? Object.freeze(disabledTools) : undefined
 }
 
 function normalizeMaxTokens(value, label) {
@@ -86,7 +116,8 @@ function createReadonlyRegistry(routes) {
 /**
  * Validate one provider/model route per category plus optional reasoning,
  * positive safe-integer token ceiling, task-delegation disable flag, bounded
- * literal prompt guidance, and bounded single-line tool-prompt descriptions.
+ * literal prompt guidance, bounded single-line tool-prompt descriptions, and
+ * a bounded boolean tool map whose false entries become inherited-tool denies.
  * Routes cannot declare chains or fallback.
  */
 export function normalizeCategoryRoutes(entries) {
@@ -131,6 +162,7 @@ export function normalizeCategoryRoutes(entries) {
     }
     const promptAppend = normalizeCategoryPromptAppend(entry.promptAppend, name)
     const description = normalizeCategoryDescription(entry.description, name)
+    const categoryDenyTools = normalizeCategoryTools(entry.tools, name)
 
     routes.set(name, Object.freeze({
       name,
@@ -141,6 +173,7 @@ export function normalizeCategoryRoutes(entries) {
       disable,
       ...(promptAppend !== undefined ? { promptAppend } : {}),
       ...(description !== undefined ? { description } : {}),
+      ...(categoryDenyTools !== undefined ? { categoryDenyTools } : {}),
     }))
   }
 
@@ -223,5 +256,7 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
   else resolved.maxTokens = maxTokens
   if (categoryRoute.promptAppend === undefined) delete resolved.categoryPromptAppend
   else resolved.categoryPromptAppend = categoryRoute.promptAppend
+  if (categoryRoute.categoryDenyTools === undefined) delete resolved.categoryDenyTools
+  else resolved.categoryDenyTools = categoryRoute.categoryDenyTools
   return Object.freeze(resolved)
 }

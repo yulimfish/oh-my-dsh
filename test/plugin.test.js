@@ -98,11 +98,12 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).projectSkillDirs, ['.opencode/skills', '.claude/skills'])
   assert.deepEqual(Config({}).disabledSkills, [])
   assert.deepEqual(Config({}).categoryRoutes, [])
-  const categoryConfig = Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true, promptAppend: 'Use a bounded budget.', description: 'A short chooser description.' }] })
+  const categoryConfig = Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true, promptAppend: 'Use a bounded budget.', description: 'A short chooser description.', tools: { read: false, bash: true } }] })
   assert.equal(categoryConfig.categoryRoutes[0].maxTokens, 128)
   assert.equal(categoryConfig.categoryRoutes[0].disable, true)
   assert.equal(categoryConfig.categoryRoutes[0].promptAppend, 'Use a bounded budget.')
   assert.equal(categoryConfig.categoryRoutes[0].description, 'A short chooser description.')
+  assert.deepEqual(categoryConfig.categoryRoutes[0].tools, { read: false, bash: true })
   assert.deepEqual(Config({ roleRoutes: [{ role: 'reviewer', denyTools: ['bash'] }] }).roleRoutes[0].denyTools, ['bash'])
   assert.equal(Config({}).enableTeamTools, false)
   assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
@@ -524,6 +525,39 @@ test('applies configured model route and explicit tool restriction', async () =>
     allow: ['read', 'grep'],
     deny: ['bash', 'web_fetch'],
   })
+})
+
+test('composes category tools false entries as monotonic inherited-tool denies', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    categoryRoutes: [
+      { name: 'restricted', provider: 'p', model: 'm', tools: { read: false, bash: false, grep: true } },
+      { name: 'true-only', provider: 'p2', model: 'm2', tools: { read: true } },
+      { name: 'deny-only', provider: 'p3', model: 'm3', tools: { terminal: false } },
+    ],
+    roleRoutes: [{ role: 'explore', category: 'restricted', allowTools: ['read', 'grep', 'web_search'], denyTools: ['bash'] }],
+  })
+  const oneShot = fixture.tools.get('dsh_omo_task')
+  const continuable = fixture.tools.get('dsh_omo_task_continuable')
+  const parent = { id: 'parent-agent', followup() {} }
+  const signal = new AbortController().signal
+
+  await oneShot.execute({ role: 'explore', category: 'restricted', task: 'Apply explicit category denies' }, { agent: parent, signal })
+  await oneShot.execute({ role: 'explore', task: 'Apply role-default category denies' }, { agent: parent, signal })
+  await continuable.execute({ role: 'explore', category: 'restricted', task: 'Apply category denies durably' }, { agent: parent, signal })
+  await continuable.execute({ role: 'explore', task: 'Apply role-default category denies durably' }, { agent: parent, signal })
+  await oneShot.execute({ role: 'quick', category: 'deny-only', task: 'Apply category denies without role filters' }, { agent: parent, signal })
+  await oneShot.execute({ role: 'quick', category: 'true-only', task: 'Do not turn category true into a grant' }, { agent: parent, signal })
+
+  const expectedFilter = { allow: ['grep', 'web_search'], deny: ['bash', 'read'] }
+  assert.deepEqual(fixture.starts[0].request.toolFilter, expectedFilter)
+  assert.deepEqual(fixture.starts[1].request.toolFilter, expectedFilter)
+  assert.deepEqual(fixture.continuableStarts[0].request.toolFilter, expectedFilter)
+  assert.deepEqual(fixture.continuableStarts[1].request.toolFilter, expectedFilter)
+  assert.deepEqual(fixture.starts[2].request.toolFilter, { deny: ['terminal'] })
+  assert.equal(Object.hasOwn(fixture.starts[3].request, 'toolFilter'), false)
 })
 
 test('applies per-role token and reasoning overrides without replacing the parent model route', async () => {
