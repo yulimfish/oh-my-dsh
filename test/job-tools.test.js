@@ -113,7 +113,7 @@ test('validates controller methods and registers exactly two disposable read-onl
   assert.deepEqual([...tools.registered.keys()], ['dsh_omo_job_list', 'dsh_omo_job_follow'])
   assert.equal(tools.registered.has('job_list'), false, 'avoid colliding with DSH job_list')
   assert.equal(tools.registered.has('job_output'), false, 'avoid colliding with DSH job_output')
-  assert.equal(tools.registered.has('job_kill'), false, 'do not register a Host job kill adapter')
+  assert.equal(tools.registered.has('job_kill'), false, 'do not register a model-facing Host job-kill Tool')
   assert.equal(typeof dispose, 'function')
   assert.equal(tools.registered.get('dsh_omo_job_list').output.schema.type, 'object')
   assert.equal(tools.registered.get('dsh_omo_job_list').output.schema.additionalProperties, false)

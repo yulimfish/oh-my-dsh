@@ -10,6 +10,7 @@ import { registerSessionSearchTool } from './session-search.js'
 import { registerSessionReadTool } from './session-read.js'
 import { registerSessionListTool } from './session-list.js'
 import { registerSessionInfoTool } from './session-info.js'
+import { createJobKillCommand } from './job-commands.js'
 import { registerJobTools } from './job-tools.js'
 import { createModelCapabilitiesCommand } from './model-capabilities.js'
 import { normalizeCategoryRoutes, resolveCategoryRoute } from './category-routes.js'
@@ -24,7 +25,7 @@ const DEFAULT_MAX_DEPTH = 1
 const DEFAULT_MAX_TASK_CHARS = 12_000
 const DISABLEABLE_OMO_COMMAND_NAMES = Object.freeze([
   'goal', 'stop-continuation', 'omo-models', 'ulw', 'ultrawork', 'architect', 'review', 'handoff',
-  'refactor', 'remove-ai-slops', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'omo',
+  'refactor', 'remove-ai-slops', 'omo-tasks', 'omo-job-kill', 'omo-interrupt', 'omo-skills-refresh', 'omo',
 ])
 const DISABLEABLE_OMO_COMMAND_SET = new Set(DISABLEABLE_OMO_COMMAND_NAMES)
 const OMO_BUNDLED_SKILL_NAME_SET = new Set(SKILLS.map(skill => skill.name))
@@ -609,10 +610,17 @@ async function listOmoLabelChildren(ctx, agent, signal) {
   return descendants.filter(child => child.parentId === agent.id && matchesOmoLabelNamespace(child))
 }
 
-function registerCommands(ctx, config, projectSkills, goalService, llmService, disabledOmoCommands, activeRoleNames, activeBundledSkills) {
+function registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, disabledOmoCommands, activeRoleNames, activeBundledSkills) {
   let availableCommandNames = ''
   let taskCommandHelp = ''
   let skillRefreshHelp = ''
+  const jobToolHelp = !config.enableJobTools
+    ? 'disabled'
+    : typeof jobController?.kill !== 'function'
+      ? 'enabled (current-Agent monitoring; Host job cancellation unavailable)'
+      : disabledOmoCommands.has('omo-job-kill')
+        ? 'enabled (current-Agent monitoring; human job cancellation disabled by configuration)'
+        : 'enabled (current-Agent monitoring plus human-only DSH job cancellation)'
   const queueTask = (agent, rawInput, mode) => {
     if (typeof rawInput !== 'string') return { kind: 'error', text: `Usage: /${mode.command} ${mode.hint}` }
     if (rawInput.length > config.maxTaskChars) {
@@ -752,6 +760,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, d
         }
       },
     },
+    ...(config.enableJobTools && typeof jobController?.kill === 'function' ? [createJobKillCommand(jobController)] : []),
     {
       name: 'omo-skills-refresh',
       description: 'Refresh the project skill catalog from configured local directories.',
@@ -765,7 +774,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, d
       description: 'Show the installed DSH OMO-inspired specialist roles and available commands.',
       handler: () => ({
         kind: 'success',
-        text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). DSH job tools: ${config.enableJobTools ? 'enabled' : 'disabled'} (current-Agent job monitoring only; not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
+        text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
       }),
     },
   ]
@@ -786,7 +795,28 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, d
   skillRefreshHelp = activeCommandNames.has('omo-skills-refresh')
     ? '; use /omo-skills-refresh to invalidate catalog cache'
     : ''
-  for (const registration of activeRegistrations) ctx.commands.register(registration)
+  const commandDisposers = []
+  try {
+    for (const registration of activeRegistrations) {
+      const unregister = ctx.commands.register(registration)
+      if (typeof unregister !== 'function') throw new TypeError(`dsh-omo command ${registration.name} did not return a disposer`)
+      let disposed = false
+      const dispose = () => {
+        if (disposed) return
+        disposed = true
+        try {
+          unregister()
+        } catch (error) {
+          ctx.logger.warn(`dsh-omo could not unregister command ${registration.name} (${safeErrorName(error)})`)
+        }
+      }
+      commandDisposers.push(dispose)
+      ctx.effect(() => dispose, `dsh-omo command ${registration.name}`)
+    }
+  } catch (error) {
+    for (let index = commandDisposers.length - 1; index >= 0; index -= 1) commandDisposers[index]()
+    throw error
+  }
 }
 
 export function apply(ctx, rawConfig) {
@@ -872,7 +902,7 @@ export function apply(ctx, rawConfig) {
     interpolate: false,
     text: buildUltraworkGuidance(disabledOmoCommands, activeRoleNames),
   })
-  registerCommands(ctx, config, projectSkills, goalService, llmService, disabledOmoCommands, activeRoleNames, activeBundledSkills)
+  registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, disabledOmoCommands, activeRoleNames, activeBundledSkills)
   if (config.enableSessionSearch) {
     const disposeSessionSearch = registerSessionSearchTool(ctx, sessionQueryService)
     ctx.effect(() => disposeSessionSearch, 'dsh-omo session search tool')

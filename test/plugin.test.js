@@ -329,7 +329,7 @@ test('disabledOmoCommands filters optional commands when their services are moun
 })
 
 test('rejects invalid disabledOmoCommands before plugin registration', () => {
-  for (const disabledOmoCommands of ['refactor', ['unknown'], ['/refactor'], ['refactor', 'refactor'], Array(15).fill('refactor')]) {
+  for (const disabledOmoCommands of ['refactor', ['unknown'], ['/refactor'], ['refactor', 'refactor'], Array(16).fill('refactor')]) {
     const fixture = makeContext()
     assert.throws(() => apply(fixture.ctx, { ...baseConfig, disabledOmoCommands }), /disabledOmoCommands/u)
     assert.equal(fixture.tools.size, 0)
@@ -662,13 +662,50 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   apply(enabledJobToolsFixture.ctx, { ...baseConfig, enableJobTools: true })
   assert.ok(enabledJobToolsFixture.tools.has('dsh_omo_job_list'))
   assert.ok(enabledJobToolsFixture.tools.has('dsh_omo_job_follow'))
-  assert.equal(enabledJobToolsFixture.tools.has('job_kill'), false, 'the plugin does not register a job-kill adapter')
-  assert.match(enabledJobToolsFixture.commands.get('omo').handler().text, /DSH job tools: enabled/u)
+  assert.equal(enabledJobToolsFixture.tools.has('job_kill'), false, 'the plugin does not register a model-facing kill tool')
+  assert.equal(enabledJobToolsFixture.tools.has('dsh_omo_job_kill'), false, 'kill remains a human command, not a Tool')
+  assert.equal(enabledJobToolsFixture.commands.has('omo-job-kill'), false, 'the Host kill method is optional')
+  assert.match(enabledJobToolsFixture.commands.get('omo').handler().text, /Host job cancellation unavailable/u)
   const jobToolsEffect = enabledJobToolsFixture.effects.find(effect => effect.label === 'dsh-omo Host job tools')
   assert.ok(jobToolsEffect)
   await jobToolsEffect.dispose()
   assert.equal(enabledJobToolsFixture.tools.has('dsh_omo_job_list'), false)
   assert.equal(enabledJobToolsFixture.tools.has('dsh_omo_job_follow'), false)
+
+  const killRequests = []
+  const killEnabledController = {
+    list() {},
+    follow() {},
+    kill(request) { killRequests.push(request); return { outcome: 'requested' } },
+  }
+  const jobKillOptOutFixture = makeContext({ services: { jobController: killEnabledController } })
+  apply(jobKillOptOutFixture.ctx, baseConfig)
+  assert.equal(jobKillOptOutFixture.commands.has('omo-job-kill'), false, 'the human command is opt-in with job tools')
+
+  const humanKillFixture = makeContext({ services: { jobController: killEnabledController } })
+  apply(humanKillFixture.ctx, { ...baseConfig, enableJobTools: true })
+  assert.ok(humanKillFixture.commands.has('omo-job-kill'))
+  assert.match(humanKillFixture.commands.get('omo').handler().text, /human-only DSH job cancellation/u)
+  assert.equal(humanKillFixture.tools.has('job_kill'), false)
+  assert.equal(humanKillFixture.tools.has('dsh_omo_job_kill'), false)
+  assert.equal(humanKillFixture.commands.get('omo-job-kill').handler({
+    agent: { id: 'human-session' }, rawInput: 'job-77',
+  }).kind, 'success')
+  assert.deepEqual(killRequests, [{ sessionId: 'human-session', jobId: 'job-77' }])
+  const jobKillEffect = humanKillFixture.effects.find(effect => effect.label === 'dsh-omo command omo-job-kill')
+  assert.ok(jobKillEffect)
+  await jobKillEffect.dispose()
+  assert.equal(humanKillFixture.commands.has('omo-job-kill'), false, 'plugin disposal unregisters the human command')
+
+  const disabledHumanKillFixture = makeContext({ services: { jobController: killEnabledController } })
+  apply(disabledHumanKillFixture.ctx, {
+    ...baseConfig, enableJobTools: true, disabledOmoCommands: ['omo-job-kill'],
+  })
+  assert.equal(disabledHumanKillFixture.commands.has('omo-job-kill'), false)
+  const disabledKillHelp = disabledHumanKillFixture.commands.get('omo').handler().text
+  assert.match(disabledKillHelp, /human job cancellation disabled by configuration/u)
+  assert.doesNotMatch(disabledKillHelp, /\/omo-job-kill/u)
+  assert.ok(disabledHumanKillFixture.tools.has('dsh_omo_job_list'), 'disabling the human command leaves monitoring tools enabled')
 
   const teamCalls = []
   const member = { id: 'member-1', name: 'builder', role: 'teammate', status: 'running', diagnostics: [] }
@@ -1425,7 +1462,9 @@ test('plugin disposal cancels active workers without queuing stale results', asy
     { role: 'explore', task: 'Inspect one path' },
     { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal },
   )
-  await fixture.effects[0].dispose()
+  const workerEffect = fixture.effects.find(effect => effect.label === 'dsh-omo background workers')
+  assert.ok(workerEffect)
+  await workerEffect.dispose()
   await new Promise(resolve => setImmediate(resolve))
   assert.ok(disposeCalls >= 1)
   assert.equal(fixture.followups.length, 0)
