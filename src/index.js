@@ -44,6 +44,7 @@ export const Config = z.object({
   projectSkillDirs: z.array(z.string()).default([...DEFAULT_PROJECT_SKILL_DIRS]),
   disabledSkills: z.array(z.string()).default([]),
   disabledOmoCommands: z.array(z.string()).default([]),
+  disabledOmoRoles: z.array(z.string()).default([]),
   categoryRoutes: z.array(z.object({
     name: z.string().required(),
     provider: z.string().required(),
@@ -68,7 +69,11 @@ export const Config = z.object({
   })).default([]),
 })
 
-function buildUltraworkGuidance(disabledOmoCommands) {
+function buildUltraworkGuidance(disabledOmoCommands, activeRoleNames) {
+  const reviewRoles = ['reviewer', 'security'].filter(role => activeRoleNames.includes(role))
+  const reviewRoleGuidance = reviewRoles.length > 0
+    ? `Use the ${reviewRoles.map(role => `**${role}**`).join(' or ')} ${reviewRoles.length === 1 ? 'role' : 'roles'} for review tasks, but role prompts do not enforce read-only behavior.`
+    : 'Role prompts do not enforce read-only behavior.'
   const taskListingGuidance = disabledOmoCommands.has('omo-tasks')
     ? 'dsh-omo /omo-tasks is disabled by configuration.'
     : '/omo-tasks lists direct children by caller-supplied dsh-omo label, with DSH running/inactive residency only; the label does not prove plugin origin and inactive does not mean completed.'
@@ -77,7 +82,7 @@ function buildUltraworkGuidance(disabledOmoCommands) {
     : '/omo-interrupt rejects inactive rows and only attempts resident-child signals; DSH is fire-and-return and may no-op.'
   return `## Specialist orchestration
 
-You can delegate focused work with the **dsh_omo_task** tool. Its roles are: ${ROLE_NAMES.join(', ')}. Use independent specialists for separable exploration, documentation research, architecture advice, implementation, testing, and review; do not delegate duplicate work. You own the parent task, merge decisions, and final verification.
+You can delegate focused work with the **dsh_omo_task** tool. Its roles are: ${activeRoleNames.join(', ')}. Use independent specialists for separable exploration, documentation research, architecture advice, implementation, testing, and review; do not delegate duplicate work. You own the parent task, merge decisions, and final verification.
 
 When the user says **ultrawork**, **ulw**, or requests a substantial multi-step change:
 1. Clarify only material ambiguity; form a short dependency-aware plan using the native DSH task/todo tools.
@@ -85,7 +90,7 @@ When the user says **ultrawork**, **ulw**, or requests a substantial multi-step 
 3. Inspect every worker's evidence and diff; do not accept a worker's completion claim as verification.
 4. Run the relevant project checks yourself (or have a test worker provide exact command output), fix failures, and report what was and was not verified.
 
-Use the **reviewer** or **security** role for review tasks, but a role prompt does not enforce read-only behavior. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain available. For a hard boundary, verify DSH-native permission, sandbox, or tool-guard policy covers scoped tools and the reserved transport; dsh-omo does not install a per-worker hard guard. DSH retains authority over filesystem, shell, network, and approvals. One-shot delegation is the default and sends a host-attributed settlement notice followed by a bounded child-authored relay (untrusted evidence); use dsh_omo_task_continuable only when that optional tool is enabled and a durable child session is needed. ${taskListingGuidance} ${interruptionGuidance}`
+${reviewRoleGuidance} allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain available. For a hard boundary, verify DSH-native permission, sandbox, or tool-guard policy covers scoped tools and the reserved transport; dsh-omo does not install a per-worker hard guard. DSH retains authority over filesystem, shell, network, and approvals. One-shot delegation is the default and sends a host-attributed settlement notice followed by a bounded child-authored relay (untrusted evidence); use dsh_omo_task_continuable only when that optional tool is enabled and a durable child session is needed. ${taskListingGuidance} ${interruptionGuidance}`
 }
 
 function optionalService(ctx, name) {
@@ -128,6 +133,31 @@ function normalizeDisabledOmoCommands(value) {
   return disabled
 }
 
+function normalizeDisabledOmoRoles(value) {
+  if (value === undefined) return new Set()
+  if (!Array.isArray(value)) {
+    throw new TypeError('dsh-omo: disabledOmoRoles must be an array of specialist role names')
+  }
+  if (value.length > ROLE_NAMES.length) {
+    throw new TypeError(`dsh-omo: disabledOmoRoles may contain at most ${ROLE_NAMES.length} names`)
+  }
+  const disabled = new Set()
+  for (let index = 0; index < value.length; index += 1) {
+    const role = value[index]
+    if (typeof role !== 'string' || role.trim() !== role || !ROLE_NAMES.includes(role)) {
+      throw new TypeError(`dsh-omo: disabledOmoRoles[${index}] must name one of this plugin's specialist roles`)
+    }
+    if (disabled.has(role)) {
+      throw new TypeError('dsh-omo: disabledOmoRoles must not contain duplicates')
+    }
+    disabled.add(role)
+  }
+  if (disabled.size === ROLE_NAMES.length) {
+    throw new TypeError('dsh-omo: disabledOmoRoles must leave at least one specialist role enabled')
+  }
+  return disabled
+}
+
 function normalizeToolNames(value, role, field) {
   if (value === undefined) return undefined
   if (!Array.isArray(value) || value.some(tool => typeof tool !== 'string' || tool.trim().length === 0)) {
@@ -136,11 +166,14 @@ function normalizeToolNames(value, role, field) {
   return Object.freeze([...new Set(value.map(tool => tool.trim()))])
 }
 
-function normalizeRoleRoutes(routes, categoryRoutes) {
+function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles) {
   const result = new Map()
   for (const entry of routes) {
     if (!ROLE_NAMES.includes(entry.role)) {
       throw new Error(`dsh-omo: unknown role route "${entry.role}"`)
+    }
+    if (disabledOmoRoles.has(entry.role)) {
+      throw new Error(`dsh-omo: role route "${entry.role}" references a disabled specialist role`)
     }
     if (result.has(entry.role)) throw new Error(`dsh-omo: duplicate role route "${entry.role}"`)
     const category = entry.category === undefined ? undefined : typeof entry.category === 'string' ? entry.category.trim() : ''
@@ -371,14 +404,14 @@ function taskPrompt(role, task, rolePromptAppend, categoryPromptAppend) {
   return [{ type: 'text', text: buildWorkerPrompt(role, task, rolePromptAppend, categoryPromptAppend) }]
 }
 
-function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren, activeRuns, lifecycle, providerName) {
+function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet) {
   return defineTool({
     name: 'dsh_omo_task',
-    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Role allow/deny filters and selected-category tools:false rules affect inherited global and ancestor-scope tools; category tools:true does not grant tools; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${ROLE_NAMES.join(', ')}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
+    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Role allow/deny filters and selected-category tools:false rules affect inherited global and ancestor-scope tools; category tools:true does not grant tools; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${activeRoleNames.join(', ')}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: {
-        type: 'string', enum: ROLE_NAMES, required: true,
+        type: 'string', enum: activeRoleNames, required: true,
         description: 'Specialist role matched to this task.',
       },
       task: {
@@ -403,6 +436,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren,
     },
     timeoutMs: 30_000,
     async execute(args, exec) {
+      if (!activeRoleSet.has(args?.role)) throw new Error(`Specialist role "${String(args?.role)}" is not available in dsh-omo.`)
       if (typeof args.task !== 'string' || args.task.trim().length === 0) throw new Error('Task must not be empty.')
       if (args.task.length > config.maxTaskChars) {
         throw new Error(`Task is ${args.task.length} characters; dsh-omo limit is ${config.maxTaskChars}.`)
@@ -456,7 +490,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren,
   })
 }
 
-function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, lifecycle, providerName, disabledOmoCommands) {
+function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet) {
   const continuationCommandGuidance = [
     disabledOmoCommands.has('omo-tasks')
       ? 'dsh-omo /omo-tasks is disabled by configuration'
@@ -467,10 +501,10 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, life
   ].join('; ')
   return defineTool({
     name: 'dsh_omo_task_continuable',
-    description: `Start a durable DSH continuable specialist session. ${continuationCommandGuidance}; this tool does not wait for or retrieve a final result. Continuable launches reject role/category/parent maxTokens ceilings because DSH RC2 does not preserve them across cold resume. Role allow/deny filters and selected-category tools:false rules affect inherited global and ancestor-scope tools; category tools:true does not grant tools; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${ROLE_NAMES.join(', ')}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
+    description: `Start a durable DSH continuable specialist session. ${continuationCommandGuidance}; this tool does not wait for or retrieve a final result. Continuable launches reject role/category/parent maxTokens ceilings because DSH RC2 does not preserve them across cold resume. Role allow/deny filters and selected-category tools:false rules affect inherited global and ancestor-scope tools; category tools:true does not grant tools; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${activeRoleNames.join(', ')}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
-      role: { type: 'string', enum: ROLE_NAMES, required: true, description: 'Specialist role matched to this task.' },
+      role: { type: 'string', enum: activeRoleNames, required: true, description: 'Specialist role matched to this task.' },
       task: { type: 'string', required: true, description: 'One self-contained task with a concrete expected result.' },
     },
     output: {
@@ -492,6 +526,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, life
     timeoutMs: 30_000,
     async execute(args, exec) {
       if (!config.enableContinuableTasks) throw new Error('Continuable tasks are disabled by dsh-omo configuration.')
+      if (!activeRoleSet.has(args?.role)) throw new Error(`Specialist role "${String(args?.role)}" is not available in dsh-omo.`)
       if (typeof args.task !== 'string' || args.task.trim().length === 0) throw new Error('Task must not be empty.')
       if (args.task.length > config.maxTaskChars) {
         throw new Error(`Task is ${args.task.length} characters; dsh-omo limit is ${config.maxTaskChars}.`)
@@ -550,7 +585,7 @@ async function listOmoLabelChildren(ctx, agent, signal) {
   return descendants.filter(child => child.parentId === agent.id && matchesOmoLabelNamespace(child))
 }
 
-function registerCommands(ctx, config, projectSkills, goalService, llmService, disabledOmoCommands) {
+function registerCommands(ctx, config, projectSkills, goalService, llmService, disabledOmoCommands, activeRoleNames) {
   let availableCommandNames = ''
   let taskCommandHelp = ''
   let skillRefreshHelp = ''
@@ -706,7 +741,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, d
       description: 'Show the installed DSH OMO-inspired specialist roles and available commands.',
       handler: () => ({
         kind: 'success',
-        text: `dsh-omo is active. Roles: ${ROLE_NAMES.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). DSH job tools: ${config.enableJobTools ? 'enabled' : 'disabled'} (current-Agent job monitoring only; not OMO background-agent results).${taskCommandHelp} Bundled skills: ${SKILLS.map(skill => skill.name).join(', ')}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
+        text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). DSH job tools: ${config.enableJobTools ? 'enabled' : 'disabled'} (current-Agent job monitoring only; not OMO background-agent results).${taskCommandHelp} Bundled skills: ${SKILLS.map(skill => skill.name).join(', ')}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
       }),
     },
   ]
@@ -774,7 +809,10 @@ export function apply(ctx, rawConfig) {
   assertPositiveInteger('maxResultChars', config.maxResultChars)
   const providerName = normalizeProvider(config.provider)
   const categoryRoutes = normalizeCategoryRoutes(config.categoryRoutes ?? [])
-  const roleRoutes = normalizeRoleRoutes(config.roleRoutes, categoryRoutes)
+  const disabledOmoRoles = normalizeDisabledOmoRoles(config.disabledOmoRoles ?? [])
+  const activeRoleNames = ROLE_NAMES.filter(role => !disabledOmoRoles.has(role))
+  const activeRoleSet = new Set(activeRoleNames)
+  const roleRoutes = normalizeRoleRoutes(config.roleRoutes, categoryRoutes, disabledOmoRoles)
   const disabledOmoCommands = normalizeDisabledOmoCommands(config.disabledOmoCommands ?? [])
   const projectSkillDirs = normalizeProjectSkillDirs(config.projectSkillDirs)
   const disabledSkills = Array.isArray(config.disabledSkills) ? [...config.disabledSkills] : []
@@ -784,8 +822,8 @@ export function apply(ctx, rawConfig) {
   const activeRuns = new Map()
   const lifecycle = { disposed: false }
 
-  ctx.tools.register(specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren, activeRuns, lifecycle, providerName))
-  if (config.enableContinuableTasks) ctx.tools.register(continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, lifecycle, providerName, disabledOmoCommands))
+  ctx.tools.register(specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet))
+  if (config.enableContinuableTasks) ctx.tools.register(continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet))
   if (config.enableTeamTools) {
     const disposeTeamTools = registerTeamTools(ctx, teamService)
     ctx.effect(() => disposeTeamTools, 'dsh-omo Agent Teams tools')
@@ -804,9 +842,9 @@ export function apply(ctx, rawConfig) {
     name: 'dsh-omo:specialist-orchestration',
     order: 5_200,
     interpolate: false,
-    text: buildUltraworkGuidance(disabledOmoCommands),
+    text: buildUltraworkGuidance(disabledOmoCommands, activeRoleNames),
   })
-  registerCommands(ctx, config, projectSkills, goalService, llmService, disabledOmoCommands)
+  registerCommands(ctx, config, projectSkills, goalService, llmService, disabledOmoCommands, activeRoleNames)
   if (config.enableSessionSearch) {
     const disposeSessionSearch = registerSessionSearchTool(ctx, sessionQueryService)
     ctx.effect(() => disposeSessionSearch, 'dsh-omo session search tool')

@@ -89,6 +89,7 @@ const baseConfig = {
   projectSkillDirs: ['.opencode/skills', '.claude/skills'],
   disabledSkills: [],
   disabledOmoCommands: [],
+  disabledOmoRoles: [],
   categoryRoutes: [],
   roleRoutes: [],
 }
@@ -100,6 +101,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).disabledSkills, [])
   assert.deepEqual(Config({}).disabledOmoCommands, [])
   assert.deepEqual(Config({ disabledOmoCommands: ['refactor', 'ulw'] }).disabledOmoCommands, ['refactor', 'ulw'])
+  assert.deepEqual(Config({}).disabledOmoRoles, [])
+  assert.deepEqual(Config({ disabledOmoRoles: ['architect', 'reviewer'] }).disabledOmoRoles, ['architect', 'reviewer'])
   assert.deepEqual(Config({}).categoryRoutes, [])
   const categoryConfig = Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true, promptAppend: 'Use a bounded budget.', description: 'A short chooser description.', tools: { read: false, bash: true } }] })
   assert.equal(categoryConfig.categoryRoutes[0].maxTokens, 128)
@@ -267,6 +270,59 @@ test('role directory and worker prompts are bounded to known roles', () => {
   assert.match(buildWorkerPrompt('reviewer', 'Review changes'), /finding/i)
   assert.throws(() => buildWorkerPrompt('missing', 'task'), /Unknown specialist role/)
   assert.throws(() => buildWorkerPrompt('explore', '  '), /must not be empty/)
+})
+
+test('disabledOmoRoles filters local role choices without disabling slash commands', async () => {
+  const disabled = ['architect', 'reviewer', 'security']
+  const fixture = makeContext()
+  apply(fixture.ctx, { ...baseConfig, enableContinuableTasks: true, disabledOmoRoles: disabled })
+  const activeRoles = ROLE_NAMES.filter(role => !disabled.includes(role))
+  const roleList = activeRoles.join(', ')
+  const oneShot = fixture.tools.get('dsh_omo_task')
+  const continuable = fixture.tools.get('dsh_omo_task_continuable')
+  assert.deepEqual(oneShot.parameters.properties.role.enum, activeRoles)
+  assert.deepEqual(continuable.parameters.properties.role.enum, activeRoles)
+  assert.equal(oneShot.description.match(/Roles: ([^.]+)\./u)?.[1], roleList)
+  assert.equal(continuable.description.match(/Roles: ([^.]+)\./u)?.[1], roleList)
+  const help = fixture.commands.get('omo').handler({}).text
+  assert.equal(help.match(/Roles: ([^.]+)\. Commands:/u)?.[1], roleList)
+  assert.ok(help.includes('/architect'), 'a same-named dsh-omo slash command is separate from specialist-role selection')
+  assert.equal(fixture.commands.has('architect'), true)
+  const prompt = fixture.sections[0].text
+  assert.equal(prompt.match(/Its roles are: ([^.]+)\./u)?.[1], roleList)
+  assert.doesNotMatch(prompt, /\*\*(?:architect|reviewer|security)\*\*/u)
+
+  const parent = { id: 'parent-agent' }
+  // defineTool validates the active-role enum before dispatching either handler.
+  for (const role of disabled) {
+    await assert.rejects(oneShot.execute({ role, task: 'Do a focused task' }, { agent: parent }), /invalid arguments/u)
+    await assert.rejects(continuable.execute({ role, task: 'Do a focused task' }, { agent: parent }), /invalid arguments/u)
+  }
+  assert.equal(fixture.starts.length, 0)
+  assert.equal(fixture.continuableStarts.length, 0)
+})
+
+test('rejects invalid disabledOmoRoles and disabled route assignments before registration', () => {
+  for (const disabledOmoRoles of ['reviewer', ['unknown'], ['/architect'], ['reviewer', 'reviewer'], Array(12).fill('reviewer'), ROLE_NAMES]) {
+    const fixture = makeContext()
+    assert.throws(() => apply(fixture.ctx, { ...baseConfig, disabledOmoRoles }), /disabledOmoRoles/u)
+    assert.equal(fixture.tools.size, 0)
+    assert.equal(fixture.commands.size, 0)
+    assert.equal(fixture.skills.size, 0)
+    assert.equal(fixture.skillProviders.size, 0)
+    assert.equal(fixture.sections.length, 0)
+    assert.equal(fixture.effects.length, 0)
+  }
+
+  const routed = makeContext()
+  assert.throws(
+    () => apply(routed.ctx, { ...baseConfig, disabledOmoRoles: ['architect'], roleRoutes: [{ role: 'architect' }] }),
+    /references a disabled specialist role/u,
+  )
+  assert.equal(routed.tools.size, 0)
+  assert.equal(routed.commands.size, 0)
+  assert.equal(routed.sections.length, 0)
+  assert.equal(routed.effects.length, 0)
 })
 
 test('mounts specialist controls and caps the untrusted worker body', async () => {
