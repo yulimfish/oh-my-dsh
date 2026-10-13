@@ -1,9 +1,11 @@
+import { normalizeCategoryPromptAppend } from './roles.js'
+
 const MAX_CATEGORY_ROUTES = 32
 const MAX_CATEGORY_NAME_CHARS = 64
 const MAX_PROVIDER_CHARS = 128
 const MAX_MODEL_CHARS = 256
 const MAX_REASONING_EFFORT_CHARS = 64
-const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'disable'])
+const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'disable', 'promptAppend'])
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u
 const CATEGORY_ROUTE_DATA = new WeakMap()
 
@@ -65,8 +67,8 @@ function createReadonlyRegistry(routes) {
 
 /**
  * Validate one provider/model route per category plus optional reasoning,
- * positive safe-integer token ceiling, and task-delegation disable flag. Routes
- * cannot declare chains or fallback.
+ * positive safe-integer token ceiling, task-delegation disable flag, and bounded
+ * literal prompt guidance. Routes cannot declare chains or fallback.
  */
 export function normalizeCategoryRoutes(entries) {
   if (!Array.isArray(entries) || entries.length > MAX_CATEGORY_ROUTES) {
@@ -108,6 +110,7 @@ export function normalizeCategoryRoutes(entries) {
     if (typeof disable !== 'boolean') {
       throw new TypeError(`category route "${name}" disable must be a boolean`)
     }
+    const promptAppend = normalizeCategoryPromptAppend(entry.promptAppend, name)
 
     routes.set(name, Object.freeze({
       name,
@@ -116,6 +119,7 @@ export function normalizeCategoryRoutes(entries) {
       ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
       disable,
+      ...(promptAppend !== undefined ? { promptAppend } : {}),
     }))
   }
 
@@ -138,7 +142,7 @@ function normalizeRolePin(roleRoute) {
 /**
  * Resolve explicit category over the role's default category. A role's explicit
  * provider/model pin, reasoning effort, and maxTokens override the category;
- * role-only settings such as tool filters and promptAppend are preserved.
+ * category promptAppend is carried separately from role promptAppend and filters.
  */
 export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute) {
   if (roleRoute !== undefined && !isRecord(roleRoute)) {
@@ -196,5 +200,7 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
   const maxTokens = roleMaxTokens ?? categoryRoute.maxTokens
   if (maxTokens === undefined) delete resolved.maxTokens
   else resolved.maxTokens = maxTokens
+  if (categoryRoute.promptAppend === undefined) delete resolved.categoryPromptAppend
+  else resolved.categoryPromptAppend = categoryRoute.promptAppend
   return Object.freeze(resolved)
 }

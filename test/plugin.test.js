@@ -98,9 +98,10 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).projectSkillDirs, ['.opencode/skills', '.claude/skills'])
   assert.deepEqual(Config({}).disabledSkills, [])
   assert.deepEqual(Config({}).categoryRoutes, [])
-  const categoryConfig = Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true }] })
+  const categoryConfig = Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true, promptAppend: 'Use a bounded budget.' }] })
   assert.equal(categoryConfig.categoryRoutes[0].maxTokens, 128)
   assert.equal(categoryConfig.categoryRoutes[0].disable, true)
+  assert.equal(categoryConfig.categoryRoutes[0].promptAppend, 'Use a bounded budget.')
   assert.deepEqual(Config({ roleRoutes: [{ role: 'reviewer', denyTools: ['bash'] }] }).roleRoutes[0].denyTools, ['bash'])
   assert.equal(Config({}).enableTeamTools, false)
   assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
@@ -573,6 +574,61 @@ test('forwards bounded role promptAppend to one-shot and continuable task prompt
 
   await oneShot.execute({ role: 'explore', task: 'Explore without appended guidance' }, { agent: parent, signal })
   assert.doesNotMatch(fixture.starts[1].request.prompt[0].text, /Additional role guidance/u)
+})
+
+test('composes the selected category promptAppend with additive role guidance in both task modes', async () => {
+  const fixture = makeContext()
+  const categoryA = 'Category A says focus on implementation structure.'
+  const categoryB = 'Category B is literal: file:///tmp/category-b.md'
+  const roleAppend = 'Role guidance asks for concise evidence.'
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    categoryRoutes: [
+      { name: 'category-a', provider: 'p', model: 'm', promptAppend: categoryA },
+      { name: 'category-b', provider: 'p', model: 'm', promptAppend: categoryB },
+    ],
+    roleRoutes: [{ role: 'reviewer', category: 'category-a', promptAppend: roleAppend }],
+  })
+  const oneShot = fixture.tools.get('dsh_omo_task')
+  const continuable = fixture.tools.get('dsh_omo_task_continuable')
+  const parent = { id: 'parent-agent', followup() {} }
+  const signal = new AbortController().signal
+  const task = 'Review the implementation'
+
+  await oneShot.execute({ role: 'reviewer', category: 'category-b', task }, { agent: parent, signal })
+  await oneShot.execute({ role: 'reviewer', task: 'Use the role default category' }, { agent: parent, signal })
+  await continuable.execute({ role: 'reviewer', category: 'category-b', task }, { agent: parent, signal })
+  await oneShot.execute({ role: 'quick', category: 'category-b', task: 'Use category guidance only' }, { agent: parent, signal })
+  await oneShot.execute({ role: 'quick', task: 'No category guidance' }, { agent: parent, signal })
+
+  const explicitPrompt = fixture.starts[0].request.prompt[0].text
+  const defaultPrompt = fixture.starts[1].request.prompt[0].text
+  const continuablePrompt = fixture.continuableStarts[0].request.prompt[0].text
+  const categoryOnlyPrompt = fixture.starts[2].request.prompt[0].text
+  const noCategoryPrompt = fixture.starts[3].request.prompt[0].text
+  assert.equal(explicitPrompt, continuablePrompt)
+  assert.ok(explicitPrompt.includes(`## Additional category guidance\n${categoryB}`))
+  assert.ok(explicitPrompt.includes(`## Additional role guidance\n${roleAppend}`))
+  assert.ok(explicitPrompt.indexOf('## Additional category guidance') < explicitPrompt.indexOf('## Additional role guidance'))
+  assert.ok(!explicitPrompt.includes(categoryA), 'explicit category replaces the role default category guidance')
+  assert.ok(defaultPrompt.includes(`## Additional category guidance\n${categoryA}`))
+  assert.ok(defaultPrompt.includes(`## Additional role guidance\n${roleAppend}`))
+  assert.ok(categoryOnlyPrompt.includes(`## Additional category guidance\n${categoryB}`))
+  assert.ok(!categoryOnlyPrompt.includes('## Additional role guidance'))
+  assert.ok(!noCategoryPrompt.includes('Additional category guidance'))
+  assert.ok(!noCategoryPrompt.includes('Additional role guidance'))
+  assert.equal(noCategoryPrompt, buildWorkerPrompt('quick', 'No category guidance'))
+  assert.ok(explicitPrompt.includes('file:///tmp/category-b.md'), 'file references are literal and not resolved')
+})
+
+test('rejects invalid category promptAppend before plugin registration', () => {
+  const fixture = makeContext()
+  assert.throws(() => apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{ name: 'research', provider: 'p', model: 'm', promptAppend: 'é'.repeat(2049) }],
+  }), /Category route "research" promptAppend must not exceed 4096 UTF-8 bytes/u)
+  assert.equal(fixture.tools.size, 0)
 })
 
 test('resolves category routes for one-shot and continuable delegation with role-route precedence', async () => {

@@ -65,6 +65,21 @@ test('adds trimmed multiline role guidance before fixed worker instructions', ()
   assert.equal(prompt, expected)
 })
 
+test('composes literal category guidance before additive role guidance', () => {
+  const categoryAppend = 'file:///tmp/category-guidance.md'
+  const roleAppend = 'Cite changed files in each finding.'
+  const prompt = buildWorkerPrompt('plan-consultant', 'Review the implementation', roleAppend, categoryAppend)
+
+  assert.ok(prompt.includes(`## Additional category guidance\n${categoryAppend}`))
+  assert.ok(prompt.includes(`## Additional role guidance\n${roleAppend}`))
+  assert.ok(prompt.indexOf('## Additional category guidance') < prompt.indexOf('## Additional role guidance'))
+  assert.ok(prompt.indexOf('## Additional role guidance') < prompt.indexOf('Work only on the assigned task.'))
+
+  const categoryOnly = buildWorkerPrompt('plan-reviewer', 'Review the design', undefined, 'Focus on operational risks.')
+  assert.ok(categoryOnly.includes('## Additional category guidance\nFocus on operational risks.'))
+  assert.ok(!categoryOnly.includes('## Additional role guidance'))
+})
+
 test('omits undefined and whitespace-only role guidance without changing the prompt', () => {
   const defaultPrompt = buildWorkerPrompt('plan-reviewer', 'Review the proposal')
 

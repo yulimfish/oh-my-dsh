@@ -130,6 +130,44 @@ test('disabled categories are omitted from selection and rejected when resolved'
   )
 })
 
+test('normalizes bounded literal category guidance and carries the selected append separately', () => {
+  const categoryRoutes = normalizeCategoryRoutes([
+    { name: 'build', provider: 'p', model: 'm', promptAppend: '  Prefer build-mode analysis.  ' },
+    { name: 'review', provider: 'p2', model: 'm2', promptAppend: 'file:///tmp/category-guidance.md' },
+    { name: 'blank', provider: 'p3', model: 'm3', promptAppend: ' \t\r\n ' },
+  ])
+  const roleRoute = Object.freeze({ category: 'build', promptAppend: 'Cite the changed files.' })
+
+  assert.equal(categoryRoutes.get('build').promptAppend, 'Prefer build-mode analysis.')
+  assert.equal(categoryRoutes.get('blank').promptAppend, undefined)
+  const explicit = resolveCategoryRoute(categoryRoutes, 'review', roleRoute)
+  assert.equal(explicit.categoryPromptAppend, 'file:///tmp/category-guidance.md')
+  assert.equal(explicit.promptAppend, 'Cite the changed files.')
+  const defaulted = resolveCategoryRoute(categoryRoutes, undefined, roleRoute)
+  assert.equal(defaulted.categoryPromptAppend, 'Prefer build-mode analysis.')
+  assert.equal(defaulted.promptAppend, 'Cite the changed files.')
+  const maximumAppend = 'é'.repeat(2048)
+  assert.equal(normalizeCategoryRoutes([
+    { name: 'limit', provider: 'p4', model: 'm4', promptAppend: maximumAppend },
+  ]).get('limit').promptAppend, maximumAppend)
+
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', promptAppend: 42 },
+  ]), /Category route "bad" promptAppend must be a string/u)
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', promptAppend: 'é'.repeat(2049) },
+  ]), /4096 UTF-8 bytes/u)
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', promptAppend: ' '.repeat(4097) },
+  ]), /4096 UTF-8 bytes/u)
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', promptAppend: 'before\u0000after' },
+  ]), /disallowed control characters/u)
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', promptAppend: 'before\u009fafter' },
+  ]), /disallowed control characters/u)
+})
+
 test('normalizer registry, category routes, and resolved routes are immutable', () => {
   const categoryRoutes = routes()
   const categoryRoute = categoryRoutes.get('build')
