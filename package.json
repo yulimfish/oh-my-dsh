@@ -25,7 +25,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "node --check src/index.js && node --check src/project-skills.js && node --check src/roles.js && node --check src/category-routes.js && node --check src/refactor-command.js && node --check src/skills.js && node --check src/goals.js && node --check src/model-capabilities.js && node --check src/teams.js && node --check src/session-search.js && node --check src/session-read.js && node --check src/session-list.js && node --check src/session-info.js && node --check src/doctor.js && node --test",
+    "check": "node --check src/index.js && node --check src/project-skills.js && node --check src/roles.js && node --check src/category-routes.js && node --check src/refactor-command.js && node --check src/skills.js && node --check src/goals.js && node --check src/model-capabilities.js && node --check src/teams.js && node --check src/session-search.js && node --check src/session-read.js && node --check src/session-list.js && node --check src/session-info.js && node --check src/job-tools.js && node --check src/doctor.js && node --test",
     "test": "node --test",
     "pack:check": "pnpm pack --pack-destination .artifacts"
   },

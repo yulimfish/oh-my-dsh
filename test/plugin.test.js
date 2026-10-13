@@ -85,6 +85,7 @@ const baseConfig = {
   enableSessionRead: false,
   enableSessionList: false,
   enableSessionInfo: false,
+  enableJobTools: false,
   projectSkillDirs: ['.opencode/skills', '.claude/skills'],
   disabledSkills: [],
   categoryRoutes: [],
@@ -107,6 +108,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableSessionList: true }).enableSessionList, true)
   assert.equal(Config({}).enableSessionInfo, false)
   assert.equal(Config({ enableSessionInfo: true }).enableSessionInfo, true)
+  assert.equal(Config({}).enableJobTools, false)
+  assert.equal(Config({ enableJobTools: true }).enableJobTools, true)
 })
 
 test('verifies RC2 parent option inheritance and continuable descriptor omissions', () => {
@@ -355,6 +358,33 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   assert.ok(sessionInfoEffect)
   await sessionInfoEffect.dispose()
   assert.equal(enabledSessionInfoFixture.tools.has('session_info'), false)
+
+  const unavailableJobToolsFixture = makeContext()
+  assert.throws(
+    () => apply(unavailableJobToolsFixture.ctx, { ...baseConfig, enableJobTools: true }),
+    /enableJobTools requires the optional DSH jobController\.list and jobController\.follow methods/u,
+  )
+  assert.equal(unavailableJobToolsFixture.tools.size, 0, 'missing Host job methods fail before plugin registrations')
+
+  const partialJobToolsFixture = makeContext({ services: { jobController: { list() {} } } })
+  assert.throws(
+    () => apply(partialJobToolsFixture.ctx, { ...baseConfig, enableJobTools: true }),
+    /enableJobTools requires the optional DSH jobController\.list and jobController\.follow methods/u,
+  )
+  assert.equal(partialJobToolsFixture.tools.size, 0, 'partial Host job service fails before plugin registrations')
+
+  const jobController = { list() {}, follow() {} }
+  const enabledJobToolsFixture = makeContext({ services: { jobController } })
+  apply(enabledJobToolsFixture.ctx, { ...baseConfig, enableJobTools: true })
+  assert.ok(enabledJobToolsFixture.tools.has('dsh_omo_job_list'))
+  assert.ok(enabledJobToolsFixture.tools.has('dsh_omo_job_follow'))
+  assert.equal(enabledJobToolsFixture.tools.has('job_kill'), false, 'the plugin does not register a job-kill adapter')
+  assert.match(enabledJobToolsFixture.commands.get('omo').handler().text, /DSH job tools: enabled/u)
+  const jobToolsEffect = enabledJobToolsFixture.effects.find(effect => effect.label === 'dsh-omo Host job tools')
+  assert.ok(jobToolsEffect)
+  await jobToolsEffect.dispose()
+  assert.equal(enabledJobToolsFixture.tools.has('dsh_omo_job_list'), false)
+  assert.equal(enabledJobToolsFixture.tools.has('dsh_omo_job_follow'), false)
 
   const teamCalls = []
   const member = { id: 'member-1', name: 'builder', role: 'teammate', status: 'running', diagnostics: [] }

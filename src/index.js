@@ -10,6 +10,7 @@ import { registerSessionSearchTool } from './session-search.js'
 import { registerSessionReadTool } from './session-read.js'
 import { registerSessionListTool } from './session-list.js'
 import { registerSessionInfoTool } from './session-info.js'
+import { registerJobTools } from './job-tools.js'
 import { createModelCapabilitiesCommand } from './model-capabilities.js'
 import { normalizeCategoryRoutes, resolveCategoryRoute } from './category-routes.js'
 import { buildRefactorDirective, parseRefactorInput, REFACTOR_COMMAND_HINT } from './refactor-command.js'
@@ -34,6 +35,7 @@ export const Config = z.object({
   enableSessionRead: z.boolean().default(false),
   enableSessionList: z.boolean().default(false),
   enableSessionInfo: z.boolean().default(false),
+  enableJobTools: z.boolean().default(false),
   projectSkillDirs: z.array(z.string()).default([...DEFAULT_PROJECT_SKILL_DIRS]),
   disabledSkills: z.array(z.string()).default([]),
   categoryRoutes: z.array(z.object({
@@ -603,7 +605,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService) {
       description: 'Show the installed DSH OMO-inspired specialist roles and available commands.',
       handler: () => ({
         kind: 'success',
-        text: `dsh-omo is active. Roles: ${ROLE_NAMES.join(', ')}. Commands: ${goalService ? '/goal, ' : ''}${stopContinuationCommand ? '/stop-continuation, ' : ''}${llmService ? '/omo-models, ' : ''}/ulw, /ultrawork, /architect, /review, /handoff, /refactor, /remove-ai-slops, /omo-tasks, /omo-interrupt, /omo-skills-refresh. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). /omo-tasks uses a caller-supplied label prefix, not verified plugin origin, and DSH reports residency rather than completion. Bundled skills: ${SKILLS.map(skill => skill.name).join(', ')}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}; use /omo-skills-refresh to invalidate catalog cache. allowTools filters inherited global tools only; enforce hard boundaries with DSH policy/guards.`,
+        text: `dsh-omo is active. Roles: ${ROLE_NAMES.join(', ')}. Commands: ${goalService ? '/goal, ' : ''}${stopContinuationCommand ? '/stop-continuation, ' : ''}${llmService ? '/omo-models, ' : ''}/ulw, /ultrawork, /architect, /review, /handoff, /refactor, /remove-ai-slops, /omo-tasks, /omo-interrupt, /omo-skills-refresh. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). DSH job tools: ${config.enableJobTools ? 'enabled' : 'disabled'} (current-Agent job monitoring only; not OMO background-agent results). /omo-tasks uses a caller-supplied label prefix, not verified plugin origin, and DSH reports residency rather than completion. Bundled skills: ${SKILLS.map(skill => skill.name).join(', ')}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}; use /omo-skills-refresh to invalidate catalog cache. allowTools filters inherited global tools only; enforce hard boundaries with DSH policy/guards.`,
       }),
     },
   ]
@@ -617,6 +619,11 @@ export function apply(ctx, rawConfig) {
   const teamService = config.enableTeamTools ? optionalService(ctx, 'agentTeams') : undefined
   if (config.enableTeamTools && !teamService) {
     throw new Error('dsh-omo: enableTeamTools requires the optional DSH agentTeams service')
+  }
+  const jobController = config.enableJobTools ? optionalService(ctx, 'jobController') : undefined
+  if (config.enableJobTools && (!jobController
+    || typeof jobController.list !== 'function' || typeof jobController.follow !== 'function')) {
+    throw new Error('dsh-omo: enableJobTools requires the optional DSH jobController.list and jobController.follow methods')
   }
   const sessionToolsEnabled = config.enableSessionSearch || config.enableSessionRead || config.enableSessionList || config.enableSessionInfo
   const sessionQueryService = sessionToolsEnabled ? optionalService(ctx, 'sessionQuery') : undefined
@@ -696,6 +703,10 @@ export function apply(ctx, rawConfig) {
   if (config.enableSessionInfo) {
     const disposeSessionInfo = registerSessionInfoTool(ctx, sessionQueryService)
     ctx.effect(() => disposeSessionInfo, 'dsh-omo session info tool')
+  }
+  if (config.enableJobTools) {
+    const disposeJobTools = registerJobTools(ctx, jobController)
+    ctx.effect(() => disposeJobTools, 'dsh-omo Host job tools')
   }
   ctx.effect(() => async () => {
     lifecycle.disposed = true
