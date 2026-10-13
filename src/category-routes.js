@@ -3,7 +3,7 @@ const MAX_CATEGORY_NAME_CHARS = 64
 const MAX_PROVIDER_CHARS = 128
 const MAX_MODEL_CHARS = 256
 const MAX_REASONING_EFFORT_CHARS = 64
-const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort'])
+const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens'])
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u
 const CATEGORY_ROUTE_DATA = new WeakMap()
 
@@ -25,6 +25,14 @@ function normalizeString(value, label, maxLength) {
 
 function normalizeCategoryName(value, label = 'category name') {
   return normalizeString(value, label, MAX_CATEGORY_NAME_CHARS)
+}
+
+function normalizeMaxTokens(value, label) {
+  if (value === undefined) return undefined
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError(`${label} must be a positive safe integer`)
+  }
+  return value
 }
 
 function createReadonlyRegistry(routes) {
@@ -56,9 +64,8 @@ function createReadonlyRegistry(routes) {
 }
 
 /**
- * Validate and normalize one provider/model route per named category.
- * The returned registry exposes read-only Map-like lookup methods; its routes
- * are immutable and category entries cannot declare chains, fallback, or tokens.
+ * Validate one provider/model route per named category plus optional reasoning
+ * and a positive safe-integer token ceiling. Routes cannot declare chains or fallback.
  */
 export function normalizeCategoryRoutes(entries) {
   if (!Array.isArray(entries) || entries.length > MAX_CATEGORY_ROUTES) {
@@ -95,12 +102,14 @@ export function normalizeCategoryRoutes(entries) {
     const reasoningEffort = rawReasoningEffort === undefined
       ? undefined
       : normalizeString(rawReasoningEffort, `category route "${name}" reasoningEffort`, MAX_REASONING_EFFORT_CHARS)
+    const maxTokens = normalizeMaxTokens(entry.maxTokens, `category route "${name}" maxTokens`)
 
     routes.set(name, Object.freeze({
       name,
       provider,
       model,
       ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
     }))
   }
 
@@ -122,8 +131,8 @@ function normalizeRolePin(roleRoute) {
 
 /**
  * Resolve explicit category over the role's default category. A role's explicit
- * provider/model pin and reasoning effort override the category; role-only
- * settings such as maxTokens, tool filters, and promptAppend are preserved.
+ * provider/model pin, reasoning effort, and maxTokens override the category;
+ * role-only settings such as tool filters and promptAppend are preserved.
  */
 export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute) {
   if (roleRoute !== undefined && !isRecord(roleRoute)) {
@@ -161,6 +170,9 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
   const roleReasoningEffort = rawRoleReasoningEffort === undefined
     ? undefined
     : normalizeString(rawRoleReasoningEffort, 'role route reasoningEffort', MAX_REASONING_EFFORT_CHARS)
+  const roleMaxTokens = roleRoute === undefined
+    ? undefined
+    : normalizeMaxTokens(roleRoute.maxTokens, 'role route maxTokens')
 
   const resolved = {
     ...(roleRoute ?? {}),
@@ -171,5 +183,8 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
   const reasoningEffort = roleReasoningEffort ?? categoryRoute.reasoningEffort
   if (reasoningEffort === undefined) delete resolved.reasoningEffort
   else resolved.reasoningEffort = reasoningEffort
+  const maxTokens = roleMaxTokens ?? categoryRoute.maxTokens
+  if (maxTokens === undefined) delete resolved.maxTokens
+  else resolved.maxTokens = maxTokens
   return Object.freeze(resolved)
 }

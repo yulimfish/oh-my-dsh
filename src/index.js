@@ -43,6 +43,7 @@ export const Config = z.object({
     provider: z.string().required(),
     model: z.string().required(),
     reasoningEffort: z.string(),
+    maxTokens: z.number(),
   })).default([]),
   roleRoutes: z.array(z.object({
     role: z.string().required(),
@@ -275,7 +276,7 @@ function categoryParameter(categoryRoutes) {
     category: {
       type: 'string',
       enum: [...categoryRoutes.keys()],
-      description: 'Optional configured category selecting one fixed provider/model route; role route pins take precedence.',
+      description: 'Optional configured category selecting one fixed provider/model/reasoning route with an optional maxTokens ceiling; explicit role route settings take precedence.',
     },
   }
 }
@@ -306,7 +307,7 @@ function taskPrompt(role, task, promptAppend) {
 function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren, activeRuns, lifecycle, providerName) {
   return defineTool({
     name: 'dsh_omo_task',
-    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Role allow/deny filters affect inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${ROLE_NAMES.join(', ')}.${categoryRoutes.size > 0 ? ` Configured single-route categories: ${[...categoryRoutes.keys()].join(', ')}; category selects only the model route, while the role controls the specialist prompt.` : ''}`,
+    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Role allow/deny filters affect inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${ROLE_NAMES.join(', ')}.${categoryRoutes.size > 0 ? ` Configured single-route categories: ${[...categoryRoutes.keys()].join(', ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; the role controls the specialist prompt, and explicit role settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: {
@@ -390,7 +391,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren,
 function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, lifecycle, providerName) {
   return defineTool({
     name: 'dsh_omo_task_continuable',
-    description: `Start a durable DSH continuable specialist session. It is listed with /omo-tasks and can be interrupted with /omo-interrupt; this tool does not wait for or retrieve a final result. Role allow/deny filters affect inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${ROLE_NAMES.join(', ')}.${categoryRoutes.size > 0 ? ` Configured single-route categories: ${[...categoryRoutes.keys()].join(', ')}; category selects only the model route, while the role controls the specialist prompt.` : ''}`,
+    description: `Start a durable DSH continuable specialist session. It is listed with /omo-tasks and can be interrupted with /omo-interrupt; this tool does not wait for or retrieve a final result. Continuable launches reject role/category/parent maxTokens ceilings because DSH RC2 does not preserve them across cold resume. Role allow/deny filters affect inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${ROLE_NAMES.join(', ')}.${categoryRoutes.size > 0 ? ` Configured single-route categories: ${[...categoryRoutes.keys()].join(', ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; the role controls the specialist prompt, and explicit role settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: { type: 'string', enum: ROLE_NAMES, required: true, description: 'Specialist role matched to this task.' },
@@ -426,7 +427,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, life
       }
       const route = resolveCategoryRoute(categoryRoutes, args.category, roleRoutes.get(args.role))
       if (route?.maxTokens !== undefined || exec.agent.options?.maxTokens !== undefined) {
-        throw new Error('Continuable tasks cannot set or inherit role/parent maxTokens: DSH RC2 does not preserve this ceiling across cold resume.')
+        throw new Error('Continuable tasks cannot set or inherit role/category/parent maxTokens: DSH RC2 does not preserve this ceiling across cold resume.')
       }
       const provider = typeof ctx.subagents.getProvider === 'function'
         ? ctx.subagents.getProvider(providerName)

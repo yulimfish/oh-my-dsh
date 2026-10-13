@@ -98,6 +98,7 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).projectSkillDirs, ['.opencode/skills', '.claude/skills'])
   assert.deepEqual(Config({}).disabledSkills, [])
   assert.deepEqual(Config({}).categoryRoutes, [])
+  assert.equal(Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128 }] }).categoryRoutes[0].maxTokens, 128)
   assert.deepEqual(Config({ roleRoutes: [{ role: 'reviewer', denyTools: ['bash'] }] }).roleRoutes[0].denyTools, ['bash'])
   assert.equal(Config({}).enableTeamTools, false)
   assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
@@ -619,6 +620,61 @@ test('resolves category routes for one-shot and continuable delegation with role
   assert.equal(fixture.starts.length, 2, 'invalid category is rejected before child start and reservation')
 })
 
+test('applies category maxTokens to one-shot routes and rejects unpersisted continuation ceilings', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 8,
+    enableContinuableTasks: true,
+    categoryRoutes: [
+      { name: 'build', provider: 'build-provider', model: 'build-model', maxTokens: 2048 },
+      { name: 'review', provider: 'review-provider', model: 'review-model', maxTokens: 4096 },
+    ],
+    roleRoutes: [
+      { role: 'librarian', category: 'build' },
+      { role: 'reviewer', category: 'build', maxTokens: 6144 },
+    ],
+  })
+  const oneShot = fixture.tools.get('dsh_omo_task')
+  const continuable = fixture.tools.get('dsh_omo_task_continuable')
+  const parent = { id: 'parent-agent', followup() {} }
+  const signal = new AbortController().signal
+
+  await oneShot.execute({ role: 'librarian', task: 'Use the default budget category' }, { agent: parent, signal })
+  await oneShot.execute({ role: 'librarian', category: 'review', task: 'Use the explicit review budget' }, { agent: parent, signal })
+  await oneShot.execute({ role: 'reviewer', category: 'review', task: 'Role budget overrides the explicit category' }, { agent: parent, signal })
+  await oneShot.execute({ role: 'reviewer', task: 'Role budget overrides its default category' }, { agent: parent, signal })
+  await oneShot.execute({ role: 'quick', task: 'Do not select a category budget' }, { agent: parent, signal })
+
+  assert.deepEqual(fixture.starts[0].request.agentOptions, {
+    provider: 'build-provider', model: 'build-model', maxTokens: 2048,
+  })
+  assert.deepEqual(fixture.starts[1].request.agentOptions, {
+    provider: 'review-provider', model: 'review-model', maxTokens: 4096,
+  })
+  assert.deepEqual(fixture.starts[2].request.agentOptions, {
+    provider: 'review-provider', model: 'review-model', maxTokens: 6144,
+  })
+  assert.deepEqual(fixture.starts[3].request.agentOptions, {
+    provider: 'build-provider', model: 'build-model', maxTokens: 6144,
+  })
+  assert.equal(Object.hasOwn(fixture.starts[4].request, 'agentOptions'), false)
+
+  await assert.rejects(continuable.execute(
+    { role: 'quick', category: 'review', task: 'Do not persist category maxTokens' },
+    { agent: parent, signal },
+  ), /role\/category\/parent maxTokens/u)
+  await assert.rejects(continuable.execute(
+    { role: 'reviewer', task: 'Do not persist role maxTokens' },
+    { agent: parent, signal },
+  ), /role\/category\/parent maxTokens/u)
+  await assert.rejects(continuable.execute(
+    { role: 'quick', task: 'Do not persist inherited parent maxTokens' },
+    { agent: { id: 'parent-agent', options: { maxTokens: 512 } }, signal },
+  ), /role\/category\/parent maxTokens/u)
+  assert.equal(fixture.continuableStarts.length, 0, 'token ceilings reject before DSH continuation starts')
+})
+
 test('rejects unknown role category assignments before plugin registration', () => {
   const fixture = makeContext()
   assert.throws(() => apply(fixture.ctx, {
@@ -626,6 +682,13 @@ test('rejects unknown role category assignments before plugin registration', () 
     roleRoutes: [{ role: 'explore', category: 'missing' }],
   }), /references unknown category/u)
   assert.equal(fixture.tools.size, 0)
+
+  const invalidCategoryTokens = makeContext()
+  assert.throws(() => apply(invalidCategoryTokens.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{ name: 'build', provider: 'p', model: 'm', maxTokens: 1.5 }],
+  }), /category route "build" maxTokens must be a positive safe integer/u)
+  assert.equal(invalidCategoryTokens.tools.size, 0)
 })
 
 test('preserves an empty inherited-tool allowlist in one-shot and continuable requests', async () => {
@@ -774,7 +837,7 @@ test('uses the DSH continuation seam only when enabled and rejects unpersisted t
   await assert.rejects(inheritedTokenBound.tools.get('dsh_omo_task_continuable').execute(
     { role: 'explore', task: 'Persist this task' },
     { agent: { id: 'parent-agent', options: { maxTokens: 512 } }, signal: new AbortController().signal },
-  ), /set or inherit role\/parent maxTokens/)
+  ), /set or inherit role\/category\/parent maxTokens/)
   assert.equal(inheritedTokenBound.continuableStarts.length, 0)
 
   const tokenBound = makeContext()

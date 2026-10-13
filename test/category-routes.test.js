@@ -3,8 +3,8 @@ import test from 'node:test'
 import { normalizeCategoryRoutes, resolveCategoryRoute } from '../src/category-routes.js'
 
 const routes = () => normalizeCategoryRoutes([
-  { name: 'build', provider: 'provider-build', model: 'model-build', reasoningEffort: 'medium' },
-  { name: 'review', provider: 'provider-review', model: 'model-review', reasoningEffort: 'low' },
+  { name: 'build', provider: 'provider-build', model: 'model-build', reasoningEffort: 'medium', maxTokens: 2048 },
+  { name: 'review', provider: 'provider-review', model: 'model-review', reasoningEffort: 'low', maxTokens: 1024 },
 ])
 
 test('normalizes immutable single provider/model routes and rejects invalid category entries', () => {
@@ -24,9 +24,12 @@ test('normalizes immutable single provider/model routes and rejects invalid cate
     { name: 'build', provider: 'p', model: 'm' },
     { name: ' build ', provider: 'p2', model: 'm2' },
   ]), /duplicate category route/u)
-  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', maxTokens: 100 }]), /unsupported field.*maxTokens/u)
+  for (const maxTokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY, '100']) {
+    assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', maxTokens }]), /maxTokens must be a positive safe integer/u)
+  }
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', fallback: ['p2/m2'] }]), /unsupported field.*fallback/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', chains: [] }]), /unsupported field.*chains/u)
+  assert.throws(() => resolveCategoryRoute(routes(), 'build', { maxTokens: 1.5 }), /role route maxTokens must be a positive safe integer/u)
 })
 
 test('resolves explicit category before the role default category', () => {
@@ -38,11 +41,13 @@ test('resolves explicit category before the role default category', () => {
   assert.equal(explicit.provider, 'provider-review')
   assert.equal(explicit.model, 'model-review')
   assert.equal(explicit.reasoningEffort, 'low')
+  assert.equal(explicit.maxTokens, 1024)
 
   const defaulted = resolveCategoryRoute(categoryRoutes, undefined, roleRoute)
   assert.equal(defaulted.category, 'build')
   assert.equal(defaulted.provider, 'provider-build')
   assert.equal(defaulted.model, 'model-build')
+  assert.equal(defaulted.maxTokens, 2048)
 })
 
 test('explicit per-role provider/model and reasoning settings override a category route', () => {
@@ -72,6 +77,7 @@ test('explicit per-role provider/model and reasoning settings override a categor
 test('preserves category reasoning when a role has no reasoning override', () => {
   const resolved = resolveCategoryRoute(routes(), 'build', { allowTools: ['read'], maxTokens: 512 })
   assert.equal(resolved.reasoningEffort, 'medium')
+  assert.equal(resolved.maxTokens, 512)
 })
 
 test('omitted category with no role default preserves legacy role-route behavior', () => {
@@ -114,7 +120,9 @@ test('normalizer registry, category routes, and resolved routes are immutable', 
   assert.equal(categoryRoutes.size, 2)
   assert.equal(categoryRoutes.has('build'), true)
   assert.equal(categoryRoutes.set, undefined)
+  assert.equal(categoryRoute.maxTokens, 2048)
   assert.equal(Object.isFrozen(categoryRoute), true)
+  assert.equal(resolved.maxTokens, 128)
   assert.equal(Object.isFrozen(resolved), true)
   assert.throws(() => { categoryRoute.provider = 'mutated' }, TypeError)
   assert.throws(() => { resolved.provider = 'mutated' }, TypeError)
