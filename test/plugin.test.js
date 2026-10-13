@@ -591,7 +591,7 @@ test('rejects unknown role category assignments before plugin registration', () 
   assert.equal(fixture.tools.size, 0)
 })
 
-test('preserves an empty inherited-global allowlist in one-shot and continuable requests', async () => {
+test('preserves an empty inherited-tool allowlist in one-shot and continuable requests', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
     ...baseConfig,
