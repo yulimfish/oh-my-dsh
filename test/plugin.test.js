@@ -106,6 +106,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({}).enabledProjectSkills, undefined)
   assert.equal(Config({ enabledProjectSkills: null }).enabledProjectSkills, null)
   assert.deepEqual(Config({ enabledProjectSkills: ['incident-response'] }).enabledProjectSkills, ['incident-response'])
+  assert.deepEqual(Config({}).disabledProjectSkills, [])
+  assert.deepEqual(Config({ disabledProjectSkills: ['legacy-project-skill'] }).disabledProjectSkills, ['legacy-project-skill'])
   assert.deepEqual(Config({}).categoryRoutes, [])
   const categoryConfig = Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true, promptAppend: 'Use a bounded budget.', description: 'A short chooser description.', tools: { read: false, bash: true } }] })
   assert.equal(categoryConfig.categoryRoutes[0].maxTokens, 128)
@@ -128,9 +130,13 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableJobTools: true }).enableJobTools, true)
 })
 
-test('enabledProjectSkills configures only the project provider and preserves bundled registrations', () => {
+test('project-skill filters configure only the project provider and preserve bundled registrations', () => {
   const fixture = makeContext()
-  apply(fixture.ctx, { ...baseConfig, enabledProjectSkills: ['incident-response'] })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enabledProjectSkills: ['incident-response'],
+    disabledProjectSkills: ['legacy-project-skill'],
+  })
   assert.deepEqual([...fixture.skills.keys()], SKILLS.map(skill => skill.name))
   assert.ok(fixture.skillProviders.has('dsh-omo-project-skills'))
 })
@@ -146,6 +152,26 @@ test('rejects invalid enabledProjectSkills before plugin registration', () => {
   for (const enabledProjectSkills of invalidValues) {
     const fixture = makeContext()
     assert.throws(() => apply(fixture.ctx, { ...baseConfig, enabledProjectSkills }), /enabledProjectSkills/u)
+    assert.equal(fixture.tools.size, 0)
+    assert.equal(fixture.commands.size, 0)
+    assert.equal(fixture.skills.size, 0)
+    assert.equal(fixture.skillProviders.size, 0)
+    assert.equal(fixture.sections.length, 0)
+    assert.equal(fixture.effects.length, 0)
+  }
+})
+
+test('rejects invalid disabledProjectSkills before plugin registration', () => {
+  const invalidValues = [
+    'legacy-project-skill',
+    [42],
+    ['Uppercase'],
+    ['duplicate-skill', 'duplicate-skill'],
+    Array(257).fill('valid-skill'),
+  ]
+  for (const disabledProjectSkills of invalidValues) {
+    const fixture = makeContext()
+    assert.throws(() => apply(fixture.ctx, { ...baseConfig, disabledProjectSkills }), /disabledProjectSkills/u)
     assert.equal(fixture.tools.size, 0)
     assert.equal(fixture.commands.size, 0)
     assert.equal(fixture.skills.size, 0)

@@ -274,7 +274,7 @@ test('discovers cwd-relative OpenCode and Claude skills through the DSH registry
   provider.dispose()
 })
 
-test('enabledProjectSkills filters only project-provider candidates with exact empty-list semantics', async t => {
+test('project skill enable/disable filters are provider-scoped with exact list semantics', async t => {
   const cwd = await makeWorkspace(t)
   await writeSkill(path.join(cwd, '.opencode/skills/allowed/SKILL.md'), { name: 'allowed-project-skill', content: 'Allowed project skill.' })
   await writeSkill(path.join(cwd, '.opencode/skills/blocked/SKILL.md'), { name: 'blocked-project-skill', content: 'Blocked project skill.' })
@@ -294,6 +294,7 @@ test('enabledProjectSkills filters only project-provider candidates with exact e
   assert.deepEqual(nullList.candidates.map(candidate => candidate.name).sort(), ['allowed-project-skill', 'blocked-project-skill'])
   const nullCandidate = nullList.candidates.find(candidate => candidate.name === 'allowed-project-skill')
   assert.equal((await nullUnrestricted.get(nullCandidate, { cwd })).content, 'Allowed project skill.')
+  const blockedCandidate = all.candidates.find(candidate => candidate.name === 'blocked-project-skill')
 
   const allowlisted = createProjectSkillProvider(ctx, control, {
     projectSkillDirs: ['.opencode/skills'],
@@ -303,6 +304,14 @@ test('enabledProjectSkills filters only project-provider candidates with exact e
   assert.equal(filtered.complete, true)
   assert.deepEqual(filtered.candidates.map(candidate => candidate.name), ['allowed-project-skill'])
   assert.equal((await allowlisted.get(filtered.candidates[0], { cwd })).content, 'Allowed project skill.')
+  const denylisted = createProjectSkillProvider(ctx, control, {
+    projectSkillDirs: ['.opencode/skills'],
+    disabledProjectSkills: ['blocked-project-skill'],
+  })
+  const denied = await denylisted.list({ cwd })
+  assert.deepEqual(denied.candidates.map(candidate => candidate.name), ['allowed-project-skill'])
+  assert.equal(await denylisted.get(blockedCandidate, { cwd }), undefined)
+
   const { ctx: registryCtx, registry } = makeRegistry(fs)
   registry.register({
     name: 'blocked-project-skill',
@@ -311,15 +320,15 @@ test('enabledProjectSkills filters only project-provider candidates with exact e
     source: 'custom',
     content: 'External runtime skill.',
   })
-  const registeredAllowlist = registerProjectSkillProvider(registryCtx, {
+  const registeredFilters = registerProjectSkillProvider(registryCtx, {
     projectSkillDirs: ['.opencode/skills'],
-    enabledProjectSkills: ['allowed-project-skill'],
+    enabledProjectSkills: ['allowed-project-skill', 'blocked-project-skill'],
+    disabledProjectSkills: ['blocked-project-skill'],
   })
   const registryView = await registry.snapshot({ cwd })
   assert.deepEqual(registryView.skills.map(skill => skill.name).sort(), ['allowed-project-skill', 'blocked-project-skill'])
-  assert.equal((await registry.get('blocked-project-skill', { cwd })).provider, 'other-plugin', 'other providers remain visible when a project candidate is not allowlisted')
-  registeredAllowlist.dispose()
-  const blockedCandidate = all.candidates.find(candidate => candidate.name === 'blocked-project-skill')
+  assert.equal((await registry.get('blocked-project-skill', { cwd })).provider, 'other-plugin', 'other providers remain visible when the project candidate is filtered')
+  registeredFilters.dispose()
   assert.equal(await allowlisted.get(blockedCandidate, { cwd }), undefined, 'stale/direct candidates outside the allowlist cannot load')
 
   const allowNone = createProjectSkillProvider(ctx, control, {
