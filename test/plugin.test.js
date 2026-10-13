@@ -3,6 +3,7 @@ import test from 'node:test'
 import { resolveChildAgentOptions, snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { apply, Config, inject, name } from '../src/index.js'
 import { buildWorkerPrompt, getRole, ROLE_NAMES } from '../src/roles.js'
+import { SKILLS } from '../src/skills.js'
 
 function makeContext(options = {}) {
   const tools = new Map()
@@ -20,6 +21,7 @@ function makeContext(options = {}) {
   const skillProviders = new Map()
   const skillInvalidations = []
   const ctx = {
+    get: key => options.services?.[key],
     tools: { register: definition => { tools.set(definition.name, definition); return () => tools.delete(definition.name) } },
     subagents: {
       start: async (provider, request) => {
@@ -78,8 +80,14 @@ const baseConfig = {
   maxTaskChars: 12_000,
   maxResultChars: 8_000,
   enableContinuableTasks: false,
+  enableTeamTools: false,
+  enableSessionSearch: false,
+  enableSessionRead: false,
+  enableSessionList: false,
+  enableSessionInfo: false,
   projectSkillDirs: ['.opencode/skills', '.claude/skills'],
   disabledSkills: [],
+  categoryRoutes: [],
   roleRoutes: [],
 }
 
@@ -88,6 +96,17 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(inject, ['tools', 'subagents', 'systemPrompt', 'commands', 'skills', 'fs'])
   assert.deepEqual(Config({}).projectSkillDirs, ['.opencode/skills', '.claude/skills'])
   assert.deepEqual(Config({}).disabledSkills, [])
+  assert.deepEqual(Config({}).categoryRoutes, [])
+  assert.equal(Config({}).enableTeamTools, false)
+  assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
+  assert.equal(Config({}).enableSessionSearch, false)
+  assert.equal(Config({ enableSessionSearch: true }).enableSessionSearch, true)
+  assert.equal(Config({}).enableSessionRead, false)
+  assert.equal(Config({ enableSessionRead: true }).enableSessionRead, true)
+  assert.equal(Config({}).enableSessionList, false)
+  assert.equal(Config({ enableSessionList: true }).enableSessionList, true)
+  assert.equal(Config({}).enableSessionInfo, false)
+  assert.equal(Config({ enableSessionInfo: true }).enableSessionInfo, true)
 })
 
 test('verifies RC2 parent option inheritance and continuable descriptor omissions', () => {
@@ -132,8 +151,8 @@ test('mounts specialist controls and caps the untrusted worker body', async () =
   assert.ok(fixture.tools.has('dsh_omo_task'))
   assert.equal(fixture.sections.length, 1)
   assert.match(fixture.sections[0].text, /ULTRAWORK/i)
-  assert.deepEqual([...fixture.commands.keys()], ['ulw', 'ultrawork', 'architect', 'review', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'omo'])
-  assert.deepEqual([...fixture.skills.keys()], ['omo-ultrawork', 'omo-code-review', 'omo-security-review', 'omo-research'])
+  assert.deepEqual([...fixture.commands.keys()], ['ulw', 'ultrawork', 'architect', 'review', 'handoff', 'refactor', 'remove-ai-slops', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'omo'])
+  assert.deepEqual([...fixture.skills.keys()], SKILLS.map(skill => skill.name))
   assert.deepEqual([...fixture.skillProviders.keys()], ['dsh-omo-project-skills'])
   assert.equal(fixture.commands.get('omo-skills-refresh').handler().kind, 'success')
   assert.equal(fixture.skillInvalidations.length, 1)
@@ -170,6 +189,233 @@ test('mounts specialist controls and caps the untrusted worker body', async () =
   assert.equal(relay.content.slice(1).map(block => block.text).join('').length, 64)
   assert.equal(relay.content[1].text, 'worker-output-'.repeat(4) + 'worker-o')
   assert.deepEqual(fixture.disposals, ['child-1'])
+})
+
+test('mounts the native Goal command only with Goals and opt-in Agent Teams tools only with the Host service', async () => {
+  const goalCalls = []
+  const goals = {
+    get(agent) {
+      goalCalls.push(['get', agent])
+      return undefined
+    },
+    create(agent, request) { goalCalls.push(['create', agent, request]) },
+    pause(agent, ref) { goalCalls.push(['pause', agent, ref]) },
+    resume(agent, ref) { goalCalls.push(['resume', agent, ref]) },
+    complete(agent, ref) { goalCalls.push(['complete', agent, ref]) },
+    clear(agent, ref) { goalCalls.push(['clear', agent, ref]) },
+  }
+  const goalFixture = makeContext({ services: { goals } })
+  apply(goalFixture.ctx, baseConfig)
+  assert.ok(goalFixture.commands.has('goal'))
+  assert.ok(goalFixture.commands.has('stop-continuation'))
+  assert.equal(goalFixture.tools.has('session_search'), false, 'session history search is opt-in')
+  assert.equal(goalFixture.tools.has('session_read'), false, 'bounded history reading is separately opt-in')
+  assert.equal(goalFixture.tools.has('session_list'), false, 'metadata listing is separately opt-in')
+  assert.match(goalFixture.commands.get('omo').handler().text, /Session search: disabled/u)
+  assert.match(goalFixture.commands.get('omo').handler().text, /Session read: disabled/u)
+  assert.match(goalFixture.commands.get('omo').handler().text, /Session list: disabled/u)
+  const goalAgent = { id: 'goal-agent' }
+  assert.equal((await goalFixture.commands.get('goal').handler({ agent: goalAgent, rawInput: '' })).kind, 'success')
+  assert.equal((await goalFixture.commands.get('goal').handler({ agent: goalAgent, rawInput: 'Build the feature' })).kind, 'success')
+  assert.deepEqual(goalCalls, [
+    ['get', goalAgent],
+    ['create', goalAgent, { objective: 'Build the feature' }],
+  ])
+  assert.match(goalFixture.commands.get('omo').handler().text, /\/goal/u)
+  assert.match(goalFixture.commands.get('omo').handler().text, /\/stop-continuation/u)
+
+  const disabledFixture = makeContext()
+  apply(disabledFixture.ctx, baseConfig)
+  assert.equal([...disabledFixture.tools.keys()].some(toolName => toolName.startsWith('team_')), false)
+  assert.equal(disabledFixture.commands.has('goal'), false)
+  assert.equal(disabledFixture.commands.has('stop-continuation'), false)
+  assert.equal(disabledFixture.tools.has('session_search'), false)
+  assert.equal(disabledFixture.tools.has('session_read'), false)
+  assert.equal(disabledFixture.tools.has('session_list'), false)
+
+  const partialGoalsFixture = makeContext({ services: { goals: { get: () => undefined } } })
+  apply(partialGoalsFixture.ctx, baseConfig)
+  assert.equal(partialGoalsFixture.commands.has('goal'), true)
+  assert.equal(partialGoalsFixture.commands.has('stop-continuation'), false, 'stop command requires native get and clear methods')
+
+  const unavailableTeamFixture = makeContext()
+  assert.throws(
+    () => apply(unavailableTeamFixture.ctx, { ...baseConfig, enableTeamTools: true }),
+    /requires the optional DSH agentTeams service/u,
+  )
+  assert.equal(unavailableTeamFixture.tools.size, 0, 'a missing optional service fails before plugin registrations')
+
+  const unavailableSessionSearchFixture = makeContext()
+  assert.throws(
+    () => apply(unavailableSessionSearchFixture.ctx, { ...baseConfig, enableSessionSearch: true }),
+    /enableSessionSearch requires DSH sessionQuery/u,
+  )
+  assert.equal(unavailableSessionSearchFixture.tools.size, 0, 'session search is not partially registered when the service is unavailable')
+
+  const partialSessionSearchFixture = makeContext({ services: { sessionQuery: { searchSessions() {} } } })
+  assert.throws(
+    () => apply(partialSessionSearchFixture.ctx, { ...baseConfig, enableSessionSearch: true }),
+    /requires DSH sessionQuery.searchSessions and observeSession/u,
+  )
+  assert.equal(partialSessionSearchFixture.tools.size, 0, 'incomplete session-query methods fail before plugin registrations')
+
+  const sessionQuery = {
+    searchSessions: async () => ({ items: [] }),
+    observeSession: async sessionId => ({ header: { id: sessionId, cwd: '/project' }, [Symbol.dispose]() {} }),
+  }
+  const enabledSessionSearchFixture = makeContext({ services: { sessionQuery } })
+  apply(enabledSessionSearchFixture.ctx, { ...baseConfig, enableSessionSearch: true })
+  assert.ok(enabledSessionSearchFixture.tools.has('session_search'))
+  assert.match(enabledSessionSearchFixture.commands.get('omo').handler().text, /Session search: enabled/u)
+  const sessionSearchEffect = enabledSessionSearchFixture.effects.find(effect => effect.label === 'dsh-omo session search tool')
+  assert.ok(sessionSearchEffect)
+  await sessionSearchEffect.dispose()
+  assert.equal(enabledSessionSearchFixture.tools.has('session_search'), false)
+
+  const unavailableSessionReadFixture = makeContext()
+  assert.throws(
+    () => apply(unavailableSessionReadFixture.ctx, { ...baseConfig, enableSessionRead: true }),
+    /enableSessionRead requires DSH sessionQuery.readEvent, observeSession, and filterSessions/u,
+  )
+  assert.equal(unavailableSessionReadFixture.tools.size, 0, 'session read is not partially registered when the service is unavailable')
+
+  const partialSessionReadFixture = makeContext({ services: { sessionQuery: { readEvent() {}, observeSession() {} } } })
+  assert.throws(
+    () => apply(partialSessionReadFixture.ctx, { ...baseConfig, enableSessionRead: true }),
+    /requires DSH sessionQuery.readEvent, observeSession, and filterSessions/u,
+  )
+  assert.equal(partialSessionReadFixture.tools.size, 0, 'incomplete session-read methods fail before plugin registrations')
+
+  const sessionReadService = {
+    readEvent: async () => ({}),
+    observeSession: async sessionId => ({ header: { id: sessionId, cwd: '/project' }, [Symbol.dispose]() {} }),
+    filterSessions: async () => [],
+  }
+  const enabledSessionReadFixture = makeContext({ services: { sessionQuery: sessionReadService } })
+  apply(enabledSessionReadFixture.ctx, { ...baseConfig, enableSessionRead: true })
+  assert.ok(enabledSessionReadFixture.tools.has('session_read'))
+  assert.match(enabledSessionReadFixture.commands.get('omo').handler().text, /Session read: enabled/u)
+  const sessionReadEffect = enabledSessionReadFixture.effects.find(effect => effect.label === 'dsh-omo session read tool')
+  assert.ok(sessionReadEffect)
+  await sessionReadEffect.dispose()
+  assert.equal(enabledSessionReadFixture.tools.has('session_read'), false)
+
+  const unavailableSessionListFixture = makeContext()
+  assert.throws(
+    () => apply(unavailableSessionListFixture.ctx, { ...baseConfig, enableSessionList: true }),
+    /enableSessionList requires DSH sessionQuery.listSessions, observeSession, and filterSessions/u,
+  )
+  assert.equal(unavailableSessionListFixture.tools.size, 0, 'session list is not partially registered when the service is unavailable')
+
+  const partialSessionListFixture = makeContext({ services: { sessionQuery: { filterSessions() {}, observeSession() {} } } })
+  assert.throws(
+    () => apply(partialSessionListFixture.ctx, { ...baseConfig, enableSessionList: true }),
+    /requires DSH sessionQuery.listSessions, observeSession, and filterSessions/u,
+  )
+  assert.equal(partialSessionListFixture.tools.size, 0, 'incomplete session-list methods fail before plugin registrations')
+
+  const sessionListService = {
+    listSessions: async () => [],
+    filterSessions: async () => [],
+    observeSession: async sessionId => ({ header: { id: sessionId, cwd: '/project' }, [Symbol.dispose]() {} }),
+  }
+  const enabledSessionListFixture = makeContext({ services: { sessionQuery: sessionListService } })
+  apply(enabledSessionListFixture.ctx, { ...baseConfig, enableSessionList: true })
+  assert.ok(enabledSessionListFixture.tools.has('session_list'))
+  assert.match(enabledSessionListFixture.commands.get('omo').handler().text, /Session list: enabled/u)
+  const sessionListEffect = enabledSessionListFixture.effects.find(effect => effect.label === 'dsh-omo session list tool')
+  assert.ok(sessionListEffect)
+  await sessionListEffect.dispose()
+  assert.equal(enabledSessionListFixture.tools.has('session_list'), false)
+
+  const unavailableSessionInfoFixture = makeContext()
+  assert.throws(
+    () => apply(unavailableSessionInfoFixture.ctx, { ...baseConfig, enableSessionInfo: true }),
+    /enableSessionInfo requires DSH sessionQuery.readTitleSnapshot, filterSessions, and observeSession/u,
+  )
+  assert.equal(unavailableSessionInfoFixture.tools.size, 0, 'session info is not partially registered when the service is unavailable')
+
+  const partialSessionInfoFixture = makeContext({ services: { sessionQuery: { readTitleSnapshot() {}, observeSession() {} } } })
+  assert.throws(
+    () => apply(partialSessionInfoFixture.ctx, { ...baseConfig, enableSessionInfo: true }),
+    /requires DSH sessionQuery.readTitleSnapshot, filterSessions, and observeSession/u,
+  )
+  assert.equal(partialSessionInfoFixture.tools.size, 0, 'incomplete session-info methods fail before plugin registrations')
+
+  const sessionInfoService = {
+    readTitleSnapshot: async sessionId => ({ session: { id: sessionId, createdAt: 1_710_000_000_000, cwd: '/project', isSeeded: false } }),
+    filterSessions: async () => [{ header: { id: 'session-1', createdAt: 1_710_000_000_000, cwd: '/project', isSeeded: false }, live: true, persisted: true }],
+    observeSession: async sessionId => ({ header: { id: sessionId, cwd: '/project' }, [Symbol.dispose]() {} }),
+  }
+  const enabledSessionInfoFixture = makeContext({ services: { sessionQuery: sessionInfoService } })
+  apply(enabledSessionInfoFixture.ctx, { ...baseConfig, enableSessionInfo: true })
+  assert.ok(enabledSessionInfoFixture.tools.has('session_info'))
+  assert.match(enabledSessionInfoFixture.commands.get('omo').handler().text, /Session info: enabled/u)
+  const sessionInfoEffect = enabledSessionInfoFixture.effects.find(effect => effect.label === 'dsh-omo session info tool')
+  assert.ok(sessionInfoEffect)
+  await sessionInfoEffect.dispose()
+  assert.equal(enabledSessionInfoFixture.tools.has('session_info'), false)
+
+  const teamCalls = []
+  const member = { id: 'member-1', name: 'builder', role: 'teammate', status: 'running', diagnostics: [] }
+  const teamService = {
+    membership: agent => { teamCalls.push(agent); return { id: 'team-1', root: { id: 'lead-1' }, role: 'lead', name: 'lead' } },
+    listMembers: () => [],
+    spawnTeammate: async () => ({ member }),
+    sendMessage: async () => ({ messageId: 'message-1', status: 'queued' }),
+    createTask: async () => ({ id: 'task-1', revision: 1, subject: 'Task', description: '', status: 'pending', blockedBy: [], writeScopes: [], ready: true, writeScopeWarnings: [] }),
+    getTask: () => ({ id: 'task-1', revision: 1, subject: 'Task', description: '', status: 'pending', blockedBy: [], writeScopes: [], ready: true, writeScopeWarnings: [] }),
+    listTasks: () => [],
+    updateTask: async () => ({ id: 'task-1', revision: 2, subject: 'Task', description: '', status: 'in_progress', blockedBy: [], writeScopes: [], ready: true, writeScopeWarnings: [] }),
+    waitForChange: async () => ({ timedOut: false }),
+    interrupt: () => ({ previousStatus: 'running' }),
+  }
+  const teamFixture = makeContext({ services: { agentTeams: teamService } })
+  apply(teamFixture.ctx, { ...baseConfig, enableTeamTools: true })
+  const teamNames = [...teamFixture.tools.keys()].filter(toolName => toolName.startsWith('team_'))
+  assert.equal(teamNames.length, 10)
+  const teamAgent = { id: 'lead-1' }
+  const teamResult = await teamFixture.tools.get('team_membership').execute({}, { agent: teamAgent })
+  assert.equal(teamResult.teamId, 'team-1')
+  assert.deepEqual(teamCalls, [teamAgent])
+
+  const teamEffect = teamFixture.effects.find(effect => effect.label === 'dsh-omo Agent Teams tools')
+  assert.ok(teamEffect)
+  await teamEffect.dispose()
+  assert.equal([...teamFixture.tools.keys()].some(toolName => toolName.startsWith('team_')), false)
+})
+
+test('registers on-demand model capability diagnostics only with the native DSH LLM service', async () => {
+  const calls = []
+  const llm = {
+    listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }],
+    listModels: async provider => {
+      calls.push(['models', provider])
+      return [{ provider, id: 'deepseek-flash', name: 'Flash' }]
+    },
+    resolveModelInfo: async (provider, model, signal) => {
+      calls.push(['resolve', provider, model, signal])
+      return { provider, id: model, context: { contextWindow: 64_000 }, inputModalities: ['text'] }
+    },
+  }
+  const fixture = makeContext({ services: { llm } })
+  apply(fixture.ctx, baseConfig)
+  assert.ok(fixture.commands.has('omo-models'))
+  const command = fixture.commands.get('omo-models')
+  assert.match((await command.handler({ rawInput: '' })).text, /deepseek — DeepSeek/u)
+  const controller = new AbortController()
+  const resolved = await command.handler({ rawInput: 'deepseek/deepseek-flash', signal: controller.signal })
+  assert.match(resolved.text, /Context window: 64000/u)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].slice(0, 3), ['resolve', 'deepseek', 'deepseek-flash'])
+  assert.notStrictEqual(calls[0][3], controller.signal)
+  controller.abort()
+  assert.equal(calls[0][3].aborted, true)
+  assert.match(fixture.commands.get('omo').handler().text, /\/omo-models/u)
+
+  const withoutLlm = makeContext()
+  apply(withoutLlm.ctx, baseConfig)
+  assert.equal(withoutLlm.commands.has('omo-models'), false)
 })
 
 test('disabledSkills turns off both model and user invocation for bundled skills', () => {
@@ -252,6 +498,62 @@ test('applies per-role token and reasoning overrides without replacing the paren
     { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal },
   )
   assert.deepEqual(fixture.starts[0].request.agentOptions, { reasoningEffort: 'medium', maxTokens: 384 })
+})
+
+test('resolves category routes for one-shot and continuable delegation with role-route precedence', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    categoryRoutes: [
+      { name: 'build', provider: 'build-provider', model: 'build-model', reasoningEffort: 'high' },
+      { name: 'review', provider: 'review-provider', model: 'review-model', reasoningEffort: 'low' },
+    ],
+    roleRoutes: [
+      { role: 'explore', category: 'build', allowTools: ['read'] },
+      {
+        role: 'reviewer', category: 'build', provider: 'role-provider', model: 'role-model',
+        reasoningEffort: 'medium', allowTools: ['grep'],
+      },
+    ],
+  })
+  const oneShot = fixture.tools.get('dsh_omo_task')
+  const continuable = fixture.tools.get('dsh_omo_task_continuable')
+  assert.deepEqual(oneShot.parameters.properties.category.enum, ['build', 'review'])
+  const parent = { id: 'parent-agent', followup() {} }
+  const signal = new AbortController().signal
+
+  await oneShot.execute({ role: 'explore', category: 'review', task: 'Use the explicit review category' }, { agent: parent, signal })
+  assert.deepEqual(fixture.starts[0].request.agentOptions, {
+    provider: 'review-provider', model: 'review-model', reasoningEffort: 'low',
+  })
+  assert.deepEqual(fixture.starts[0].request.toolFilter, { allow: ['read'] })
+
+  await oneShot.execute({ role: 'explore', task: 'Use the role default category' }, { agent: parent, signal })
+  assert.deepEqual(fixture.starts[1].request.agentOptions, {
+    provider: 'build-provider', model: 'build-model', reasoningEffort: 'high',
+  })
+
+  await continuable.execute({ role: 'reviewer', category: 'review', task: 'Keep the explicit role route' }, { agent: parent, signal })
+  assert.deepEqual(fixture.continuableStarts[0].request.agentOptions, {
+    provider: 'role-provider', model: 'role-model', reasoningEffort: 'medium',
+  })
+  assert.deepEqual(fixture.continuableStarts[0].request.toolFilter, { allow: ['grep'] })
+
+  await assert.rejects(oneShot.execute(
+    { role: 'explore', category: 'not-configured', task: 'Do not launch' },
+    { agent: parent, signal },
+  ), /invalid arguments|unknown explicit category/u)
+  assert.equal(fixture.starts.length, 2, 'invalid category is rejected before child start and reservation')
+})
+
+test('rejects unknown role category assignments before plugin registration', () => {
+  const fixture = makeContext()
+  assert.throws(() => apply(fixture.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'explore', category: 'missing' }],
+  }), /references unknown category/u)
+  assert.equal(fixture.tools.size, 0)
 })
 
 test('preserves an empty inherited-global tool allowlist without claiming a hard deny-all', async () => {
@@ -510,6 +812,96 @@ test('slash commands steer the current agent with explicit work modes', async ()
   assert.ok(messages[0].id)
   assert.equal(messages[0].source.kind, 'user')
   assert.equal((await fixture.commands.get('ulw').handler({ agent: { followup() {} }, rawInput: '  ' })).kind, 'error')
+
+  const cleanupResult = fixture.commands.get('remove-ai-slops').handler({
+    agent: { followup: message => messages.push(message) },
+    rawInput: '  src/feature.ts  ',
+  })
+  assert.equal(cleanupResult.kind, 'success')
+  assert.match(messages[1].content[0].text, /existing dsh-omo remove-ai-slops skill/u)
+  assert.match(messages[1].content[0].text, /only within the requested or changed scope/u)
+  assert.match(messages[1].content[0].text, /never commit automatically/u)
+  assert.match(messages[1].content[0].text, /src\/feature\.ts/u)
+  assert.equal(fixture.commands.get('remove-ai-slops').handler({ agent: { followup() {} }, rawInput: '  ' }).kind, 'error')
+  const oversized = fixture.commands.get('remove-ai-slops').handler({
+    agent: { followup: message => messages.push(message) },
+    rawInput: 'x'.repeat(baseConfig.maxTaskChars + 1),
+  })
+  assert.equal(oversized.kind, 'error')
+  assert.match(oversized.text, /dsh-omo limit/u)
+  assert.equal(messages.length, 2, 'oversized slash input is not copied to the parent inbox')
+})
+
+test('parses /refactor options and queues only bounded prompt guidance to the current agent', () => {
+  const fixture = makeContext()
+  const messages = []
+  const agent = { id: 'parent-agent', followup: message => messages.push(message) }
+  apply(fixture.ctx, baseConfig)
+  const command = fixture.commands.get('refactor')
+
+  const safe = command.handler({
+    agent,
+    rawInput: '"src/auth flow.ts" --scope=module --strategy=safe',
+  })
+  assert.equal(safe.kind, 'success')
+  assert.match(messages[0].content[0].text, /Scope guidance: the user-requested module scope/u)
+  assert.match(messages[0].content[0].text, /Strategy: safe \(dsh-omo local default/u)
+  assert.match(messages[0].content[0].text, /LSP rename\/navigation, AST-grep, and codemap tools are unverified/u)
+  assert.match(messages[0].content[0].text, /"src\/auth flow\.ts"/u)
+  assert.match(messages[0].content[0].text, /not a filesystem, cwd, tool, or permission boundary/u)
+
+  const aggressive = command.handler({
+    agent,
+    rawInput: 'Refactor repository layering --strategy=aggressive --scope=project',
+  })
+  assert.equal(aggressive.kind, 'success')
+  assert.match(messages[1].content[0].text, /explicitly opted into by the user/u)
+  assert.match(messages[1].content[0].text, /user-requested project scope/u)
+
+  for (const rawInput of ['', 'target --scope=workspace', 'target --unknown=value', 'target --scope=file --scope=module']) {
+    assert.equal(command.handler({ agent, rawInput }).kind, 'error')
+  }
+  assert.equal(command.handler({ agent, rawInput: 'x'.repeat(baseConfig.maxTaskChars + 1) }).kind, 'error')
+  assert.equal(messages.length, 2, 'invalid and oversized inputs are rejected before follow-up')
+  assert.equal(fixture.starts.length, 0, 'the slash command does not start tools or subagents')
+  assert.match(fixture.commands.get('omo').handler().text, /\/refactor/u)
+})
+
+test('/handoff queues a copyable current-session summary only for empty input', () => {
+  const fixture = makeContext()
+  const messages = []
+  const agent = { id: 'handoff-agent', followup: message => messages.push(message) }
+  apply(fixture.ctx, baseConfig)
+  const command = fixture.commands.get('handoff')
+
+  const emptyResult = command.handler({ agent, rawInput: '' })
+  const whitespaceResult = command.handler({ agent, rawInput: '  \t ' })
+  assert.equal(emptyResult.kind, 'success')
+  assert.equal(whitespaceResult.kind, 'success')
+  assert.match(emptyResult.text, /Copy its reply manually into a new session; no session or file was created/u)
+  for (const message of messages) {
+    const text = message.content[0].text
+    assert.match(text, /objective and current status/u)
+    assert.match(text, /completed work and key decisions/u)
+    assert.match(text, /relevant file paths/u)
+    assert.match(text, /verified checks and results/u)
+    assert.match(text, /remaining work/u)
+    assert.match(text, /risks and limitations/u)
+    assert.match(text, /recommended next steps/u)
+    assert.match(text, /Separate verified facts from uncertainty/u)
+    assert.match(text, /user must copy it into a new session/u)
+    assert.match(text, /creates no session, file, or durable handoff artifact/u)
+    assert.equal(message.source.kind, 'user')
+  }
+
+  for (const rawInput of ['focus on auth changes', '--output=/tmp/handoff.md', undefined]) {
+    assert.equal(command.handler({ agent, rawInput }).kind, 'error')
+  }
+  assert.equal(command.handler({ agent, rawInput: 'x'.repeat(baseConfig.maxTaskChars + 1) }).kind, 'error')
+  assert.equal(messages.length, 2, 'non-empty, malformed, and oversized requests are not queued')
+  assert.equal(fixture.starts.length, 0, 'handoff does not start subagents')
+  assert.equal(fixture.descendantCalls.length, 0, 'handoff does not inspect or interrupt children')
+  assert.match(fixture.commands.get('omo').handler().text, /\/handoff/u)
 })
 
 test('lists direct dsh-omo label-matched children with resident activity only', async () => {

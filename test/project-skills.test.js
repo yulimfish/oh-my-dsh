@@ -102,7 +102,11 @@ function makeFileSystem(options = {}) {
       if (signal?.aborted) throw signal.reason ?? new Error('lstat aborted')
       try {
         const info = await lstatPath(path.resolve(options.cwd ?? process.cwd(), filePath))
-        return { type: info.isSymbolicLink() ? 'symlink' : info.isDirectory() ? 'directory' : info.isFile() ? 'file' : 'other', size: info.size }
+        return {
+          type: info.isSymbolicLink() ? 'symlink' : info.isDirectory() ? 'directory' : info.isFile() ? 'file' : 'other',
+          size: info.size,
+          version: `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`,
+        }
       } catch (error) {
         if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return undefined
         throw error
@@ -112,7 +116,11 @@ function makeFileSystem(options = {}) {
       calls.push('stat')
       try {
         const info = await stat(target.targetKey)
-        return { type: info.isDirectory() ? 'directory' : info.isFile() ? 'file' : 'other', size: info.size }
+        return {
+          type: info.isDirectory() ? 'directory' : info.isFile() ? 'file' : 'other',
+          size: info.size,
+          version: `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`,
+        }
       } catch (error) {
         if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return undefined
         throw error
@@ -713,6 +721,36 @@ test('re-resolves skill locators before loading to reject retargeted symlinks', 
   provider.dispose()
 })
 
+test('discards a project skill changed to an outside symlink during the read window', async t => {
+  const cwd = await makeWorkspace(t)
+  const external = await makeWorkspace(t)
+  const skillPath = path.join(cwd, '.opencode/skills/review/SKILL.md')
+  const externalPath = path.join(external, 'outside.md')
+  await writeSkill(skillPath, { name: 'local-skill', content: 'Local body.' })
+  await writeSkill(externalPath, { name: 'local-skill', content: 'OUTSIDE SECRET' })
+  const { fs } = makeFileSystem()
+  const { ctx, registry } = makeRegistry(fs)
+  const provider = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'] })
+  const snapshot = await registry.snapshot({ cwd })
+  assert.deepEqual(snapshot.skills.map(skill => skill.name), ['local-skill'])
+
+  const readBytes = fs.readBytes.bind(fs)
+  const canonicalSkillPath = await realpath(skillPath)
+  let swapped = false
+  fs.readBytes = async (target, signal, maxBytes) => {
+    if (!swapped && target.targetKey === canonicalSkillPath) {
+      swapped = true
+      await rename(skillPath, `${skillPath}.original`)
+      await symlink(externalPath, skillPath)
+    }
+    return readBytes(target, signal, maxBytes)
+  }
+
+  assert.equal(await registry.get('local-skill', { cwd }), undefined)
+  assert.equal(swapped, true, 'test swapped the final path after containment was checked')
+  provider.dispose()
+})
+
 test('caps directory-entry processing even when files are all malformed', async t => {
   const cwd = await makeWorkspace(t)
   const root = path.join(cwd, '.opencode/skills')
@@ -775,6 +813,36 @@ test('caps aggregate project skill reads at the scan budget', async t => {
   assert.equal(snapshot.complete, false)
   assert.equal(snapshot.skills.length, 40)
   assert.equal(calls.filter(call => call === 'readBytes').length, 40)
+  provider.dispose()
+})
+
+test('charges bytes when project skills change during post-read version validation', async t => {
+  const cwd = await makeWorkspace(t)
+  const root = path.join(cwd, '.opencode/skills')
+  await Promise.all(Array.from({ length: 40 }, (_, index) => writeSkill(path.join(root, `changing-${index}.md`), {
+    name: `changing-${index}`,
+    content: 'x'.repeat(250_000),
+  })))
+  const { fs, calls } = makeFileSystem()
+  const originalReadBytes = fs.readBytes.bind(fs)
+  const originalStat = fs.stat.bind(fs)
+  const readsByTarget = new Map()
+  fs.readBytes = async (target, signal, maxBytes) => {
+    const bytes = await originalReadBytes(target, signal, maxBytes)
+    readsByTarget.set(target.targetKey, (readsByTarget.get(target.targetKey) ?? 0) + 1)
+    return bytes
+  }
+  fs.stat = async target => {
+    const info = await originalStat(target)
+    const reads = readsByTarget.get(target.targetKey) ?? 0
+    return reads > 0 ? { ...info, version: `${info.version}:changed-${reads}` } : info
+  }
+  const { ctx, registry } = makeRegistry(fs)
+  const provider = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'] })
+  const snapshot = await registry.snapshot({ cwd })
+  assert.equal(snapshot.complete, false)
+  assert.deepEqual(snapshot.skills, [])
+  assert.equal(calls.filter(call => call === 'readBytes').length, 33, 'failed post-read validations consume the aggregate budget')
   provider.dispose()
 })
 

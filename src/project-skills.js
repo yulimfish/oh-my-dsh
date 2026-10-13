@@ -213,8 +213,26 @@ async function readSkillFile(ctx, target, signal, byteLimit = MAX_SKILL_BYTES) {
     }
     throw error
   }
-  if (!(bytes instanceof Uint8Array)) throw new SkillFormatError('filesystem backend returned non-byte skill content')
+  if (!(bytes instanceof Uint8Array)) {
+    throw new SkillFormatError('filesystem backend returned non-byte skill content', byteLimit)
+  }
   if (bytes.byteLength > byteLimit) throw new ScanBudgetError('filesystem backend exceeded the project skill read limit', byteLimit)
+  let afterInfo
+  try {
+    afterInfo = await ctx.fs.stat(target, signal)
+  } catch (error) {
+    if (signal?.aborted) throw error
+    const readError = new Error('project skill file could not be revalidated after reading', { cause: error })
+    readError.bytesRead = bytes.byteLength
+    throw readError
+  }
+  if (!afterInfo || afterInfo.type !== 'file'
+    || (info.version !== undefined && afterInfo.version !== info.version)
+    || (info.size !== undefined && afterInfo.size !== info.size)) {
+    const error = new Error('project skill file changed while it was being read')
+    error.bytesRead = bytes.byteLength
+    throw error
+  }
   throwIfAborted(signal)
   let source
   try {
@@ -237,6 +255,18 @@ function sourceForDirectory(directory) {
   if (directory === '.opencode/skills') return 'project-opencode'
   if (directory === '.claude/skills') return 'project-claude'
   return 'project-local'
+}
+
+async function isContainedSkillPath(ctx, { cwd, cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal }) {
+  const fs = ctx.fs
+  if (typeof fs.lstat !== 'function') return false
+  const lexicalInfo = await fs.lstat(resolverPath, { cwd }, signal)
+  if (!lexicalInfo || lexicalInfo.type !== 'file') return false
+  const currentRoot = await fs.resolve(rootPath, { cwd, signal })
+  const currentFile = await fs.resolve(resolverPath, { cwd, signal })
+  return fs.contains(cwdTarget, currentRoot)
+    && fs.contains(rootTarget, currentFile)
+    && currentFile.targetKey === fileTarget.targetKey
 }
 
 function isSafeEntryName(name) {
@@ -613,9 +643,13 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
             try {
               skill = await readSkillFile(ctx, fileTarget, signal, Math.min(MAX_SKILL_BYTES, remainingBytes))
               scannedBytes += skill.byteLength
+              if (!await isContainedSkillPath(ctx, { cwd, cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal })) {
+                complete = false
+                continue
+              }
             } catch (error) {
               if (signal?.aborted) throw error
-              if (Number.isSafeInteger(error?.bytesRead) && error.bytesRead > 0) scannedBytes += error.bytesRead
+              if (!skill && Number.isSafeInteger(error?.bytesRead) && error.bytesRead > 0) scannedBytes += error.bytesRead
               if (error instanceof ScanBudgetError) {
                 complete = false
                 scanExhausted = true
@@ -654,6 +688,18 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           return undefined
         }
         const skill = await readSkillFile(ctx, fileTarget, signal)
+        if (!await isContainedSkillPath(ctx, {
+          cwd: lookup.cwd,
+          cwdTarget,
+          rootPath: locator.rootPath,
+          rootTarget,
+          fileTarget,
+          resolverPath: locator.resolverPath,
+          signal,
+        })) {
+          control.invalidate()
+          return undefined
+        }
         const candidateMatches = matchesCandidate(skill, candidate, disabledSkills)
         if (!candidateMatches) {
           control.invalidate()

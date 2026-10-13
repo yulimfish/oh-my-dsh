@@ -4,6 +4,15 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { buildWorkerPrompt, ROLE_NAMES } from './roles.js'
 import { SKILLS } from './skills.js'
 import { DEFAULT_PROJECT_SKILL_DIRS, normalizeProjectSkillDirs, registerProjectSkillProvider } from './project-skills.js'
+import { createGoalCommand, createStopContinuationCommand } from './goals.js'
+import { registerTeamTools } from './teams.js'
+import { registerSessionSearchTool } from './session-search.js'
+import { registerSessionReadTool } from './session-read.js'
+import { registerSessionListTool } from './session-list.js'
+import { registerSessionInfoTool } from './session-info.js'
+import { createModelCapabilitiesCommand } from './model-capabilities.js'
+import { normalizeCategoryRoutes, resolveCategoryRoute } from './category-routes.js'
+import { buildRefactorDirective, parseRefactorInput, REFACTOR_COMMAND_HINT } from './refactor-command.js'
 
 export const name = 'dsh-omo'
 export const inject = ['tools', 'subagents', 'systemPrompt', 'commands', 'skills', 'fs']
@@ -20,10 +29,22 @@ export const Config = z.object({
   maxTaskChars: z.number().default(DEFAULT_MAX_TASK_CHARS),
   maxResultChars: z.number().default(8_000),
   enableContinuableTasks: z.boolean().default(false),
+  enableTeamTools: z.boolean().default(false),
+  enableSessionSearch: z.boolean().default(false),
+  enableSessionRead: z.boolean().default(false),
+  enableSessionList: z.boolean().default(false),
+  enableSessionInfo: z.boolean().default(false),
   projectSkillDirs: z.array(z.string()).default([...DEFAULT_PROJECT_SKILL_DIRS]),
   disabledSkills: z.array(z.string()).default([]),
+  categoryRoutes: z.array(z.object({
+    name: z.string().required(),
+    provider: z.string().required(),
+    model: z.string().required(),
+    reasoningEffort: z.string(),
+  })).default([]),
   roleRoutes: z.array(z.object({
     role: z.string().required(),
+    category: z.string(),
     provider: z.string(),
     model: z.string(),
     reasoningEffort: z.string(),
@@ -44,6 +65,10 @@ When the user says **ultrawork**, **ulw**, or requests a substantial multi-step 
 
 Use the **reviewer** or **security** role for review tasks, but a role prompt does not enforce read-only behavior. allowTools restricts inherited global tools only; child-scoped registrations may remain available. For a hard boundary, enforce DSH-native permission, sandbox, or monotonic tool-guard policy; dsh-omo does not install a per-worker hard guard. DSH retains authority over filesystem, shell, network, and approvals. One-shot delegation is the default and sends a host-attributed settlement notice followed by a bounded child-authored relay (untrusted evidence); use dsh_omo_task_continuable only when that optional tool is enabled and a durable child session is needed. omo-tasks lists direct children by caller-supplied dsh-omo label, with DSH running/inactive residency only; the label does not prove plugin origin and inactive does not mean completed. omo-interrupt rejects inactive rows and only attempts resident-child signals; DSH is fire-and-return and may no-op.`
 
+function optionalService(ctx, name) {
+  return typeof ctx?.get === 'function' ? ctx.get(name) : ctx?.[name]
+}
+
 function assertPositiveInteger(field, value) {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(`dsh-omo: ${field} must be a positive safe integer`)
@@ -58,13 +83,20 @@ function normalizeProvider(value) {
   return value.trim()
 }
 
-function normalizeRoleRoutes(routes) {
+function normalizeRoleRoutes(routes, categoryRoutes) {
   const result = new Map()
   for (const entry of routes) {
     if (!ROLE_NAMES.includes(entry.role)) {
       throw new Error(`dsh-omo: unknown role route "${entry.role}"`)
     }
     if (result.has(entry.role)) throw new Error(`dsh-omo: duplicate role route "${entry.role}"`)
+    const category = entry.category === undefined ? undefined : typeof entry.category === 'string' ? entry.category.trim() : ''
+    if (entry.category !== undefined && !category) {
+      throw new Error(`dsh-omo: role route "${entry.role}" category must not be blank`)
+    }
+    if (category !== undefined && !categoryRoutes.has(category)) {
+      throw new Error(`dsh-omo: role route "${entry.role}" references unknown category "${category}"`)
+    }
     const provider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
     const model = typeof entry.model === 'string' ? entry.model.trim() : ''
     const providerWasSet = entry.provider !== undefined
@@ -90,6 +122,7 @@ function normalizeRoleRoutes(routes) {
       : Object.freeze([...new Set(entry.allowTools.map(tool => tool.trim()))])
     result.set(entry.role, Object.freeze({
       ...entry,
+      ...(category !== undefined ? { category } : {}),
       ...(provider ? { provider, model } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
       ...(allowTools ? { allowTools } : {}),
@@ -223,6 +256,17 @@ async function settleBackgroundChild({ run, role, task, parent, ctx, activeChild
   }
 }
 
+function categoryParameter(categoryRoutes) {
+  if (!categoryRoutes || categoryRoutes.size === 0) return {}
+  return {
+    category: {
+      type: 'string',
+      enum: [...categoryRoutes.keys()],
+      description: 'Optional configured category selecting one fixed provider/model route; role route pins take precedence.',
+    },
+  }
+}
+
 function agentOptionsForRoute(route, { includeMaxTokens = true } = {}) {
   if (!route) return undefined
   const options = {
@@ -237,11 +281,12 @@ function taskPrompt(role, task) {
   return [{ type: 'text', text: buildWorkerPrompt(role, task) }]
 }
 
-function specialistTool(ctx, config, roleRoutes, activeChildren, activeRuns, lifecycle, providerName) {
+function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren, activeRuns, lifecycle, providerName) {
   return defineTool({
     name: 'dsh_omo_task',
-    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Roles: ${ROLE_NAMES.join(', ')}.`,
+    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Roles: ${ROLE_NAMES.join(', ')}.${categoryRoutes.size > 0 ? ` Configured single-route categories: ${[...categoryRoutes.keys()].join(', ')}; category selects only the model route, while the role controls the specialist prompt.` : ''}`,
     parameters: {
+      ...categoryParameter(categoryRoutes),
       role: {
         type: 'string', enum: ROLE_NAMES, required: true,
         description: 'Specialist role matched to this task.',
@@ -278,15 +323,15 @@ function specialistTool(ctx, config, roleRoutes, activeChildren, activeRuns, lif
         throw new Error(`dsh-omo one-shot worker limit reached (${config.maxConcurrent}); wait for a child to finish.`)
       }
 
-      // Reserve synchronously before the async provider start so parallel tool
-      // calls cannot all pass the one-shot capacity check.
-      const reservation = Symbol('dsh-omo worker reservation')
-      activeChildren.add(reservation)
-      const route = roleRoutes.get(args.role)
+      const route = resolveCategoryRoute(categoryRoutes, args.category, roleRoutes.get(args.role))
       const agentOptions = agentOptionsForRoute(route)
       const toolFilter = route?.allowTools ? { allow: route.allowTools } : undefined
       const prompt = taskPrompt(args.role, args.task)
       const label = `${args.role}: ${args.task.trim().replace(/\s+/gu, ' ').slice(0, 72)}`
+      // Reserve synchronously before the async provider start so parallel tool
+      // calls cannot all pass the one-shot capacity check.
+      const reservation = Symbol('dsh-omo worker reservation')
+      activeChildren.add(reservation)
       let run
       try {
         run = await ctx.subagents.start(providerName, {
@@ -320,11 +365,12 @@ function specialistTool(ctx, config, roleRoutes, activeChildren, activeRuns, lif
   })
 }
 
-function continuableSpecialistTool(ctx, config, roleRoutes, lifecycle, providerName) {
+function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, lifecycle, providerName) {
   return defineTool({
     name: 'dsh_omo_task_continuable',
-    description: `Start a durable DSH continuable specialist session. It is listed with /omo-tasks and can be interrupted with /omo-interrupt; this tool does not wait for or retrieve a final result. Roles: ${ROLE_NAMES.join(', ')}.`,
+    description: `Start a durable DSH continuable specialist session. It is listed with /omo-tasks and can be interrupted with /omo-interrupt; this tool does not wait for or retrieve a final result. Roles: ${ROLE_NAMES.join(', ')}.${categoryRoutes.size > 0 ? ` Configured single-route categories: ${[...categoryRoutes.keys()].join(', ')}; category selects only the model route, while the role controls the specialist prompt.` : ''}`,
     parameters: {
+      ...categoryParameter(categoryRoutes),
       role: { type: 'string', enum: ROLE_NAMES, required: true, description: 'Specialist role matched to this task.' },
       task: { type: 'string', required: true, description: 'One self-contained task with a concrete expected result.' },
     },
@@ -356,7 +402,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, lifecycle, providerN
       if (typeof ctx.subagents.startContinuable !== 'function') {
         throw new Error('DSH continuation services are unavailable in this profile; use one-shot mode.')
       }
-      const route = roleRoutes.get(args.role)
+      const route = resolveCategoryRoute(categoryRoutes, args.category, roleRoutes.get(args.role))
       if (route?.maxTokens !== undefined || exec.agent.options?.maxTokens !== undefined) {
         throw new Error('Continuable tasks cannot set or inherit role/parent maxTokens: DSH RC2 does not preserve this ceiling across cold resume.')
       }
@@ -404,15 +450,23 @@ async function listOmoLabelChildren(ctx, agent, signal) {
   return descendants.filter(child => child.parentId === agent.id && matchesOmoLabelNamespace(child))
 }
 
-function registerCommands(ctx, config, projectSkills) {
+function registerCommands(ctx, config, projectSkills, goalService, llmService) {
   const queueTask = (agent, rawInput, mode) => {
+    if (typeof rawInput !== 'string') return { kind: 'error', text: `Usage: /${mode.command} ${mode.hint}` }
+    if (rawInput.length > config.maxTaskChars) {
+      return { kind: 'error', text: `Input is ${rawInput.length} characters; dsh-omo limit is ${config.maxTaskChars}.` }
+    }
     const task = rawInput.trim()
     if (!task) return { kind: 'error', text: `Usage: /${mode.command} ${mode.hint}` }
     queueParentMessage(agent, `${mode.directive}\n\n${task}`)
     return { kind: 'success', text: `Queued ${mode.label} work for the current agent.` }
   }
 
+  const stopContinuationCommand = goalService ? createStopContinuationCommand(goalService) : undefined
   const registrations = [
+    ...(goalService ? [createGoalCommand(goalService)] : []),
+    ...(stopContinuationCommand ? [stopContinuationCommand] : []),
+    ...(llmService ? [createModelCapabilitiesCommand(llmService)] : []),
     {
       name: 'ulw',
       description: 'Start an ultrawork-style multi-step task with specialist delegation and verification.',
@@ -447,6 +501,49 @@ function registerCommands(ctx, config, projectSkills) {
       handler: ({ agent, rawInput }) => queueTask(agent, rawInput, {
         command: 'review', hint: '<change or area to review>', label: 'review',
         directive: 'Perform a finding-first review. Inspect the relevant diff and callers; report only actionable correctness, regression, security, and test-gap findings with file/line evidence. Do not edit files unless the user asks.',
+      }),
+    },
+    {
+      name: 'handoff',
+      description: 'Request a copyable structured handoff summary in this conversation; no new session or durable file is created.',
+      input: { hint: '(no arguments)' },
+      handler: ({ agent, rawInput }) => {
+        if (typeof rawInput !== 'string') return { kind: 'error', text: 'Usage: /handoff (no arguments)' }
+        if (rawInput.length > config.maxTaskChars) {
+          return { kind: 'error', text: `Input is ${rawInput.length} characters; dsh-omo limit is ${config.maxTaskChars}.` }
+        }
+        if (rawInput.trim()) return { kind: 'error', text: 'Usage: /handoff (no arguments)' }
+        queueParentMessage(agent, [
+          'Prepare a structured, copyable context handoff for continuing work in a new session.',
+          'Use sections for objective and current status; completed work and key decisions; relevant file paths; verified checks and results; remaining work; risks and limitations; and recommended next steps.',
+          'Separate verified facts from uncertainty; do not fabricate state or claim this summary was saved.',
+          'Do not include secrets, credentials, or private tokens.',
+          'Return Markdown in this conversation only. The user must copy it into a new session; dsh-omo creates no session, file, or durable handoff artifact.',
+        ].join(' '))
+        return { kind: 'success', text: 'Queued a handoff summary request for the current agent. Copy its reply manually into a new session; no session or file was created.' }
+      },
+    },
+    {
+      name: 'refactor',
+      description: 'Queue a bounded refactor request; scope and strategy are prompt guidance, not enforcement.',
+      input: { hint: REFACTOR_COMMAND_HINT },
+      handler: ({ agent, rawInput }) => {
+        const parsed = parseRefactorInput(rawInput, config.maxTaskChars)
+        if (!parsed.ok) return { kind: 'error', text: parsed.error }
+        return queueTask(agent, parsed.target, {
+          command: 'refactor', hint: REFACTOR_COMMAND_HINT,
+          label: `${parsed.scope} ${parsed.strategy} refactor`,
+          directive: buildRefactorDirective(parsed),
+        })
+      },
+    },
+    {
+      name: 'remove-ai-slops',
+      description: 'Request conservative cleanup using the bundled remove-ai-slops workflow without committing changes.',
+      input: { hint: '<scope, files, or task>' },
+      handler: ({ agent, rawInput }) => queueTask(agent, rawInput, {
+        command: 'remove-ai-slops', hint: '<scope, files, or task>', label: 'conservative AI-slop cleanup',
+        directive: 'Perform conservative cleanup of AI-generated smells only within the requested or changed scope. Use the existing dsh-omo remove-ai-slops skill when it is enabled; inspect before editing, preserve behavior, avoid unrelated rewrites, review the final diff, run relevant focused checks, and never commit automatically. This command steers work; DSH permissions and approvals remain authoritative.',
       }),
     },
     {
@@ -506,7 +603,7 @@ function registerCommands(ctx, config, projectSkills) {
       description: 'Show the installed DSH OMO-inspired specialist roles and available commands.',
       handler: () => ({
         kind: 'success',
-        text: `dsh-omo is active. Roles: ${ROLE_NAMES.join(', ')}. Commands: /ulw, /ultrawork, /architect, /review, /omo-tasks, /omo-interrupt, /omo-skills-refresh. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. /omo-tasks uses a caller-supplied label prefix, not verified plugin origin, and DSH reports residency rather than completion. Bundled skills: ${SKILLS.map(skill => skill.name).join(', ')}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}; use /omo-skills-refresh to invalidate catalog cache. allowTools filters inherited global tools only; enforce hard boundaries with DSH policy/guards.`,
+        text: `dsh-omo is active. Roles: ${ROLE_NAMES.join(', ')}. Commands: ${goalService ? '/goal, ' : ''}${stopContinuationCommand ? '/stop-continuation, ' : ''}${llmService ? '/omo-models, ' : ''}/ulw, /ultrawork, /architect, /review, /handoff, /refactor, /remove-ai-slops, /omo-tasks, /omo-interrupt, /omo-skills-refresh. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). /omo-tasks uses a caller-supplied label prefix, not verified plugin origin, and DSH reports residency rather than completion. Bundled skills: ${SKILLS.map(skill => skill.name).join(', ')}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}; use /omo-skills-refresh to invalidate catalog cache. allowTools filters inherited global tools only; enforce hard boundaries with DSH policy/guards.`,
       }),
     },
   ]
@@ -515,12 +612,44 @@ function registerCommands(ctx, config, projectSkills) {
 
 export function apply(ctx, rawConfig) {
   const config = rawConfig
+  const goalService = optionalService(ctx, 'goals')
+  const llmService = optionalService(ctx, 'llm')
+  const teamService = config.enableTeamTools ? optionalService(ctx, 'agentTeams') : undefined
+  if (config.enableTeamTools && !teamService) {
+    throw new Error('dsh-omo: enableTeamTools requires the optional DSH agentTeams service')
+  }
+  const sessionToolsEnabled = config.enableSessionSearch || config.enableSessionRead || config.enableSessionList || config.enableSessionInfo
+  const sessionQueryService = sessionToolsEnabled ? optionalService(ctx, 'sessionQuery') : undefined
+  if (config.enableSessionSearch && (!sessionQueryService
+    || typeof sessionQueryService.searchSessions !== 'function'
+    || typeof sessionQueryService.observeSession !== 'function')) {
+    throw new Error('dsh-omo: enableSessionSearch requires DSH sessionQuery.searchSessions and observeSession')
+  }
+  if (config.enableSessionRead && (!sessionQueryService
+    || typeof sessionQueryService.readEvent !== 'function'
+    || typeof sessionQueryService.observeSession !== 'function'
+    || typeof sessionQueryService.filterSessions !== 'function')) {
+    throw new Error('dsh-omo: enableSessionRead requires DSH sessionQuery.readEvent, observeSession, and filterSessions')
+  }
+  if (config.enableSessionList && (!sessionQueryService
+    || typeof sessionQueryService.listSessions !== 'function'
+    || typeof sessionQueryService.observeSession !== 'function'
+    || typeof sessionQueryService.filterSessions !== 'function')) {
+    throw new Error('dsh-omo: enableSessionList requires DSH sessionQuery.listSessions, observeSession, and filterSessions')
+  }
+  if (config.enableSessionInfo && (!sessionQueryService
+    || typeof sessionQueryService.readTitleSnapshot !== 'function'
+    || typeof sessionQueryService.filterSessions !== 'function'
+    || typeof sessionQueryService.observeSession !== 'function')) {
+    throw new Error('dsh-omo: enableSessionInfo requires DSH sessionQuery.readTitleSnapshot, filterSessions, and observeSession')
+  }
   assertPositiveInteger('maxConcurrent', config.maxConcurrent)
   assertPositiveInteger('maxDepth', config.maxDepth)
   assertPositiveInteger('maxTaskChars', config.maxTaskChars)
   assertPositiveInteger('maxResultChars', config.maxResultChars)
   const providerName = normalizeProvider(config.provider)
-  const roleRoutes = normalizeRoleRoutes(config.roleRoutes)
+  const categoryRoutes = normalizeCategoryRoutes(config.categoryRoutes ?? [])
+  const roleRoutes = normalizeRoleRoutes(config.roleRoutes, categoryRoutes)
   const projectSkillDirs = normalizeProjectSkillDirs(config.projectSkillDirs)
   const disabledSkills = Array.isArray(config.disabledSkills) ? [...config.disabledSkills] : []
   const projectSkills = registerProjectSkillProvider(ctx, { projectSkillDirs, disabledSkills })
@@ -529,8 +658,12 @@ export function apply(ctx, rawConfig) {
   const activeRuns = new Map()
   const lifecycle = { disposed: false }
 
-  ctx.tools.register(specialistTool(ctx, config, roleRoutes, activeChildren, activeRuns, lifecycle, providerName))
-  if (config.enableContinuableTasks) ctx.tools.register(continuableSpecialistTool(ctx, config, roleRoutes, lifecycle, providerName))
+  ctx.tools.register(specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren, activeRuns, lifecycle, providerName))
+  if (config.enableContinuableTasks) ctx.tools.register(continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, lifecycle, providerName))
+  if (config.enableTeamTools) {
+    const disposeTeamTools = registerTeamTools(ctx, teamService)
+    ctx.effect(() => disposeTeamTools, 'dsh-omo Agent Teams tools')
+  }
   for (const skill of SKILLS) {
     ctx.skills.register({
       ...skill,
@@ -547,7 +680,23 @@ export function apply(ctx, rawConfig) {
     interpolate: false,
     text: ULTRAWORK_GUIDANCE,
   })
-  registerCommands(ctx, config, projectSkills)
+  registerCommands(ctx, config, projectSkills, goalService, llmService)
+  if (config.enableSessionSearch) {
+    const disposeSessionSearch = registerSessionSearchTool(ctx, sessionQueryService)
+    ctx.effect(() => disposeSessionSearch, 'dsh-omo session search tool')
+  }
+  if (config.enableSessionRead) {
+    const disposeSessionRead = registerSessionReadTool(ctx, sessionQueryService)
+    ctx.effect(() => disposeSessionRead, 'dsh-omo session read tool')
+  }
+  if (config.enableSessionList) {
+    const disposeSessionList = registerSessionListTool(ctx, sessionQueryService)
+    ctx.effect(() => disposeSessionList, 'dsh-omo session list tool')
+  }
+  if (config.enableSessionInfo) {
+    const disposeSessionInfo = registerSessionInfoTool(ctx, sessionQueryService)
+    ctx.effect(() => disposeSessionInfo, 'dsh-omo session info tool')
+  }
   ctx.effect(() => async () => {
     lifecycle.disposed = true
     const settled = await Promise.allSettled([...activeRuns.values()].map(run => run.dispose()))

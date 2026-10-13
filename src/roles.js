@@ -11,6 +11,14 @@ export const ROLES = Object.freeze({
     title: 'Architecture consultant',
     focus: 'Compare viable designs, identify integration points and failure modes, and recommend the smallest maintainable change. Do not modify files.',
   }),
+  'plan-consultant': Object.freeze({
+    title: 'Plan consultant',
+    focus: 'Turn the stated goal into a clear, scoped, sequenced implementation plan. Clarify assumptions, identify dependencies and risks, define acceptance criteria, and call out open questions. Do not implement the plan.',
+  }),
+  'plan-reviewer': Object.freeze({
+    title: 'Plan reviewer',
+    focus: 'Independently evaluate a proposed plan for completeness, feasibility, ordering, hidden dependencies, risks, and testability. Lead with concrete gaps or blockers and suggest targeted corrections; do not implement the plan.',
+  }),
   ultrabrain: Object.freeze({
     title: 'Deep reasoning specialist',
     focus: 'Analyze hard or cross-cutting problems. State assumptions, reason about edge cases, and propose a testable solution before making changes.',

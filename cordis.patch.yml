@@ -8,6 +8,8 @@
         maxTaskChars: 12000
         maxResultChars: 8000
         enableContinuableTasks: false
+        enableTeamTools: false
         projectSkillDirs: [.opencode/skills, .claude/skills]
         disabledSkills: []
+        categoryRoutes: []
         roleRoutes: []
