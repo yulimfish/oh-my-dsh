@@ -3,7 +3,7 @@ const MAX_CATEGORY_NAME_CHARS = 64
 const MAX_PROVIDER_CHARS = 128
 const MAX_MODEL_CHARS = 256
 const MAX_REASONING_EFFORT_CHARS = 64
-const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens'])
+const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'disable'])
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u
 const CATEGORY_ROUTE_DATA = new WeakMap()
 
@@ -64,8 +64,9 @@ function createReadonlyRegistry(routes) {
 }
 
 /**
- * Validate one provider/model route per named category plus optional reasoning
- * and a positive safe-integer token ceiling. Routes cannot declare chains or fallback.
+ * Validate one provider/model route per category plus optional reasoning,
+ * positive safe-integer token ceiling, and task-delegation disable flag. Routes
+ * cannot declare chains or fallback.
  */
 export function normalizeCategoryRoutes(entries) {
   if (!Array.isArray(entries) || entries.length > MAX_CATEGORY_ROUTES) {
@@ -103,6 +104,10 @@ export function normalizeCategoryRoutes(entries) {
       ? undefined
       : normalizeString(rawReasoningEffort, `category route "${name}" reasoningEffort`, MAX_REASONING_EFFORT_CHARS)
     const maxTokens = normalizeMaxTokens(entry.maxTokens, `category route "${name}" maxTokens`)
+    const disable = entry.disable === undefined ? false : entry.disable
+    if (typeof disable !== 'boolean') {
+      throw new TypeError(`category route "${name}" disable must be a boolean`)
+    }
 
     routes.set(name, Object.freeze({
       name,
@@ -110,6 +115,7 @@ export function normalizeCategoryRoutes(entries) {
       model,
       ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
+      disable,
     }))
   }
 
@@ -161,6 +167,10 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
   if (!categoryRoute) {
     const source = hasExplicitCategory ? 'explicit' : 'default'
     throw new TypeError(`unknown ${source} category "${selectedCategory}"`)
+  }
+  if (categoryRoute.disable) {
+    const source = hasExplicitCategory ? 'explicit' : 'default'
+    throw new TypeError(`disabled ${source} category "${selectedCategory}" cannot be used for task delegation`)
   }
 
   const rolePin = roleRoute === undefined ? undefined : normalizeRolePin(roleRoute)

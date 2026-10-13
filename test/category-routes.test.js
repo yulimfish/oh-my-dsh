@@ -29,6 +29,8 @@ test('normalizes immutable single provider/model routes and rejects invalid cate
   }
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', fallback: ['p2/m2'] }]), /unsupported field.*fallback/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', chains: [] }]), /unsupported field.*chains/u)
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', disable: 'true' }]), /disable must be a boolean/u)
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', disable: true }]), /requires both provider and model/u)
   assert.throws(() => resolveCategoryRoute(routes(), 'build', { maxTokens: 1.5 }), /role route maxTokens must be a positive safe integer/u)
 })
 
@@ -108,6 +110,23 @@ test('unknown explicit and default categories fail closed with clear errors', ()
   assert.throws(
     () => resolveCategoryRoute(categoryRoutes, undefined, { category: 'missing' }),
     /unknown default category "missing"/u,
+  )
+})
+
+test('disabled categories are omitted from selection and rejected when resolved', () => {
+  const categoryRoutes = normalizeCategoryRoutes([
+    { name: 'enabled', provider: 'p', model: 'm' },
+    { name: 'disabled', provider: 'p-disabled', model: 'm-disabled', disable: true },
+  ])
+  assert.equal(categoryRoutes.get('enabled').disable, false)
+  assert.equal(categoryRoutes.get('disabled').disable, true)
+  assert.throws(
+    () => resolveCategoryRoute(categoryRoutes, 'disabled', undefined),
+    /disabled explicit category "disabled"/u,
+  )
+  assert.throws(
+    () => resolveCategoryRoute(categoryRoutes, undefined, { category: 'disabled' }),
+    /disabled default category "disabled"/u,
   )
 })
 

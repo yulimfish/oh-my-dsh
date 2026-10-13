@@ -98,7 +98,9 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).projectSkillDirs, ['.opencode/skills', '.claude/skills'])
   assert.deepEqual(Config({}).disabledSkills, [])
   assert.deepEqual(Config({}).categoryRoutes, [])
-  assert.equal(Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128 }] }).categoryRoutes[0].maxTokens, 128)
+  const categoryConfig = Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true }] })
+  assert.equal(categoryConfig.categoryRoutes[0].maxTokens, 128)
+  assert.equal(categoryConfig.categoryRoutes[0].disable, true)
   assert.deepEqual(Config({ roleRoutes: [{ role: 'reviewer', denyTools: ['bash'] }] }).roleRoutes[0].denyTools, ['bash'])
   assert.equal(Config({}).enableTeamTools, false)
   assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
@@ -673,6 +675,78 @@ test('applies category maxTokens to one-shot routes and rejects unpersisted cont
     { agent: { id: 'parent-agent', options: { maxTokens: 512 } }, signal },
   ), /role\/category\/parent maxTokens/u)
   assert.equal(fixture.continuableStarts.length, 0, 'token ceilings reject before DSH continuation starts')
+})
+
+test('excludes disabled categories from delegation and rejects disabled defaults', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    categoryRoutes: [
+      { name: 'enabled', provider: 'enabled-provider', model: 'enabled-model' },
+      { name: 'paused', provider: 'paused-provider', model: 'paused-model', disable: true },
+    ],
+  })
+  const oneShot = fixture.tools.get('dsh_omo_task')
+  const continuable = fixture.tools.get('dsh_omo_task_continuable')
+  const parent = { id: 'parent-agent', followup() {} }
+  const signal = new AbortController().signal
+  assert.deepEqual(oneShot.parameters.properties.category.enum, ['enabled'])
+  assert.deepEqual(continuable.parameters.properties.category.enum, ['enabled'])
+  assert.doesNotMatch(oneShot.description, /paused/u)
+  assert.doesNotMatch(continuable.description, /paused/u)
+
+  await assert.rejects(oneShot.execute(
+    { role: 'quick', category: 'paused', task: 'Do not delegate with a disabled category' },
+    { agent: parent, signal },
+  ), /category.*must be one of \["enabled"\]/u)
+  await assert.rejects(continuable.execute(
+    { role: 'quick', category: 'paused', task: 'Do not persist a disabled category' },
+    { agent: parent, signal },
+  ), /category.*must be one of \["enabled"\]/u)
+  assert.equal(fixture.starts.length, 0)
+  assert.equal(fixture.continuableStarts.length, 0)
+
+  await oneShot.execute(
+    { role: 'quick', category: 'enabled', task: 'Enabled category still delegates' },
+    { agent: parent, signal },
+  )
+  assert.equal(fixture.starts.length, 1)
+
+  const disabledDefault = makeContext()
+  assert.throws(() => apply(disabledDefault.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{ name: 'paused', provider: 'paused-provider', model: 'paused-model', disable: true }],
+    roleRoutes: [{ role: 'explore', category: 'paused' }],
+  }), /references disabled category "paused"/u)
+  assert.equal(disabledDefault.tools.size, 0)
+
+  const allDisabled = makeContext()
+  apply(allDisabled.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    categoryRoutes: [{ name: 'paused', provider: 'paused-provider', model: 'paused-model', disable: true }],
+  })
+  const allDisabledOneShot = allDisabled.tools.get('dsh_omo_task')
+  const allDisabledContinuable = allDisabled.tools.get('dsh_omo_task_continuable')
+  assert.equal(Object.hasOwn(allDisabledOneShot.parameters.properties, 'category'), false)
+  assert.equal(Object.hasOwn(allDisabledContinuable.parameters.properties, 'category'), false)
+  assert.doesNotMatch(allDisabledOneShot.description, /Configured single-route categories/u)
+  assert.doesNotMatch(allDisabledContinuable.description, /Configured single-route categories/u)
+  const allDisabledParent = { id: 'all-disabled-parent', followup() {} }
+  const allDisabledSignal = new AbortController().signal
+  await allDisabledOneShot.execute(
+    { role: 'quick', task: 'No category is needed when all routes are disabled' },
+    { agent: allDisabledParent, signal: allDisabledSignal },
+  )
+  await allDisabledContinuable.execute(
+    { role: 'quick', task: 'Continuable task without a category' },
+    { agent: allDisabledParent, signal: allDisabledSignal },
+  )
+  assert.equal(allDisabled.starts.length, 1)
+  assert.equal(allDisabled.continuableStarts.length, 1)
+  assert.equal(Object.hasOwn(allDisabled.starts[0].request, 'agentOptions'), false)
+  assert.equal(Object.hasOwn(allDisabled.continuableStarts[0].request, 'agentOptions'), false)
 })
 
 test('rejects unknown role category assignments before plugin registration', () => {
