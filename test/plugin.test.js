@@ -535,6 +535,43 @@ test('applies per-role token and reasoning overrides without replacing the paren
   assert.deepEqual(fixture.starts[0].request.toolFilter, { deny: ['bash'] })
 })
 
+test('forwards bounded role promptAppend to one-shot and continuable task prompts only for that role', async () => {
+  const fixture = makeContext()
+  const promptAppend = 'Use concise headings.\nVerify each claim.'
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    categoryRoutes: [{ name: 'review', provider: 'review-provider', model: 'review-model' }],
+    roleRoutes: [
+      { role: 'reviewer', category: 'review', promptAppend },
+      { role: 'explore', promptAppend: '  \t\n ' },
+    ],
+  })
+  const oneShot = fixture.tools.get('dsh_omo_task')
+  const continuable = fixture.tools.get('dsh_omo_task_continuable')
+  const parent = { id: 'parent-agent', followup() {} }
+  const signal = new AbortController().signal
+  const task = 'Review the route behavior'
+
+  await oneShot.execute({ role: 'reviewer', category: 'review', task }, { agent: parent, signal })
+  await continuable.execute({ role: 'reviewer', category: 'review', task }, { agent: parent, signal })
+
+  const oneShotPrompt = fixture.starts[0].request.prompt[0].text
+  const continuablePrompt = fixture.continuableStarts[0].request.prompt[0].text
+  assert.equal(oneShotPrompt, continuablePrompt)
+  const focusIndex = oneShotPrompt.indexOf(getRole('reviewer').focus)
+  const appendHeadingIndex = oneShotPrompt.indexOf('## Additional role guidance')
+  const appendIndex = oneShotPrompt.indexOf(promptAppend)
+  const fixedInstructionIndex = oneShotPrompt.indexOf('Work only on the assigned task.')
+  const integrationIndex = oneShotPrompt.indexOf('The parent agent owns final integration and verification.')
+  const taskIndex = oneShotPrompt.indexOf('## Assigned task')
+  assert.ok(focusIndex < appendHeadingIndex && appendHeadingIndex < appendIndex)
+  assert.ok(appendIndex < fixedInstructionIndex && fixedInstructionIndex < integrationIndex && integrationIndex < taskIndex)
+
+  await oneShot.execute({ role: 'explore', task: 'Explore without appended guidance' }, { agent: parent, signal })
+  assert.doesNotMatch(fixture.starts[1].request.prompt[0].text, /Additional role guidance/u)
+})
+
 test('resolves category routes for one-shot and continuable delegation with role-route precedence', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
@@ -654,6 +691,20 @@ test('rejects unknown role routes and incomplete model routes', async () => {
     roleRoutes: [{ role: 'explore', denyTools: ['  '] }],
   }), /denyTools must contain non-empty tool names/u)
   assert.equal(invalidDeny.tools.size, 0)
+
+  const invalidPromptAppend = makeContext()
+  assert.throws(() => apply(invalidPromptAppend.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'explore', promptAppend: 'unsafe' + String.fromCodePoint(0) + 'append' }],
+  }), /promptAppend contains disallowed control characters/u)
+  assert.equal(invalidPromptAppend.tools.size, 0)
+
+  const oversizedPromptAppend = makeContext()
+  assert.throws(() => apply(oversizedPromptAppend.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'explore', promptAppend: 'x'.repeat(4097) }],
+  }), /4096 UTF-8 bytes/u)
+  assert.equal(oversizedPromptAppend.tools.size, 0)
 
   const emptyProvider = makeContext()
   assert.throws(() => apply(emptyProvider.ctx, { ...baseConfig, provider: '' }), /provider must not be blank/)

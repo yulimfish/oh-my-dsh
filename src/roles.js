@@ -47,17 +47,39 @@ export const ROLES = Object.freeze({
 
 export const ROLE_NAMES = Object.freeze(Object.keys(ROLES))
 
+export const MAX_ROLE_PROMPT_APPEND_BYTES = 4096
+
+const DISALLOWED_ROLE_PROMPT_CONTROLS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u
+
+export function normalizeRolePromptAppend(value, role = 'role') {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') {
+    throw new TypeError(`Role route "${role}" promptAppend must be a string`)
+  }
+  if (value.length > MAX_ROLE_PROMPT_APPEND_BYTES
+    || new TextEncoder().encode(value).byteLength > MAX_ROLE_PROMPT_APPEND_BYTES) {
+    throw new TypeError(`Role route "${role}" promptAppend must not exceed ${MAX_ROLE_PROMPT_APPEND_BYTES} UTF-8 bytes`)
+  }
+  if (DISALLOWED_ROLE_PROMPT_CONTROLS.test(value)) {
+    throw new TypeError(`Role route "${role}" promptAppend contains disallowed control characters`)
+  }
+  const normalized = value.trim()
+  return normalized || undefined
+}
+
 export function getRole(role) {
   return Object.hasOwn(ROLES, role) ? ROLES[role] : undefined
 }
 
-export function buildWorkerPrompt(role, task) {
+export function buildWorkerPrompt(role, task, promptAppend) {
   const definition = getRole(role)
   if (!definition) throw new TypeError(`Unknown specialist role: ${String(role)}`)
   if (typeof task !== 'string' || task.trim().length === 0) throw new TypeError('Task must not be empty')
+  const normalizedAppend = normalizeRolePromptAppend(promptAppend, role)
   return [
     `You are acting as the ${definition.title} for a delegated DeepSeek Harness task.`,
     definition.focus,
+    ...(normalizedAppend !== undefined ? ['', '## Additional role guidance', normalizedAppend] : []),
     'Work only on the assigned task. Do not widen the request or claim completion without evidence.',
     'The parent agent owns final integration and verification. Report changed files, commands, findings, and any blockers.',
     '',

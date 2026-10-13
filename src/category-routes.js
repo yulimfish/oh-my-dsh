@@ -123,7 +123,7 @@ function normalizeRolePin(roleRoute) {
 /**
  * Resolve explicit category over the role's default category. A role's explicit
  * provider/model pin and reasoning effort override the category; role-only
- * allowTools and maxTokens are copied without modification.
+ * settings such as maxTokens, tool filters, and promptAppend are preserved.
  */
 export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute) {
   if (roleRoute !== undefined && !isRecord(roleRoute)) {
