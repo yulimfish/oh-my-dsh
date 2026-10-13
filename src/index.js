@@ -3,7 +3,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { buildWorkerPrompt, normalizeRolePromptAppend, ROLE_NAMES } from './roles.js'
 import { SKILLS } from './skills.js'
-import { DEFAULT_PROJECT_SKILL_DIRS, normalizeProjectSkillDirs, registerProjectSkillProvider } from './project-skills.js'
+import { DEFAULT_PROJECT_SKILL_DIRS, normalizeEnabledProjectSkills, normalizeProjectSkillDirs, registerProjectSkillProvider } from './project-skills.js'
 import { createGoalCommand, createStopContinuationCommand } from './goals.js'
 import { registerTeamTools } from './teams.js'
 import { registerSessionSearchTool } from './session-search.js'
@@ -42,6 +42,7 @@ export const Config = z.object({
   enableSessionInfo: z.boolean().default(false),
   enableJobTools: z.boolean().default(false),
   projectSkillDirs: z.array(z.string()).default([...DEFAULT_PROJECT_SKILL_DIRS]),
+  enabledProjectSkills: z.union([z.array(z.string()), z.const(null)]),
   disabledSkills: z.array(z.string()).default([]),
   disabledOmoCommands: z.array(z.string()).default([]),
   disabledOmoRoles: z.array(z.string()).default([]),
@@ -815,8 +816,9 @@ export function apply(ctx, rawConfig) {
   const roleRoutes = normalizeRoleRoutes(config.roleRoutes, categoryRoutes, disabledOmoRoles)
   const disabledOmoCommands = normalizeDisabledOmoCommands(config.disabledOmoCommands ?? [])
   const projectSkillDirs = normalizeProjectSkillDirs(config.projectSkillDirs)
+  const enabledProjectSkills = normalizeEnabledProjectSkills(config.enabledProjectSkills)
   const disabledSkills = Array.isArray(config.disabledSkills) ? [...config.disabledSkills] : []
-  const projectSkills = registerProjectSkillProvider(ctx, { projectSkillDirs, disabledSkills })
+  const projectSkills = registerProjectSkillProvider(ctx, { projectSkillDirs, disabledSkills, enabledProjectSkills })
   const disabledSkillSet = new Set(disabledSkills)
   const activeChildren = new Set()
   const activeRuns = new Map()

@@ -274,6 +274,70 @@ test('discovers cwd-relative OpenCode and Claude skills through the DSH registry
   provider.dispose()
 })
 
+test('enabledProjectSkills filters only project-provider candidates with exact empty-list semantics', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeSkill(path.join(cwd, '.opencode/skills/allowed/SKILL.md'), { name: 'allowed-project-skill', content: 'Allowed project skill.' })
+  await writeSkill(path.join(cwd, '.opencode/skills/blocked/SKILL.md'), { name: 'blocked-project-skill', content: 'Blocked project skill.' })
+  const { fs, watchers, calls } = makeFileSystem()
+  const ctx = { fs, logger: { warn() {} } }
+  const lifetime = new AbortController()
+  const control = { signal: lifetime.signal, invalidate() {} }
+  const unrestricted = createProjectSkillProvider(ctx, control, { projectSkillDirs: ['.opencode/skills'] })
+  const all = await unrestricted.list({ cwd })
+  assert.equal(all.complete, true)
+  assert.deepEqual(all.candidates.map(candidate => candidate.name).sort(), ['allowed-project-skill', 'blocked-project-skill'])
+  const nullUnrestricted = createProjectSkillProvider(ctx, control, {
+    projectSkillDirs: ['.opencode/skills'],
+    enabledProjectSkills: null,
+  })
+  const nullList = await nullUnrestricted.list({ cwd })
+  assert.deepEqual(nullList.candidates.map(candidate => candidate.name).sort(), ['allowed-project-skill', 'blocked-project-skill'])
+  const nullCandidate = nullList.candidates.find(candidate => candidate.name === 'allowed-project-skill')
+  assert.equal((await nullUnrestricted.get(nullCandidate, { cwd })).content, 'Allowed project skill.')
+
+  const allowlisted = createProjectSkillProvider(ctx, control, {
+    projectSkillDirs: ['.opencode/skills'],
+    enabledProjectSkills: ['allowed-project-skill'],
+  })
+  const filtered = await allowlisted.list({ cwd })
+  assert.equal(filtered.complete, true)
+  assert.deepEqual(filtered.candidates.map(candidate => candidate.name), ['allowed-project-skill'])
+  assert.equal((await allowlisted.get(filtered.candidates[0], { cwd })).content, 'Allowed project skill.')
+  const { ctx: registryCtx, registry } = makeRegistry(fs)
+  registry.register({
+    name: 'blocked-project-skill',
+    description: 'External runtime copy',
+    provider: 'other-plugin',
+    source: 'custom',
+    content: 'External runtime skill.',
+  })
+  const registeredAllowlist = registerProjectSkillProvider(registryCtx, {
+    projectSkillDirs: ['.opencode/skills'],
+    enabledProjectSkills: ['allowed-project-skill'],
+  })
+  const registryView = await registry.snapshot({ cwd })
+  assert.deepEqual(registryView.skills.map(skill => skill.name).sort(), ['allowed-project-skill', 'blocked-project-skill'])
+  assert.equal((await registry.get('blocked-project-skill', { cwd })).provider, 'other-plugin', 'other providers remain visible when a project candidate is not allowlisted')
+  registeredAllowlist.dispose()
+  const blockedCandidate = all.candidates.find(candidate => candidate.name === 'blocked-project-skill')
+  assert.equal(await allowlisted.get(blockedCandidate, { cwd }), undefined, 'stale/direct candidates outside the allowlist cannot load')
+
+  const allowNone = createProjectSkillProvider(ctx, control, {
+    projectSkillDirs: ['.opencode/skills'],
+    enabledProjectSkills: [],
+  })
+  const readsBeforeEmptyList = calls.filter(call => call === 'readBytes').length
+  const empty = await allowNone.list({ cwd })
+  assert.equal(calls.filter(call => call === 'readBytes').length - readsBeforeEmptyList, 2, 'the allowlist filters visibility after frontmatter scanning')
+  assert.equal(empty.complete, true)
+  assert.deepEqual(empty.candidates, [])
+  assert.equal(await allowNone.get(all.candidates[0], { cwd }), undefined)
+
+  lifetime.abort()
+  assert.ok(watchers.length > 0)
+  assert.ok(watchers.every(watcher => watcher.closed))
+})
+
 test('deduplicates concurrent watcher initialization and bounds live handles', async t => {
   const cwd = await makeWorkspace(t)
   await writeSkill(path.join(cwd, '.opencode/skills/review/SKILL.md'), { name: 'concurrent-skill' })

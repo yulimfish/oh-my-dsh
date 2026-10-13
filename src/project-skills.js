@@ -93,6 +93,25 @@ function normalizeDisabledSkills(value = []) {
   return result
 }
 
+export function normalizeEnabledProjectSkills(value) {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value) || value.length > MAX_SKILLS) {
+    throw new TypeError(`enabledProjectSkills must be an array with at most ${MAX_SKILLS} skill names`)
+  }
+  const result = []
+  const seen = new Set()
+  for (let index = 0; index < value.length; index += 1) {
+    const name = value[index]
+    if (typeof name !== 'string' || !isSkillName(name)) {
+      throw new TypeError(`enabledProjectSkills[${index}] must be a valid skill name`)
+    }
+    if (seen.has(name)) throw new TypeError('enabledProjectSkills must not contain duplicate names')
+    seen.add(name)
+    result.push(name)
+  }
+  return Object.freeze(result)
+}
+
 function parseYamlBoolean(value, field, defaultValue) {
   if (value === undefined) return defaultValue
   if (typeof value === 'boolean') return value
@@ -298,6 +317,8 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
   const fs = ctx.fs
   const directories = normalizeProjectSkillDirs(options.projectSkillDirs)
   const disabledSkills = normalizeDisabledSkills(options.disabledSkills)
+  const enabledProjectSkills = normalizeEnabledProjectSkills(options.enabledProjectSkills)
+  const enabledProjectSkillSet = enabledProjectSkills === undefined ? undefined : new Set(enabledProjectSkills)
   const watcherLimit = options.watcherLimit === undefined ? MAX_WATCHERS : options.watcherLimit
   if (!Number.isSafeInteger(watcherLimit) || watcherLimit < 1 || watcherLimit > MAX_WATCHERS) {
     throw new TypeError(`watcherLimit must be an integer from 1 to ${MAX_WATCHERS}`)
@@ -663,6 +684,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
               }
               continue
             }
+            if (enabledProjectSkillSet && !enabledProjectSkillSet.has(skill.name)) continue
             candidates.push(makeCandidate(skill, rootPath, rootTarget, skillDirectoryTarget, fileTarget, rootIndex, resolverPath))
           }
         } catch (error) {
@@ -675,6 +697,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       return { candidates, complete }
     },
     async get(candidate, lookup = {}) {
+      if (enabledProjectSkillSet && !enabledProjectSkillSet.has(candidate?.name)) return undefined
       const locator = candidate?.locator
       if (!locator?.rootTarget || !locator?.fileTarget || !locator?.skillDirectoryTarget || typeof locator.resolverPath !== 'string' || typeof lookup.cwd !== 'string' || !lookup.cwd) return undefined
       const signal = lifecycleSignal(lookup.signal, control.signal)
