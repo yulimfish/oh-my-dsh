@@ -168,6 +168,40 @@ test('normalizes bounded literal category guidance and carries the selected appe
   ]), /disallowed control characters/u)
 })
 
+test('normalizes bounded single-line category descriptions for chooser prompts', () => {
+  const routes = normalizeCategoryRoutes([
+    { name: 'review', provider: 'p', model: 'm', description: '  Review patches for regressions.  ' },
+    { name: 'blank', provider: 'p2', model: 'm2', description: '  \t  ' },
+  ])
+  const maximumDescription = 'é'.repeat(256)
+  assert.equal(routes.get('review').description, 'Review patches for regressions.')
+  assert.equal(routes.get('blank').description, undefined)
+  assert.equal(normalizeCategoryRoutes([
+    { name: 'limit', provider: 'p3', model: 'm3', description: maximumDescription },
+  ]).get('limit').description, maximumDescription)
+
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', description: 42 },
+  ]), /description must be a string/u)
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', description: 'é'.repeat(257) },
+  ]), /512 UTF-8 bytes/u)
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', description: ' '.repeat(513) },
+  ]), /512 UTF-8 bytes/u)
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', description: 'multi-line\ndescription' },
+  ]), /single line/u)
+  assert.throws(() => normalizeCategoryRoutes([
+    { name: 'bad', provider: 'p', model: 'm', description: 'bad\u009ftext' },
+  ]), /single line/u)
+  for (const description of ['\nleading', 'trailing\r', 'before\u2028after', 'before\u2029after']) {
+    assert.throws(() => normalizeCategoryRoutes([
+      { name: 'bad', provider: 'p', model: 'm', description },
+    ]), /single line/u)
+  }
+})
+
 test('normalizer registry, category routes, and resolved routes are immutable', () => {
   const categoryRoutes = routes()
   const categoryRoute = categoryRoutes.get('build')

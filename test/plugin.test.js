@@ -98,10 +98,11 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).projectSkillDirs, ['.opencode/skills', '.claude/skills'])
   assert.deepEqual(Config({}).disabledSkills, [])
   assert.deepEqual(Config({}).categoryRoutes, [])
-  const categoryConfig = Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true, promptAppend: 'Use a bounded budget.' }] })
+  const categoryConfig = Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true, promptAppend: 'Use a bounded budget.', description: 'A short chooser description.' }] })
   assert.equal(categoryConfig.categoryRoutes[0].maxTokens, 128)
   assert.equal(categoryConfig.categoryRoutes[0].disable, true)
   assert.equal(categoryConfig.categoryRoutes[0].promptAppend, 'Use a bounded budget.')
+  assert.equal(categoryConfig.categoryRoutes[0].description, 'A short chooser description.')
   assert.deepEqual(Config({ roleRoutes: [{ role: 'reviewer', denyTools: ['bash'] }] }).roleRoutes[0].denyTools, ['bash'])
   assert.equal(Config({}).enableTeamTools, false)
   assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
@@ -631,6 +632,15 @@ test('rejects invalid category promptAppend before plugin registration', () => {
   assert.equal(fixture.tools.size, 0)
 })
 
+test('rejects invalid category descriptions before plugin registration', () => {
+  const fixture = makeContext()
+  assert.throws(() => apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{ name: 'research', provider: 'p', model: 'm', description: 'first line\nsecond line' }],
+  }), /description must be a single line/u)
+  assert.equal(fixture.tools.size, 0)
+})
+
 test('resolves category routes for one-shot and continuable delegation with role-route precedence', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
@@ -739,8 +749,8 @@ test('excludes disabled categories from delegation and rejects disabled defaults
     ...baseConfig,
     enableContinuableTasks: true,
     categoryRoutes: [
-      { name: 'enabled', provider: 'enabled-provider', model: 'enabled-model' },
-      { name: 'paused', provider: 'paused-provider', model: 'paused-model', disable: true },
+      { name: 'enabled', provider: 'enabled-provider', model: 'enabled-model', description: 'The category available for active work.' },
+      { name: 'paused', provider: 'paused-provider', model: 'paused-model', disable: true, description: 'This description must stay hidden.' },
     ],
   })
   const oneShot = fixture.tools.get('dsh_omo_task')
@@ -749,8 +759,10 @@ test('excludes disabled categories from delegation and rejects disabled defaults
   const signal = new AbortController().signal
   assert.deepEqual(oneShot.parameters.properties.category.enum, ['enabled'])
   assert.deepEqual(continuable.parameters.properties.category.enum, ['enabled'])
-  assert.doesNotMatch(oneShot.description, /paused/u)
-  assert.doesNotMatch(continuable.description, /paused/u)
+  assert.match(oneShot.description, /enabled: The category available for active work\./u)
+  assert.match(continuable.description, /enabled: The category available for active work\./u)
+  assert.doesNotMatch(oneShot.description, /paused|This description must stay hidden/u)
+  assert.doesNotMatch(continuable.description, /paused|This description must stay hidden/u)
 
   await assert.rejects(oneShot.execute(
     { role: 'quick', category: 'paused', task: 'Do not delegate with a disabled category' },

@@ -46,6 +46,7 @@ export const Config = z.object({
     maxTokens: z.number(),
     disable: z.boolean(),
     promptAppend: z.string(),
+    description: z.string(),
   })).default([]),
   roleRoutes: z.array(z.object({
     role: z.string().required(),
@@ -285,6 +286,13 @@ function availableCategoryNames(categoryRoutes) {
     .map(([name]) => name)
 }
 
+function availableCategoryDescriptions(categoryRoutes) {
+  if (!categoryRoutes) return []
+  return [...categoryRoutes]
+    .filter(([, route]) => !route.disable)
+    .map(([name, route]) => route.description ? `${name}: ${route.description}` : name)
+}
+
 function categoryParameter(categoryRoutes) {
   const categories = availableCategoryNames(categoryRoutes)
   if (categories.length === 0) return {}
@@ -292,7 +300,7 @@ function categoryParameter(categoryRoutes) {
     category: {
       type: 'string',
       enum: categories,
-      description: 'Optional configured category selecting one fixed provider/model/reasoning route with an optional maxTokens ceiling and bounded task-message guidance; explicit role provider/model/reasoning/token settings take precedence.',
+      description: 'Optional configured category selecting one fixed provider/model/reasoning route with an optional maxTokens ceiling and bounded task-message guidance; see this tool’s description for configured category descriptions. Explicit role provider/model/reasoning/token settings take precedence.',
     },
   }
 }
@@ -323,7 +331,7 @@ function taskPrompt(role, task, rolePromptAppend, categoryPromptAppend) {
 function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren, activeRuns, lifecycle, providerName) {
   return defineTool({
     name: 'dsh_omo_task',
-    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Role allow/deny filters affect inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${ROLE_NAMES.join(', ')}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories: ${availableCategoryNames(categoryRoutes).join(', ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
+    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Role allow/deny filters affect inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${ROLE_NAMES.join(', ')}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: {
@@ -408,7 +416,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren,
 function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, lifecycle, providerName) {
   return defineTool({
     name: 'dsh_omo_task_continuable',
-    description: `Start a durable DSH continuable specialist session. It is listed with /omo-tasks and can be interrupted with /omo-interrupt; this tool does not wait for or retrieve a final result. Continuable launches reject role/category/parent maxTokens ceilings because DSH RC2 does not preserve them across cold resume. Role allow/deny filters affect inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${ROLE_NAMES.join(', ')}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories: ${availableCategoryNames(categoryRoutes).join(', ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
+    description: `Start a durable DSH continuable specialist session. It is listed with /omo-tasks and can be interrupted with /omo-interrupt; this tool does not wait for or retrieve a final result. Continuable launches reject role/category/parent maxTokens ceilings because DSH RC2 does not preserve them across cold resume. Role allow/deny filters affect inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${ROLE_NAMES.join(', ')}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: { type: 'string', enum: ROLE_NAMES, required: true, description: 'Specialist role matched to this task.' },

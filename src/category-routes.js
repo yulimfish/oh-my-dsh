@@ -2,11 +2,13 @@ import { normalizeCategoryPromptAppend } from './roles.js'
 
 const MAX_CATEGORY_ROUTES = 32
 const MAX_CATEGORY_NAME_CHARS = 64
+const MAX_CATEGORY_DESCRIPTION_BYTES = 512
 const MAX_PROVIDER_CHARS = 128
 const MAX_MODEL_CHARS = 256
 const MAX_REASONING_EFFORT_CHARS = 64
-const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'disable', 'promptAppend'])
+const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'disable', 'promptAppend', 'description'])
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u
+const DESCRIPTION_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u
 const CATEGORY_ROUTE_DATA = new WeakMap()
 
 function isRecord(value) {
@@ -27,6 +29,22 @@ function normalizeString(value, label, maxLength) {
 
 function normalizeCategoryName(value, label = 'category name') {
   return normalizeString(value, label, MAX_CATEGORY_NAME_CHARS)
+}
+
+function normalizeCategoryDescription(value, categoryName) {
+  if (value === undefined) return undefined
+  const label = `category route "${categoryName}" description`
+  if (typeof value !== 'string'
+    || value.length > MAX_CATEGORY_DESCRIPTION_BYTES
+    || new TextEncoder().encode(value).byteLength > MAX_CATEGORY_DESCRIPTION_BYTES) {
+    throw new TypeError(`${label} must be a string of at most ${MAX_CATEGORY_DESCRIPTION_BYTES} UTF-8 bytes`)
+  }
+  const normalized = value.trim()
+  if (!normalized) return undefined
+  if (DESCRIPTION_CONTROL_CHARACTERS.test(value)) {
+    throw new TypeError(`${label} must be a single line without control characters`)
+  }
+  return normalized
 }
 
 function normalizeMaxTokens(value, label) {
@@ -67,8 +85,9 @@ function createReadonlyRegistry(routes) {
 
 /**
  * Validate one provider/model route per category plus optional reasoning,
- * positive safe-integer token ceiling, task-delegation disable flag, and bounded
- * literal prompt guidance. Routes cannot declare chains or fallback.
+ * positive safe-integer token ceiling, task-delegation disable flag, bounded
+ * literal prompt guidance, and bounded single-line tool-prompt descriptions.
+ * Routes cannot declare chains or fallback.
  */
 export function normalizeCategoryRoutes(entries) {
   if (!Array.isArray(entries) || entries.length > MAX_CATEGORY_ROUTES) {
@@ -111,6 +130,7 @@ export function normalizeCategoryRoutes(entries) {
       throw new TypeError(`category route "${name}" disable must be a boolean`)
     }
     const promptAppend = normalizeCategoryPromptAppend(entry.promptAppend, name)
+    const description = normalizeCategoryDescription(entry.description, name)
 
     routes.set(name, Object.freeze({
       name,
@@ -120,6 +140,7 @@ export function normalizeCategoryRoutes(entries) {
       ...(maxTokens !== undefined ? { maxTokens } : {}),
       disable,
       ...(promptAppend !== undefined ? { promptAppend } : {}),
+      ...(description !== undefined ? { description } : {}),
     }))
   }
 
