@@ -27,6 +27,7 @@ const DISABLEABLE_OMO_COMMAND_NAMES = Object.freeze([
   'refactor', 'remove-ai-slops', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'omo',
 ])
 const DISABLEABLE_OMO_COMMAND_SET = new Set(DISABLEABLE_OMO_COMMAND_NAMES)
+const OMO_BUNDLED_SKILL_NAME_SET = new Set(SKILLS.map(skill => skill.name))
 
 export const Config = z.object({
   provider: z.string().default(DEFAULT_PROVIDER),
@@ -44,6 +45,7 @@ export const Config = z.object({
   projectSkillDirs: z.array(z.string()).default([...DEFAULT_PROJECT_SKILL_DIRS]),
   enabledProjectSkills: z.union([z.array(z.string()), z.const(null)]),
   disabledProjectSkills: z.array(z.string()).default([]),
+  disabledOmoBundledSkills: z.array(z.string()).default([]),
   disabledSkills: z.array(z.string()).default([]),
   disabledOmoCommands: z.array(z.string()).default([]),
   disabledOmoRoles: z.array(z.string()).default([]),
@@ -156,6 +158,26 @@ function normalizeDisabledOmoRoles(value) {
   }
   if (disabled.size === ROLE_NAMES.length) {
     throw new TypeError('dsh-omo: disabledOmoRoles must leave at least one specialist role enabled')
+  }
+  return disabled
+}
+
+function normalizeDisabledOmoBundledSkills(value) {
+  if (value === undefined) return new Set()
+  if (!Array.isArray(value)) {
+    throw new TypeError('dsh-omo: disabledOmoBundledSkills must be an array of bundled skill names')
+  }
+  if (value.length > OMO_BUNDLED_SKILL_NAME_SET.size) {
+    throw new TypeError(`dsh-omo: disabledOmoBundledSkills may contain at most ${OMO_BUNDLED_SKILL_NAME_SET.size} names`)
+  }
+  const disabled = new Set()
+  for (let index = 0; index < value.length; index += 1) {
+    const skill = value[index]
+    if (typeof skill !== 'string' || skill.trim() !== skill || !OMO_BUNDLED_SKILL_NAME_SET.has(skill)) {
+      throw new TypeError(`dsh-omo: disabledOmoBundledSkills[${index}] must name one of this plugin's bundled skills`)
+    }
+    if (disabled.has(skill)) throw new TypeError('dsh-omo: disabledOmoBundledSkills must not contain duplicates')
+    disabled.add(skill)
   }
   return disabled
 }
@@ -587,7 +609,7 @@ async function listOmoLabelChildren(ctx, agent, signal) {
   return descendants.filter(child => child.parentId === agent.id && matchesOmoLabelNamespace(child))
 }
 
-function registerCommands(ctx, config, projectSkills, goalService, llmService, disabledOmoCommands, activeRoleNames) {
+function registerCommands(ctx, config, projectSkills, goalService, llmService, disabledOmoCommands, activeRoleNames, activeBundledSkills) {
   let availableCommandNames = ''
   let taskCommandHelp = ''
   let skillRefreshHelp = ''
@@ -743,7 +765,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, d
       description: 'Show the installed DSH OMO-inspired specialist roles and available commands.',
       handler: () => ({
         kind: 'success',
-        text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). DSH job tools: ${config.enableJobTools ? 'enabled' : 'disabled'} (current-Agent job monitoring only; not OMO background-agent results).${taskCommandHelp} Bundled skills: ${SKILLS.map(skill => skill.name).join(', ')}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
+        text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). DSH job tools: ${config.enableJobTools ? 'enabled' : 'disabled'} (current-Agent job monitoring only; not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
       }),
     },
   ]
@@ -819,6 +841,8 @@ export function apply(ctx, rawConfig) {
   const projectSkillDirs = normalizeProjectSkillDirs(config.projectSkillDirs)
   const enabledProjectSkills = normalizeEnabledProjectSkills(config.enabledProjectSkills)
   const disabledProjectSkills = normalizeDisabledProjectSkills(config.disabledProjectSkills)
+  const disabledOmoBundledSkills = normalizeDisabledOmoBundledSkills(config.disabledOmoBundledSkills)
+  const activeBundledSkills = SKILLS.filter(skill => !disabledOmoBundledSkills.has(skill.name))
   const disabledSkills = Array.isArray(config.disabledSkills) ? [...config.disabledSkills] : []
   const projectSkills = registerProjectSkillProvider(ctx, { projectSkillDirs, disabledSkills, enabledProjectSkills, disabledProjectSkills })
   const disabledSkillSet = new Set(disabledSkills)
@@ -832,7 +856,7 @@ export function apply(ctx, rawConfig) {
     const disposeTeamTools = registerTeamTools(ctx, teamService)
     ctx.effect(() => disposeTeamTools, 'dsh-omo Agent Teams tools')
   }
-  for (const skill of SKILLS) {
+  for (const skill of activeBundledSkills) {
     ctx.skills.register({
       ...skill,
       source: 'bundled',
@@ -848,7 +872,7 @@ export function apply(ctx, rawConfig) {
     interpolate: false,
     text: buildUltraworkGuidance(disabledOmoCommands, activeRoleNames),
   })
-  registerCommands(ctx, config, projectSkills, goalService, llmService, disabledOmoCommands, activeRoleNames)
+  registerCommands(ctx, config, projectSkills, goalService, llmService, disabledOmoCommands, activeRoleNames, activeBundledSkills)
   if (config.enableSessionSearch) {
     const disposeSessionSearch = registerSessionSearchTool(ctx, sessionQueryService)
     ctx.effect(() => disposeSessionSearch, 'dsh-omo session search tool')

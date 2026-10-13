@@ -108,6 +108,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({ enabledProjectSkills: ['incident-response'] }).enabledProjectSkills, ['incident-response'])
   assert.deepEqual(Config({}).disabledProjectSkills, [])
   assert.deepEqual(Config({ disabledProjectSkills: ['legacy-project-skill'] }).disabledProjectSkills, ['legacy-project-skill'])
+  assert.deepEqual(Config({}).disabledOmoBundledSkills, [])
+  assert.deepEqual(Config({ disabledOmoBundledSkills: ['debugging'] }).disabledOmoBundledSkills, ['debugging'])
   assert.deepEqual(Config({}).categoryRoutes, [])
   const categoryConfig = Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true, promptAppend: 'Use a bounded budget.', description: 'A short chooser description.', tools: { read: false, bash: true } }] })
   assert.equal(categoryConfig.categoryRoutes[0].maxTokens, 128)
@@ -139,6 +141,53 @@ test('project-skill filters configure only the project provider and preserve bun
   })
   assert.deepEqual([...fixture.skills.keys()], SKILLS.map(skill => skill.name))
   assert.ok(fixture.skillProviders.has('dsh-omo-project-skills'))
+})
+
+test('disabledOmoBundledSkills hides only this plugin’s bundled skills and updates /omo help', () => {
+  const fixture = makeContext()
+  const externalSkill = {
+    name: 'debugging',
+    description: 'Registered by another provider.',
+    source: 'runtime',
+    invocation: { modelInvocable: true, userInvocable: true },
+  }
+  fixture.skills.set(externalSkill.name, externalSkill)
+  apply(fixture.ctx, {
+    ...baseConfig,
+    disabledOmoBundledSkills: ['debugging', 'omo-code-review'],
+    disabledSkills: ['omo-research'],
+  })
+
+  const expectedBundled = SKILLS.map(skill => skill.name).filter(name => !['debugging', 'omo-code-review'].includes(name))
+  assert.deepEqual([...fixture.skills.keys()].sort(), [...expectedBundled, externalSkill.name].sort())
+  assert.ok(fixture.skillProviders.has('dsh-omo-project-skills'), 'bundled filtering leaves the project provider registered')
+  assert.deepEqual(fixture.skills.get('omo-research').invocation, { modelInvocable: false, userInvocable: false })
+  const help = fixture.commands.get('omo').handler().text
+  assert.match(help, /Bundled skills:/u)
+  assert.ok(!help.includes('debugging'))
+  assert.ok(!help.includes('omo-code-review'))
+  assert.ok(help.includes('omo-research'), 'disabledSkills still leaves this bundled entry visible')
+  assert.strictEqual(fixture.skills.get('debugging'), externalSkill, 'a same-name other-provider entry remains because dsh-omo skipped its bundled registration')
+})
+
+test('rejects invalid disabledOmoBundledSkills before plugin registration', () => {
+  const invalidValues = [
+    'debugging',
+    ['not-a-dsh-omo-skill'],
+    [42],
+    ['debugging', 'debugging'],
+    Array(SKILLS.length + 1).fill('debugging'),
+  ]
+  for (const disabledOmoBundledSkills of invalidValues) {
+    const fixture = makeContext()
+    assert.throws(() => apply(fixture.ctx, { ...baseConfig, disabledOmoBundledSkills }), /disabledOmoBundledSkills/u)
+    assert.equal(fixture.tools.size, 0)
+    assert.equal(fixture.commands.size, 0)
+    assert.equal(fixture.skills.size, 0)
+    assert.equal(fixture.skillProviders.size, 0)
+    assert.equal(fixture.sections.length, 0)
+    assert.equal(fixture.effects.length, 0)
+  }
 })
 
 test('rejects invalid enabledProjectSkills before plugin registration', () => {
