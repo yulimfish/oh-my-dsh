@@ -98,6 +98,7 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).projectSkillDirs, ['.opencode/skills', '.claude/skills'])
   assert.deepEqual(Config({}).disabledSkills, [])
   assert.deepEqual(Config({}).categoryRoutes, [])
+  assert.deepEqual(Config({ roleRoutes: [{ role: 'reviewer', denyTools: ['bash'] }] }).roleRoutes[0].denyTools, ['bash'])
   assert.equal(Config({}).enableTeamTools, false)
   assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
   assert.equal(Config({}).enableSessionSearch, false)
@@ -504,7 +505,7 @@ test('applies configured model route and explicit tool restriction', async () =>
     ...baseConfig,
     roleRoutes: [{
       role: 'test', provider: 'deepseek-official', model: 'deepseek-flash',
-      reasoningEffort: 'high', maxTokens: 1024, allowTools: ['read', 'grep'],
+      reasoningEffort: 'high', maxTokens: 1024, allowTools: [' read ', 'grep', 'read'], denyTools: [' bash ', 'bash', 'web_fetch'],
     }],
   })
   await fixture.tools.get('dsh_omo_task').execute(
@@ -514,20 +515,24 @@ test('applies configured model route and explicit tool restriction', async () =>
   assert.deepEqual(fixture.starts[0].request.agentOptions, {
     provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'high', maxTokens: 1024,
   })
-  assert.deepEqual(fixture.starts[0].request.toolFilter, { allow: ['read', 'grep'] })
+  assert.deepEqual(fixture.starts[0].request.toolFilter, {
+    allow: ['read', 'grep'],
+    deny: ['bash', 'web_fetch'],
+  })
 })
 
 test('applies per-role token and reasoning overrides without replacing the parent model route', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
     ...baseConfig,
-    roleRoutes: [{ role: 'quick', maxTokens: 384, reasoningEffort: 'medium' }],
+    roleRoutes: [{ role: 'quick', maxTokens: 384, reasoningEffort: 'medium', denyTools: [' bash '] }],
   })
   await fixture.tools.get('dsh_omo_task').execute(
     { role: 'quick', task: 'Summarize the changed files' },
     { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal },
   )
   assert.deepEqual(fixture.starts[0].request.agentOptions, { reasoningEffort: 'medium', maxTokens: 384 })
+  assert.deepEqual(fixture.starts[0].request.toolFilter, { deny: ['bash'] })
 })
 
 test('resolves category routes for one-shot and continuable delegation with role-route precedence', async () => {
@@ -540,10 +545,10 @@ test('resolves category routes for one-shot and continuable delegation with role
       { name: 'review', provider: 'review-provider', model: 'review-model', reasoningEffort: 'low' },
     ],
     roleRoutes: [
-      { role: 'explore', category: 'build', allowTools: ['read'] },
+      { role: 'explore', category: 'build', allowTools: ['read'], denyTools: ['bash'] },
       {
         role: 'reviewer', category: 'build', provider: 'role-provider', model: 'role-model',
-        reasoningEffort: 'medium', allowTools: ['grep'],
+        reasoningEffort: 'medium', allowTools: ['grep'], denyTools: ['bash'],
       },
     ],
   })
@@ -557,7 +562,7 @@ test('resolves category routes for one-shot and continuable delegation with role
   assert.deepEqual(fixture.starts[0].request.agentOptions, {
     provider: 'review-provider', model: 'review-model', reasoningEffort: 'low',
   })
-  assert.deepEqual(fixture.starts[0].request.toolFilter, { allow: ['read'] })
+  assert.deepEqual(fixture.starts[0].request.toolFilter, { allow: ['read'], deny: ['bash'] })
 
   await oneShot.execute({ role: 'explore', task: 'Use the role default category' }, { agent: parent, signal })
   assert.deepEqual(fixture.starts[1].request.agentOptions, {
@@ -568,7 +573,7 @@ test('resolves category routes for one-shot and continuable delegation with role
   assert.deepEqual(fixture.continuableStarts[0].request.agentOptions, {
     provider: 'role-provider', model: 'role-model', reasoningEffort: 'medium',
   })
-  assert.deepEqual(fixture.continuableStarts[0].request.toolFilter, { allow: ['grep'] })
+  assert.deepEqual(fixture.continuableStarts[0].request.toolFilter, { allow: ['grep'], deny: ['bash'] })
 
   await assert.rejects(oneShot.execute(
     { role: 'explore', category: 'not-configured', task: 'Do not launch' },
@@ -586,17 +591,35 @@ test('rejects unknown role category assignments before plugin registration', () 
   assert.equal(fixture.tools.size, 0)
 })
 
-test('preserves an empty inherited-global tool allowlist without claiming a hard deny-all', async () => {
+test('preserves an empty inherited-global allowlist in one-shot and continuable requests', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
     ...baseConfig,
+    enableContinuableTasks: true,
     roleRoutes: [{ role: 'security', allowTools: [] }],
   })
+  const parent = { id: 'parent-agent', followup() {} }
+  const signal = new AbortController().signal
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'security', task: 'Review the configuration' },
+    { agent: parent, signal },
+  )
+  await fixture.tools.get('dsh_omo_task_continuable').execute(
+    { role: 'security', task: 'Review the configuration persistently' },
+    { agent: parent, signal },
+  )
+  assert.deepEqual(fixture.starts[0].request.toolFilter, { allow: [] })
+  assert.deepEqual(fixture.continuableStarts[0].request.toolFilter, { allow: [] })
+})
+
+test('omits an empty deny list as a no-op', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, { ...baseConfig, roleRoutes: [{ role: 'security', denyTools: [] }] })
   await fixture.tools.get('dsh_omo_task').execute(
     { role: 'security', task: 'Review the configuration' },
     { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal },
   )
-  assert.deepEqual(fixture.starts[0].request.toolFilter, { allow: [] })
+  assert.equal(Object.hasOwn(fixture.starts[0].request, 'toolFilter'), false)
 })
 
 test('rejects unknown role routes and incomplete model routes', async () => {
@@ -617,6 +640,20 @@ test('rejects unknown role routes and incomplete model routes', async () => {
     ...baseConfig,
     roleRoutes: [{ role: 'explore' }, { role: 'explore', provider: 'x', model: 'y' }],
   }), /duplicate role route/)
+
+  const invalidAllow = makeContext()
+  assert.throws(() => apply(invalidAllow.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'explore', allowTools: ['   '] }],
+  }), /allowTools must contain non-empty tool names/u)
+  assert.equal(invalidAllow.tools.size, 0)
+
+  const invalidDeny = makeContext()
+  assert.throws(() => apply(invalidDeny.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'explore', denyTools: ['  '] }],
+  }), /denyTools must contain non-empty tool names/u)
+  assert.equal(invalidDeny.tools.size, 0)
 
   const emptyProvider = makeContext()
   assert.throws(() => apply(emptyProvider.ctx, { ...baseConfig, provider: '' }), /provider must not be blank/)

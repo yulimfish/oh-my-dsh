@@ -52,6 +52,7 @@ export const Config = z.object({
     reasoningEffort: z.string(),
     maxTokens: z.number(),
     allowTools: z.array(z.string()),
+    denyTools: z.array(z.string()),
   })).default([]),
 })
 
@@ -65,7 +66,7 @@ When the user says **ultrawork**, **ulw**, or requests a substantial multi-step 
 3. Inspect every worker's evidence and diff; do not accept a worker's completion claim as verification.
 4. Run the relevant project checks yourself (or have a test worker provide exact command output), fix failures, and report what was and was not verified.
 
-Use the **reviewer** or **security** role for review tasks, but a role prompt does not enforce read-only behavior. allowTools restricts inherited global tools only; child-scoped registrations may remain available. For a hard boundary, enforce DSH-native permission, sandbox, or monotonic tool-guard policy; dsh-omo does not install a per-worker hard guard. DSH retains authority over filesystem, shell, network, and approvals. One-shot delegation is the default and sends a host-attributed settlement notice followed by a bounded child-authored relay (untrusted evidence); use dsh_omo_task_continuable only when that optional tool is enabled and a durable child session is needed. omo-tasks lists direct children by caller-supplied dsh-omo label, with DSH running/inactive residency only; the label does not prove plugin origin and inactive does not mean completed. omo-interrupt rejects inactive rows and only attempts resident-child signals; DSH is fire-and-return and may no-op.`
+Use the **reviewer** or **security** role for review tasks, but a role prompt does not enforce read-only behavior. allowTools/denyTools filter inherited global tools only; child-scoped registrations may remain available. For a hard boundary, enforce DSH-native permission, sandbox, or monotonic tool-guard policy; dsh-omo does not install a per-worker hard guard. DSH retains authority over filesystem, shell, network, and approvals. One-shot delegation is the default and sends a host-attributed settlement notice followed by a bounded child-authored relay (untrusted evidence); use dsh_omo_task_continuable only when that optional tool is enabled and a durable child session is needed. omo-tasks lists direct children by caller-supplied dsh-omo label, with DSH running/inactive residency only; the label does not prove plugin origin and inactive does not mean completed. omo-interrupt rejects inactive rows and only attempts resident-child signals; DSH is fire-and-return and may no-op.`
 
 function optionalService(ctx, name) {
   return typeof ctx?.get === 'function' ? ctx.get(name) : ctx?.[name]
@@ -83,6 +84,14 @@ function normalizeProvider(value) {
     throw new Error('dsh-omo: provider must not be blank')
   }
   return value.trim()
+}
+
+function normalizeToolNames(value, role, field) {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.some(tool => typeof tool !== 'string' || tool.trim().length === 0)) {
+    throw new Error(`dsh-omo: role route "${role}" ${field} must contain non-empty tool names`)
+  }
+  return Object.freeze([...new Set(value.map(tool => tool.trim()))])
 }
 
 function normalizeRoleRoutes(routes, categoryRoutes) {
@@ -116,18 +125,15 @@ function normalizeRoleRoutes(routes, categoryRoutes) {
     if (entry.reasoningEffort !== undefined && !reasoningEffort) {
       throw new Error(`dsh-omo: role route "${entry.role}" reasoningEffort must not be blank`)
     }
-    if (entry.allowTools !== undefined && (!Array.isArray(entry.allowTools) || entry.allowTools.some(tool => typeof tool !== 'string' || tool.trim().length === 0))) {
-      throw new Error(`dsh-omo: role route "${entry.role}" allowTools must contain non-empty tool names`)
-    }
-    const allowTools = entry.allowTools === undefined
-      ? undefined
-      : Object.freeze([...new Set(entry.allowTools.map(tool => tool.trim()))])
+    const allowTools = normalizeToolNames(entry.allowTools, entry.role, 'allowTools')
+    const denyTools = normalizeToolNames(entry.denyTools, entry.role, 'denyTools')
     result.set(entry.role, Object.freeze({
       ...entry,
       ...(category !== undefined ? { category } : {}),
       ...(provider ? { provider, model } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
-      ...(allowTools ? { allowTools } : {}),
+      ...(allowTools !== undefined ? { allowTools } : {}),
+      ...(denyTools !== undefined ? { denyTools } : {}),
     }))
   }
   return result
@@ -279,6 +285,15 @@ function agentOptionsForRoute(route, { includeMaxTokens = true } = {}) {
   return Object.keys(options).length > 0 ? options : undefined
 }
 
+function toolFilterForRoute(route) {
+  if (!route) return undefined
+  const filter = {
+    ...(route.allowTools !== undefined ? { allow: route.allowTools } : {}),
+    ...(route.denyTools?.length > 0 ? { deny: route.denyTools } : {}),
+  }
+  return Object.keys(filter).length > 0 ? filter : undefined
+}
+
 function taskPrompt(role, task) {
   return [{ type: 'text', text: buildWorkerPrompt(role, task) }]
 }
@@ -286,7 +301,7 @@ function taskPrompt(role, task) {
 function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren, activeRuns, lifecycle, providerName) {
   return defineTool({
     name: 'dsh_omo_task',
-    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Roles: ${ROLE_NAMES.join(', ')}.${categoryRoutes.size > 0 ? ` Configured single-route categories: ${[...categoryRoutes.keys()].join(', ')}; category selects only the model route, while the role controls the specialist prompt.` : ''}`,
+    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Role allow/deny filters affect inherited global tools only; child-scoped registrations may remain. Roles: ${ROLE_NAMES.join(', ')}.${categoryRoutes.size > 0 ? ` Configured single-route categories: ${[...categoryRoutes.keys()].join(', ')}; category selects only the model route, while the role controls the specialist prompt.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: {
@@ -327,7 +342,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren,
 
       const route = resolveCategoryRoute(categoryRoutes, args.category, roleRoutes.get(args.role))
       const agentOptions = agentOptionsForRoute(route)
-      const toolFilter = route?.allowTools ? { allow: route.allowTools } : undefined
+      const toolFilter = toolFilterForRoute(route)
       const prompt = taskPrompt(args.role, args.task)
       const label = `${args.role}: ${args.task.trim().replace(/\s+/gu, ' ').slice(0, 72)}`
       // Reserve synchronously before the async provider start so parallel tool
@@ -370,7 +385,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren,
 function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, lifecycle, providerName) {
   return defineTool({
     name: 'dsh_omo_task_continuable',
-    description: `Start a durable DSH continuable specialist session. It is listed with /omo-tasks and can be interrupted with /omo-interrupt; this tool does not wait for or retrieve a final result. Roles: ${ROLE_NAMES.join(', ')}.${categoryRoutes.size > 0 ? ` Configured single-route categories: ${[...categoryRoutes.keys()].join(', ')}; category selects only the model route, while the role controls the specialist prompt.` : ''}`,
+    description: `Start a durable DSH continuable specialist session. It is listed with /omo-tasks and can be interrupted with /omo-interrupt; this tool does not wait for or retrieve a final result. Role allow/deny filters affect inherited global tools only; child-scoped registrations may remain. Roles: ${ROLE_NAMES.join(', ')}.${categoryRoutes.size > 0 ? ` Configured single-route categories: ${[...categoryRoutes.keys()].join(', ')}; category selects only the model route, while the role controls the specialist prompt.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: { type: 'string', enum: ROLE_NAMES, required: true, description: 'Specialist role matched to this task.' },
@@ -415,7 +430,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, life
         throw new Error(`DSH subagent provider "${providerName}" does not support continuable tasks; use one-shot mode or choose a capable provider.`)
       }
       const agentOptions = agentOptionsForRoute(route, { includeMaxTokens: false })
-      const toolFilter = route?.allowTools ? { allow: route.allowTools } : undefined
+      const toolFilter = toolFilterForRoute(route)
       const accepted = await ctx.subagents.startContinuable({
         provider: providerName,
         label: `dsh-omo:${args.role}`,
@@ -605,7 +620,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService) {
       description: 'Show the installed DSH OMO-inspired specialist roles and available commands.',
       handler: () => ({
         kind: 'success',
-        text: `dsh-omo is active. Roles: ${ROLE_NAMES.join(', ')}. Commands: ${goalService ? '/goal, ' : ''}${stopContinuationCommand ? '/stop-continuation, ' : ''}${llmService ? '/omo-models, ' : ''}/ulw, /ultrawork, /architect, /review, /handoff, /refactor, /remove-ai-slops, /omo-tasks, /omo-interrupt, /omo-skills-refresh. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). DSH job tools: ${config.enableJobTools ? 'enabled' : 'disabled'} (current-Agent job monitoring only; not OMO background-agent results). /omo-tasks uses a caller-supplied label prefix, not verified plugin origin, and DSH reports residency rather than completion. Bundled skills: ${SKILLS.map(skill => skill.name).join(', ')}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}; use /omo-skills-refresh to invalidate catalog cache. allowTools filters inherited global tools only; enforce hard boundaries with DSH policy/guards.`,
+        text: `dsh-omo is active. Roles: ${ROLE_NAMES.join(', ')}. Commands: ${goalService ? '/goal, ' : ''}${stopContinuationCommand ? '/stop-continuation, ' : ''}${llmService ? '/omo-models, ' : ''}/ulw, /ultrawork, /architect, /review, /handoff, /refactor, /remove-ai-slops, /omo-tasks, /omo-interrupt, /omo-skills-refresh. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). DSH job tools: ${config.enableJobTools ? 'enabled' : 'disabled'} (current-Agent job monitoring only; not OMO background-agent results). /omo-tasks uses a caller-supplied label prefix, not verified plugin origin, and DSH reports residency rather than completion. Bundled skills: ${SKILLS.map(skill => skill.name).join(', ')}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}; use /omo-skills-refresh to invalidate catalog cache. allowTools/denyTools filter inherited global tools only; enforce hard boundaries with DSH policy/guards.`,
       }),
     },
   ]
