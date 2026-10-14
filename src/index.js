@@ -10,6 +10,7 @@ import { registerSessionSearchTool } from './session-search.js'
 import { registerSessionReadTool } from './session-read.js'
 import { registerSessionListTool } from './session-list.js'
 import { registerSessionInfoTool } from './session-info.js'
+import { registerLspNavigationTools } from './lsp-tools.js'
 import { createJobKillCommand } from './job-commands.js'
 import { registerJobTools } from './job-tools.js'
 import { createModelCapabilitiesCommand } from './model-capabilities.js'
@@ -44,6 +45,7 @@ export const Config = z.object({
   enableSessionList: z.boolean().default(false),
   enableSessionInfo: z.boolean().default(false),
   enableJobTools: z.boolean().default(false),
+  enableLspTools: z.boolean().default(false),
   projectSkillDirs: z.array(z.string()).default([...DEFAULT_PROJECT_SKILL_DIRS]),
   enabledProjectSkills: z.union([z.array(z.string()), z.const(null)]),
   disabledProjectSkills: z.array(z.string()).default([]),
@@ -799,8 +801,8 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
-              `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; sessionQuery=${presence('sessionQuery')}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}.`,
               'Presence does not prove readiness or health. This command does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
           }
@@ -808,7 +810,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
         if (rawInput) return { kind: 'error', text: 'Usage: /omo [status].' }
         return {
           kind: 'success',
-          text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
+          text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). LSP navigation: ${config.enableLspTools ? 'enabled' : 'disabled'} (two read-only queries; provider-dependent and not a path authorization boundary). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
         }
       },
     },
@@ -868,6 +870,8 @@ export function apply(ctx, rawConfig) {
     throw new Error('dsh-omo: enableJobTools requires the optional DSH jobController.list and jobController.follow methods')
   }
   const sessionQueryService = optionalService(ctx, 'sessionQuery')
+  const lspService = optionalService(ctx, 'lsp')
+  const sessionsService = optionalService(ctx, 'sessions')
   if (config.enableSessionSearch && (!sessionQueryService
     || typeof sessionQueryService.searchSessions !== 'function'
     || typeof sessionQueryService.observeSession !== 'function')) {
@@ -891,6 +895,11 @@ export function apply(ctx, rawConfig) {
     || typeof sessionQueryService.observeSession !== 'function')) {
     throw new Error('dsh-omo: enableSessionInfo requires DSH sessionQuery.readTitleSnapshot, filterSessions, and observeSession')
   }
+  if (config.enableLspTools && (!lspService || typeof lspService.query !== 'function'
+    || !sessionsService || typeof sessionsService.get !== 'function'
+    || !ctx.fs || typeof ctx.fs.resolve !== 'function' || typeof ctx.fs.contains !== 'function' || typeof ctx.fs.processPath !== 'function')) {
+    throw new Error('dsh-omo: enableLspTools requires DSH lsp.query, sessions.get, and fs.resolve, fs.contains, and fs.processPath')
+  }
   const statusSnapshot = Object.freeze({
     flags: Object.freeze({
       continuableTasks: config.enableContinuableTasks === true,
@@ -900,13 +909,16 @@ export function apply(ctx, rawConfig) {
       sessionRead: config.enableSessionRead === true,
       sessionList: config.enableSessionList === true,
       sessionInfo: config.enableSessionInfo === true,
+      lspTools: config.enableLspTools === true,
     }),
     services: Object.freeze({
       goals: goalService !== undefined && goalService !== null,
       llm: llmService !== undefined && llmService !== null,
       agentTeams: teamService !== undefined && teamService !== null,
       jobController: jobController !== undefined && jobController !== null,
+      lsp: lspService !== undefined && lspService !== null,
       sessionQuery: sessionQueryService !== undefined && sessionQueryService !== null,
+      sessions: sessionsService !== undefined && sessionsService !== null,
     }),
   })
   assertPositiveInteger('maxConcurrent', config.maxConcurrent)
@@ -974,6 +986,10 @@ export function apply(ctx, rawConfig) {
   if (config.enableJobTools) {
     const disposeJobTools = registerJobTools(ctx, jobController)
     ctx.effect(() => disposeJobTools, 'dsh-omo Host job tools')
+  }
+  if (config.enableLspTools) {
+    const disposeLspTools = registerLspNavigationTools(ctx, lspService, sessionsService, ctx.fs)
+    ctx.effect(() => disposeLspTools, 'dsh-omo read-only LSP navigation tools')
   }
   ctx.effect(() => async () => {
     lifecycle.disposed = true

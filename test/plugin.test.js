@@ -50,7 +50,7 @@ function makeContext(options = {}) {
     },
     systemPrompt: { section: section => { sections.push(section); return () => {} } },
     commands: { register: command => { commands.set(command.name, command); return () => commands.delete(command.name) } },
-    fs: {},
+    fs: options.fs ?? {},
     skills: {
       register: skill => { skills.set(skill.name, skill); return () => skills.delete(skill.name) },
       registerProvider: create => {
@@ -86,6 +86,7 @@ const baseConfig = {
   enableSessionList: false,
   enableSessionInfo: false,
   enableJobTools: false,
+  enableLspTools: false,
   projectSkillDirs: ['.opencode/skills', '.claude/skills'],
   disabledSkills: [],
   disabledOmoCommands: [],
@@ -130,6 +131,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableSessionInfo: true }).enableSessionInfo, true)
   assert.equal(Config({}).enableJobTools, false)
   assert.equal(Config({ enableJobTools: true }).enableJobTools, true)
+  assert.equal(Config({}).enableLspTools, false)
+  assert.equal(Config({ enableLspTools: true }).enableLspTools, true)
 })
 
 test('/omo status reports feature flags and service presence without calling business methods', () => {
@@ -139,11 +142,15 @@ test('/omo status reports feature flags and service presence without calling bus
     llm: { listProviders: () => calls.push('llm.listProviders'), resolveModelInfo: () => calls.push('llm.resolveModelInfo') },
     agentTeams: { membership: () => calls.push('agentTeams.membership') },
     jobController: { list: () => calls.push('jobController.list'), follow: () => calls.push('jobController.follow') },
+    lsp: { query: () => calls.push('lsp.query') },
     sessionQuery: { searchSessions: () => calls.push('sessionQuery.searchSessions'), observeSession: () => calls.push('sessionQuery.observeSession') },
+    sessions: { get: () => calls.push('sessions.get') },
   }
   const fixture = makeContext({ services })
   const mutableConfig = { ...baseConfig, enableJobTools: true, enableSessionSearch: true }
   apply(fixture.ctx, mutableConfig)
+  assert.equal(fixture.tools.has('lsp_goto_definition'), false, 'present LSP services do not enable tools by default')
+  assert.equal(fixture.tools.has('lsp_find_references'), false, 'present LSP services do not enable tools by default')
 
   const command = fixture.commands.get('omo')
   assert.equal(command.input.hint, '[status]', 'the optional status subcommand is discoverable')
@@ -151,8 +158,8 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
-  assert.match(status.text, /teamTools=disabled; jobTools=enabled; sessionSearch=enabled/u)
-  assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; sessionQuery=present/u)
+  assert.match(status.text, /teamTools=disabled; jobTools=enabled; lspTools=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; lsp=present; sessionQuery=present; sessions=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
   assert.equal(command.handler({ rawInput: 'status extra' }).kind, 'error')
@@ -160,7 +167,7 @@ test('/omo status reports feature flags and service presence without calling bus
 
   const absent = makeContext()
   apply(absent.ctx, baseConfig)
-  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; agentTeams=absent; jobController=absent; sessionQuery=absent/u)
+  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; agentTeams=absent; jobController=absent; lsp=absent; sessionQuery=absent; sessions=absent/u)
 })
 
 test('project-skill filters configure only the project provider and preserve bundled registrations', () => {
@@ -508,6 +515,38 @@ test('mounts specialist controls and caps the untrusted worker body', async () =
   assert.equal(relay.content.slice(1).map(block => block.text).join('').length, 64)
   assert.equal(relay.content[1].text, 'worker-output-'.repeat(4) + 'worker-o')
   assert.deepEqual(fixture.disposals, ['child-1'])
+})
+
+test('mounts only opt-in read-only LSP navigation tools when the exact services are available', () => {
+  const disabled = makeContext()
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.tools.has('lsp_goto_definition'), false)
+  assert.equal(disabled.tools.has('lsp_find_references'), false)
+
+  const missing = makeContext()
+  assert.throws(
+    () => apply(missing.ctx, { ...baseConfig, enableLspTools: true }),
+    /enableLspTools requires DSH lsp\.query/u,
+  )
+  assert.equal(missing.tools.size, 0, 'missing LSP dependencies fail before registrations')
+
+  const calls = []
+  const services = {
+    lsp: { query: async () => { calls.push('lsp.query') } },
+    sessions: { get: () => { calls.push('sessions.get') } },
+  }
+  const fs = {
+    resolve: async () => { calls.push('fs.resolve'); return {} },
+    contains: () => { calls.push('fs.contains'); return true },
+    processPath: () => { calls.push('fs.processPath'); return '/workspace/file.js' },
+  }
+  const enabled = makeContext({ services, fs })
+  apply(enabled.ctx, { ...baseConfig, enableLspTools: true })
+  assert.deepEqual([...enabled.tools.keys()].filter(tool => tool.startsWith('lsp_')), ['lsp_goto_definition', 'lsp_find_references'])
+  const status = enabled.commands.get('omo').handler({ rawInput: 'status' }).text
+  assert.match(status, /lspTools=enabled/u)
+  assert.match(status, /lsp=present/u)
+  assert.deepEqual(calls, [], 'registration and status inspect presence only; query methods wait for explicit tool calls')
 })
 
 test('mounts the native Goal command only with Goals and opt-in Agent Teams tools only with the Host service', async () => {
