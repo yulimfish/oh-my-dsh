@@ -21,6 +21,7 @@ const MAX_WRITE_SCOPES = 12
 const MAX_WRITE_SCOPE_WARNINGS = 8
 const MAX_WRITE_SCOPE_WARNING_CHARS = 500
 const MAX_OUTPUT_CHARS = 48_000
+const MAX_STATUS_MEMBER_OUTPUT_CHARS = 22_000
 const MAX_WAIT_MS = 3_600_000
 const WAIT_TOOL_TIMEOUT_MS = MAX_WAIT_MS + 30_000
 const ACTIONS = ['claim', 'release', 'edit', 'set_dependencies', 'complete', 'reopen', 'reassign', 'delete']
@@ -250,6 +251,18 @@ function projectTask(source) {
   return result
 }
 
+function projectMembership(source) {
+  if (!isRecord(source) || !isRecord(source.root) || !ROLES.includes(source.role)) {
+    throw new TypeError('Team service returned an invalid membership')
+  }
+  return {
+    teamId: boundedIdentifier(source.id, 'team id'),
+    rootAgentId: boundedIdentifier(source.root.id, 'root agent id'),
+    role: source.role,
+    name: boundedString(source.name, 'team member name', MAX_NAME),
+  }
+}
+
 function projectList(value, property, projector, maxItems) {
   if (!Array.isArray(value)) throw new TypeError(`Team service returned an invalid ${property} list`)
   const scanLimit = Math.min(value.length, maxItems)
@@ -270,6 +283,26 @@ function projectList(value, property, projector, maxItems) {
 
   if (items.length < value.length) truncated = true
   return { [property]: items, truncated }
+}
+
+function projectAggregateList(value, property, projector, maxItems, base, maxOutputChars) {
+  if (!Array.isArray(value)) throw new TypeError(`Team service returned an invalid ${property} list`)
+  const scanLimit = Math.min(value.length, maxItems)
+  const items = []
+  let truncated = value.length > scanLimit
+
+  for (let index = 0; index < scanLimit; index += 1) {
+    const item = projector(value[index])
+    const hasMore = truncated || index + 1 < value.length
+    const candidate = { ...base, [property]: [...items, item], [`${property}Truncated`]: hasMore }
+    if (JSON.stringify(candidate).length > maxOutputChars) {
+      truncated = true
+      break
+    }
+    items.push(item)
+  }
+
+  return { items, truncated: truncated || items.length < value.length }
 }
 
 function renderJson(_args, value) {
@@ -303,16 +336,34 @@ const tools = [
       name: { type: 'string', required: true },
     }),
     execute: (_args, _exec, caller) => {
-      const value = service.membership(caller)
-      if (!isRecord(value) || !isRecord(value.root) || !ROLES.includes(value.role)) {
-        throw new TypeError('Team service returned an invalid membership')
-      }
-      return {
-        teamId: boundedIdentifier(value.id, 'team id'),
-        rootAgentId: boundedIdentifier(value.root.id, 'root agent id'),
-        role: value.role,
-        name: boundedString(value.name, 'team member name', MAX_NAME),
-      }
+      return projectMembership(service.membership(caller))
+    },
+  }),
+  service => teamTool({
+    name: 'team_status',
+    description: 'Read-only bounded snapshot of the exact caller’s current Host Team: membership, up to 100 members, and up to 100 tasks. The aggregate is capped at 48,000 serialized characters with explicit truncation flags. It does not enumerate or mutate Teams; inactive is not completion, and writeScopes are advisory only.',
+    parameters: {},
+    outputSchema: objectSchema({
+      teamId: { type: 'string', required: true },
+      rootAgentId: { type: 'string', required: true },
+      role: { type: 'string', enum: ROLES, required: true },
+      name: { type: 'string', required: true },
+      members: { type: 'array', items: member, required: true },
+      membersTruncated: { type: 'boolean', required: true },
+      tasks: { type: 'array', items: task, required: true },
+      tasksTruncated: { type: 'boolean', required: true },
+    }),
+    execute: (_args, _exec, caller) => {
+      const membership = projectMembership(service.membership(caller))
+      const base = { ...membership, members: [], membersTruncated: false, tasks: [], tasksTruncated: false }
+      const members = projectAggregateList(
+        service.listMembers(caller), 'members', projectMember, MAX_MEMBERS, base, MAX_STATUS_MEMBER_OUTPUT_CHARS,
+      )
+      const withMembers = { ...base, members: members.items, membersTruncated: members.truncated }
+      const tasks = projectAggregateList(
+        service.listTasks(caller), 'tasks', projectTask, MAX_TASKS, withMembers, MAX_OUTPUT_CHARS,
+      )
+      return { ...withMembers, tasks: tasks.items, tasksTruncated: tasks.truncated }
     },
   }),
   service => teamTool({

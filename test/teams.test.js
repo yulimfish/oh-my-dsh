@@ -4,6 +4,7 @@ import { registerTeamTools } from '../src/teams.js'
 
 const NAMES = [
   'team_membership',
+  'team_status',
   'team_members',
   'team_spawn',
   'team_send_message',
@@ -83,6 +84,7 @@ const exec = { agent: lead, signal }
 function input(name, overrides = {}) {
   const defaults = {
     team_membership: {},
+    team_status: {},
     team_members: {},
     team_spawn: {
       name: 'builder', description: 'Implement a focused task.', prompt: [{ type: 'text', text: 'Build it.' }],
@@ -99,7 +101,7 @@ function input(name, overrides = {}) {
   return { ...defaults[name], ...overrides }
 }
 
-test('registers ten uniquely named team tools with bounded, strict output contracts', () => {
+test('registers eleven uniquely named team tools with bounded, strict output contracts', () => {
   const fixture = makeContext()
   const dispose = registerTeamTools(fixture.ctx)
   assert.deepEqual([...fixture.registered.keys()], NAMES)
@@ -161,11 +163,11 @@ test('attempts every Team tool disposer and reports cleanup failures once', () =
 
   const dispose = registerTeamTools(ctx, service)
   assert.throws(dispose, error => error === expectedError)
-  assert.equal(disposedNames.length, 10)
-  assert.equal(new Set(disposedNames).size, 10)
+  assert.equal(disposedNames.length, 11)
+  assert.equal(new Set(disposedNames).size, 11)
   assert.equal(registered.size, 0)
   assert.doesNotThrow(dispose, 'subsequent disposal is idempotent after every handle was attempted')
-  assert.equal(disposedNames.length, 10)
+  assert.equal(disposedNames.length, 11)
 })
 
 test('rolls back earlier tool registrations when a later registration fails', () => {
@@ -278,6 +280,121 @@ test('routes membership, roster, task reads/creation, and interruption through t
   assert.ok(calls.every(call => call.caller === lead))
 })
 
+test('team_status aggregates only the exact caller Team through read-only Host methods', async () => {
+  const calls = []
+  let mutations = 0
+  const fixture = makeContext(makeService({
+    membership: caller => {
+      calls.push({ method: 'membership', caller })
+      return { root: { id: 'agent-root' }, id: 'team-1', role: 'lead', name: 'lead' }
+    },
+    listMembers: caller => {
+      calls.push({ method: 'members', caller })
+      return [memberView()]
+    },
+    listTasks: caller => {
+      calls.push({ method: 'tasks', caller })
+      return [taskView()]
+    },
+    spawnTeammate: async () => { mutations += 1; return { member: memberView() } },
+    sendMessage: async () => { mutations += 1; return { messageId: 'message-1', status: 'queued' } },
+    createTask: async () => { mutations += 1; return taskView() },
+    updateTask: async () => { mutations += 1; return taskView() },
+    interrupt: () => { mutations += 1; return { previousStatus: 'running' } },
+  }))
+  registerTeamTools(fixture.ctx)
+
+  const tool = fixture.registered.get('team_status')
+  assert.match(tool.description, /read-only bounded snapshot/iu)
+  assert.match(tool.description, /does not enumerate or mutate Teams/u)
+  assert.deepEqual(tool.parameters.properties, {})
+  const result = await tool.execute({}, exec)
+  assert.deepEqual(calls, [
+    { method: 'membership', caller: lead },
+    { method: 'members', caller: lead },
+    { method: 'tasks', caller: lead },
+  ])
+  assert.equal(result.teamId, 'team-1')
+  assert.equal(result.rootAgentId, 'agent-root')
+  assert.equal(result.role, 'lead')
+  assert.equal(result.name, 'lead')
+  assert.equal(result.members.length, 1)
+  assert.equal(result.members[0].id, 'agent-2')
+  assert.equal(result.membersTruncated, false)
+  assert.equal(result.tasks.length, 1)
+  assert.equal(result.tasks[0].id, 'task-1')
+  assert.equal(result.tasksTruncated, false)
+  assert.equal(JSON.stringify(result).length <= 48_000, true)
+  assert.equal(mutations, 0, 'the aggregate status tool never calls Team mutation methods')
+})
+
+test('team_status caps aggregate snapshots and rejects malformed Host rows', async () => {
+  const largeMember = memberView({
+    description: 'D'.repeat(8_000),
+    diagnostics: Array.from({ length: 20 }, () => 'x'.repeat(1_000)),
+  })
+  const largeTask = taskView({
+    subject: 'S'.repeat(240),
+    description: 'D'.repeat(8_000),
+    blockedBy: Array.from({ length: 100 }, () => 'b'.repeat(128)),
+    writeScopes: Array.from({ length: 32 }, () => 'w'.repeat(512)),
+    writeScopeWarnings: Array.from({ length: 20 }, () => 'x'.repeat(1_000)),
+  })
+  const fixture = makeContext(makeService({
+    listMembers: () => Array.from({ length: 100 }, () => largeMember),
+    listTasks: () => Array.from({ length: 100 }, () => largeTask),
+  }))
+  registerTeamTools(fixture.ctx)
+  const result = await fixture.registered.get('team_status').execute({}, exec)
+  assert.ok(result.members.length > 0)
+  assert.ok(result.tasks.length > 0)
+  assert.equal(result.membersTruncated, true)
+  assert.equal(result.tasksTruncated, true)
+  assert.ok(result.members.every(row => row.description.length <= 1_000 && row.diagnostics.length <= 8))
+  assert.ok(result.tasks.every(row => row.description.length <= 1_200 && row.writeScopes.length <= 12))
+  assert.ok(JSON.stringify(result).length <= 48_000)
+
+  let taskReads = 0
+  const malformed = makeContext(makeService({
+    listMembers: () => [memberView({ status: 'complete' })],
+    listTasks: () => { taskReads += 1; return [] },
+  }))
+  registerTeamTools(malformed.ctx)
+  await assert.rejects(malformed.registered.get('team_status').execute({}, exec), /invalid member role or status/u)
+  assert.equal(taskReads, 0, 'invalid member snapshots fail before reporting tasks')
+
+  const invalidTask = makeContext(makeService({ listTasks: () => [taskView({ status: 'unknown' })] }))
+  registerTeamTools(invalidTask.ctx)
+  await assert.rejects(invalidTask.registered.get('team_status').execute({}, exec), /invalid task status/u)
+
+  const hostReadError = new Error('Team task read failed')
+  const hostFailure = makeContext(makeService({ listTasks: () => { throw hostReadError } }))
+  registerTeamTools(hostFailure.ctx)
+  await assert.rejects(hostFailure.registered.get('team_status').execute({}, exec), error => error === hostReadError)
+
+  const memberCountFixture = makeContext(makeService({
+    listMembers: () => Array.from({ length: 101 }, (_, index) => memberView({ id: `member-${index}` })),
+    listTasks: () => [],
+  }))
+  registerTeamTools(memberCountFixture.ctx)
+  const memberCount = await memberCountFixture.registered.get('team_status').execute({}, exec)
+  assert.equal(memberCount.members.length, 100)
+  assert.equal(memberCount.membersTruncated, true)
+  assert.equal(memberCount.tasks.length, 0)
+  assert.equal(memberCount.tasksTruncated, false)
+
+  const taskCountFixture = makeContext(makeService({
+    listMembers: () => [],
+    listTasks: () => Array.from({ length: 101 }, (_, index) => taskView({ id: `task-${index}` })),
+  }))
+  registerTeamTools(taskCountFixture.ctx)
+  const taskCount = await taskCountFixture.registered.get('team_status').execute({}, exec)
+  assert.equal(taskCount.members.length, 0)
+  assert.equal(taskCount.membersTruncated, false)
+  assert.equal(taskCount.tasks.length, 100)
+  assert.equal(taskCount.tasksTruncated, true)
+})
+
 test('fails closed for a missing agent before invoking any Host service method', async () => {
   let calls = 0
   const source = makeService()
@@ -382,10 +499,15 @@ test('only inspects bounded prefixes of large service arrays', async () => {
 
   const taskResult = await fixture.registered.get('team_list_tasks').execute({}, exec)
   const memberResult = await fixture.registered.get('team_members').execute({}, exec)
+  const statusResult = await fixture.registered.get('team_status').execute({}, exec)
   assert.equal(taskResult.tasks[0].blockedBy.length, 12)
   assert.equal(taskResult.tasks[0].writeScopes.length, 12)
   assert.equal(taskResult.tasks[0].writeScopeWarnings.length, 8)
   assert.equal(memberResult.members[0].diagnostics.length, 8)
+  assert.equal(statusResult.tasks[0].blockedBy.length, 12)
+  assert.equal(statusResult.tasks[0].writeScopes.length, 12)
+  assert.equal(statusResult.tasks[0].writeScopeWarnings.length, 8)
+  assert.equal(statusResult.members[0].diagnostics.length, 8)
 })
 
 test('passes wait cancellation to Host and leaves cancellation ownership there', async () => {

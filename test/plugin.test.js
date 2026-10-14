@@ -725,11 +725,15 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   const teamFixture = makeContext({ services: { agentTeams: teamService } })
   apply(teamFixture.ctx, { ...baseConfig, enableTeamTools: true })
   const teamNames = [...teamFixture.tools.keys()].filter(toolName => toolName.startsWith('team_'))
-  assert.equal(teamNames.length, 10)
+  assert.equal(teamNames.length, 11)
   const teamAgent = { id: 'lead-1' }
   const teamResult = await teamFixture.tools.get('team_membership').execute({}, { agent: teamAgent })
   assert.equal(teamResult.teamId, 'team-1')
-  assert.deepEqual(teamCalls, [teamAgent])
+  const statusResult = await teamFixture.tools.get('team_status').execute({}, { agent: teamAgent })
+  assert.equal(statusResult.teamId, 'team-1')
+  assert.equal(statusResult.members.length, 0)
+  assert.equal(statusResult.tasks.length, 0)
+  assert.deepEqual(teamCalls, [teamAgent, teamAgent])
 
   const teamEffect = teamFixture.effects.find(effect => effect.label === 'dsh-omo Agent Teams tools')
   assert.ok(teamEffect)
