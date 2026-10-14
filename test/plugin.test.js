@@ -94,6 +94,7 @@ const baseConfig = {
   enableLspTools: false,
   enableRootAgentsContext: false,
   enableRootReadmeContext: false,
+  enableReadmeOnRead: false,
   projectSkillDirs: ['.opencode/skills', '.claude/skills'],
   disabledSkills: [],
   disabledOmoCommands: [],
@@ -144,6 +145,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableRootAgentsContext: true }).enableRootAgentsContext, true)
   assert.equal(Config({}).enableRootReadmeContext, false)
   assert.equal(Config({ enableRootReadmeContext: true }).enableRootReadmeContext, true)
+  assert.equal(Config({}).enableReadmeOnRead, false)
+  assert.equal(Config({ enableReadmeOnRead: true }).enableReadmeOnRead, true)
 })
 
 test('/omo status reports feature flags and service presence without calling business methods', () => {
@@ -169,7 +172,7 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
-  assert.match(status.text, /teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; rootReadmeContext=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; lsp=present; sessionQuery=present; sessions=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -640,6 +643,149 @@ test('mounts opt-in root README context independently and validates every prereq
   assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /rootReadmeContext=enabled/u)
   assert.match(enabled.commands.get('omo').handler().text, /Root README context: enabled/u)
   assert.match(enabled.commands.get('omo').handler().text, /Root AGENTS context: disabled/u, 'README context is independent of root AGENTS context')
+})
+
+test('mounts opt-in README-on-read injection only with DSH prerequisites and keeps its flags independent', async () => {
+  const prerequisites = () => ({
+    services: { agents: { get: () => undefined }, sessions: { get: () => undefined } },
+    fs: {
+      resolve: async () => ({}),
+      contains: () => true,
+      lstat: async () => undefined,
+      stat: async () => undefined,
+      readBytes: async () => new Uint8Array(),
+    },
+  })
+
+  const disabledDeps = prerequisites()
+  const disabled = makeContext(disabledDeps)
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('tools/post-execute'), false, 'the default-off flag installs no post-execute hook')
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /readmeOnRead=disabled/u)
+  assert.match(disabled.commands.get('omo').handler().text, /README-on-read: disabled/u)
+
+  const missingCases = [
+    ['agents service', deps => { deps.services.agents = undefined }],
+    ['agents.get', deps => { deps.services.agents = {} }],
+    ['sessions service', deps => { deps.services.sessions = undefined }],
+    ['sessions.get', deps => { deps.services.sessions = {} }],
+    ['fs.resolve', deps => { delete deps.fs.resolve }],
+    ['fs.contains', deps => { delete deps.fs.contains }],
+    ['fs.lstat', deps => { delete deps.fs.lstat }],
+    ['fs.stat', deps => { delete deps.fs.stat }],
+    ['fs.readBytes', deps => { delete deps.fs.readBytes }],
+    ['ctx.on', (_deps, fixture) => { fixture.ctx.on = undefined }],
+    ['ctx.effect', (_deps, fixture) => { fixture.ctx.effect = undefined }],
+  ]
+  for (const [missingName, remove] of missingCases) {
+    const deps = prerequisites()
+    const fixture = makeContext(deps)
+    remove(deps, fixture)
+    assert.throws(
+      () => apply(fixture.ctx, { ...baseConfig, enableReadmeOnRead: true }),
+      /enableReadmeOnRead requires DSH agents\.get/u,
+      missingName,
+    )
+    assert.equal(fixture.events.size, 0, `${missingName} failure must not register hooks`)
+    assert.equal(fixture.tools.size, 0, `${missingName} failure must not partially register tools`)
+    assert.equal(fixture.commands.size, 0, `${missingName} failure must not partially register commands`)
+    assert.equal(fixture.skills.size, 0, `${missingName} failure must not partially register skills`)
+    assert.equal(fixture.sections.length, 0, `${missingName} failure must not partially register prompt sections`)
+    assert.equal(fixture.effects.length, 0, `${missingName} failure must not attach effects`)
+  }
+
+  const enabled = makeContext(prerequisites())
+  apply(enabled.ctx, { ...baseConfig, enableReadmeOnRead: true })
+  assert.equal(typeof enabled.events.get('tools/post-execute'), 'function', 'opt-in registers the awaited post-execute hook')
+  assert.equal(typeof enabled.events.get('agent/created'), 'function', 'post-read deduplication also listens for Agent lifecycle invalidation')
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /readmeOnRead=enabled/u)
+  assert.match(enabled.commands.get('omo').handler().text, /README-on-read: enabled/u)
+  assert.match(enabled.commands.get('omo').handler().text, /Root README context: disabled/u)
+  assert.match(enabled.commands.get('omo').handler().text, /Root AGENTS context: disabled/u)
+
+  const rootSnapshotOnly = makeContext(prerequisites())
+  apply(rootSnapshotOnly.ctx, { ...baseConfig, enableRootReadmeContext: true })
+  assert.equal(typeof rootSnapshotOnly.events.get('agent/created'), 'function')
+  assert.equal(rootSnapshotOnly.events.has('tools/post-execute'), false, 'root snapshots do not enable post-read injection')
+  assert.match(rootSnapshotOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /readmeOnRead=disabled/u)
+
+  const agentsSnapshotOnly = makeContext(prerequisites())
+  apply(agentsSnapshotOnly.ctx, { ...baseConfig, enableRootAgentsContext: true })
+  assert.equal(typeof agentsSnapshotOnly.events.get('agent/created'), 'function')
+  assert.equal(agentsSnapshotOnly.events.has('tools/post-execute'), false, 'AGENTS snapshots do not enable README post-read injection')
+  assert.match(agentsSnapshotOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /readmeOnRead=disabled/u)
+
+  const both = makeContext(prerequisites())
+  apply(both.ctx, { ...baseConfig, enableRootReadmeContext: true, enableReadmeOnRead: true })
+  assert.equal(typeof both.events.get('tools/post-execute'), 'function', 'both features can be explicitly enabled')
+  assert.match(both.commands.get('omo').handler({ rawInput: 'status' }).text, /rootReadmeContext=enabled; readmeOnRead=enabled/u)
+  assert.match(both.commands.get('omo').handler().text, /README-on-read: enabled \(post-read injection; root README skipped when the root snapshot is enabled\)/u)
+
+  const runRootRead = async enableRootReadmeContext => {
+    const liveAgent = { id: 'readme-on-read-agent' }
+    const rootTarget = { targetKey: 'fs-root' }
+    const sourceTarget = { targetKey: 'read-source' }
+    const readmeTarget = { targetKey: 'root-readme' }
+    const paths = []
+    const readTargets = []
+    const services = {
+      agents: { get: id => id === liveAgent.id ? liveAgent : undefined },
+      sessions: { get: id => id === liveAgent.id ? { header: { id, cwd: '/workspace' } } : undefined },
+    }
+    const fs = {
+      resolve: async filePath => {
+        if (filePath === '/workspace') return rootTarget
+        if (filePath === 'index.js') return sourceTarget
+        if (filePath === 'README.md') return readmeTarget
+        return undefined
+      },
+      contains: () => true,
+      lstat: async filePath => {
+        paths.push(filePath)
+        return { type: 'file' }
+      },
+      stat: async target => target === rootTarget
+        ? { type: 'directory' }
+        : { type: 'file', size: 1, version: 'v1' },
+      readBytes: async target => {
+        readTargets.push(target)
+        return new TextEncoder().encode('R')
+      },
+    }
+    const fixture = makeContext({ services, fs })
+    apply(fixture.ctx, {
+      ...baseConfig,
+      enableRootReadmeContext,
+      enableReadmeOnRead: true,
+    })
+    const listener = fixture.events.get('tools/post-execute')
+    const decision = { kind: 'accept', content: [] }
+    let nextCalls = 0
+    const returned = await listener(
+      {
+        name: 'read',
+        arguments: { file_path: 'index.js' },
+        agent: { id: liveAgent.id },
+        signal: new AbortController().signal,
+      },
+      { isError: false },
+      async () => { nextCalls++; return decision },
+    )
+    return { fixture, returned, decision, paths, readTargets, nextCalls }
+  }
+
+  const skippedRoot = await runRootRead(true)
+  assert.equal(skippedRoot.nextCalls, 1, 'the waterfall next callback is awaited exactly once')
+  assert.equal(skippedRoot.returned, skippedRoot.decision, 'root snapshot mode leaves root README out of post-read contexts')
+  assert.deepEqual(skippedRoot.paths, [], 'skipRoot avoids even probing the root README')
+  assert.deepEqual(skippedRoot.readTargets, [])
+
+  const includedRoot = await runRootRead(false)
+  assert.match(includedRoot.fixture.commands.get('omo').handler().text, /Root README context: disabled/u)
+  assert.equal(includedRoot.nextCalls, 1)
+  assert.equal(includedRoot.returned.additionalContexts.length, 1, 'without the root snapshot, the root README is injected after read')
+  assert.deepEqual(includedRoot.paths, ['README.md', 'README.md'])
+  assert.deepEqual(includedRoot.readTargets, [{ targetKey: 'root-readme' }])
 })
 
 test('mounts the native Goal command only with Goals and opt-in Agent Teams tools only with the Host service', async () => {
