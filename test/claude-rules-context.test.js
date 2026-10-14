@@ -6,7 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { registerClaudeRulesOnReadContext } from '../src/claude-rules-context.js'
+import { createClaudeRulesOnReadContextListener, registerClaudeRulesOnReadContext } from '../src/claude-rules-context.js'
 
 const systemPromptRequire = createRequire(import.meta.resolve('@deepseek-ai/dsh-system-prompt'))
 const { createScope } = await import(systemPromptRequire.resolve('@deepseek-ai/dsh-scope'))
@@ -264,11 +264,11 @@ async function makeHarness(options = {}) {
   ))
   let policyFiber
   const downstreamContext = options.downstreamContext ? userContext('downstream context') : undefined
-  if (options.blockRead || downstreamContext) {
+  if (options.blockRead || options.blockTool || downstreamContext) {
     policyFiber = await ctx.plugin(pluginCtx => pluginCtx.on('tools/post-execute', async (exec, _result, next) => {
       const decision = await next()
-      if (exec.name !== 'read') return decision
-      if (options.blockRead) return { kind: 'block', feedback: [{ type: 'text', text: 'Blocked by test policy.' }] }
+      if (exec.name !== (options.blockTool ?? 'read')) return decision
+      if (options.blockRead || options.blockTool) return { kind: 'block', feedback: [{ type: 'text', text: 'Blocked by test policy.' }] }
       return downstreamContext
         ? { ...decision, additionalContexts: [...(decision.additionalContexts ?? []), downstreamContext] }
         : decision
@@ -298,7 +298,47 @@ async function makeHarness(options = {}) {
       return [{ type: 'text', text: `finalized:${rendered}` }]
     },
   })
+  const fileOperationOutput = name => ({
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { body: { type: 'string', required: true } },
+    },
+    render: (_args, value) => [{ type: 'text', text: `${name}:${value.body}` }],
+  })
+  const writeTool = defineTool({
+    name: 'write',
+    description: 'Test-only file writer.',
+    parameters: {
+      file_path: { type: 'string', required: true },
+      content: { type: 'string', required: true },
+    },
+    output: fileOperationOutput('write'),
+    async execute(args) {
+      if (options.toolErrorName === 'write') throw new Error('simulated write failure')
+      fileSystem.fs.setReadPath(args?.file_path)
+      return { body: String(args?.file_path ?? 'missing') }
+    },
+  })
+  const editTool = defineTool({
+    name: 'edit',
+    description: 'Test-only file editor.',
+    parameters: {
+      file_path: { type: 'string', required: true },
+      old_string: { type: 'string', required: true },
+      new_string: { type: 'string', required: true },
+      replace_all: { type: 'boolean' },
+    },
+    output: fileOperationOutput('edit'),
+    async execute(args) {
+      if (options.toolErrorName === 'edit') throw new Error('simulated edit failure')
+      fileSystem.fs.setReadPath(args?.file_path)
+      return { body: String(args?.file_path ?? 'missing') }
+    },
+  })
   const unregisterRead = ctx.tools.register(readTool)
+  const unregisterWrite = ctx.tools.register(writeTool)
+  const unregisterEdit = ctx.tools.register(editTool)
   const scopes = []
   const detachAgents = new Map()
   let callCount = 0
@@ -321,10 +361,20 @@ async function makeHarness(options = {}) {
     await agents.announce(agent, source)
   }
 
-  async function executeRead(agent, filePath = fileSystem.fs.activeReadPath, { signal = new AbortController().signal } = {}) {
-    fileSystem.fs.setReadPath(filePath)
+  async function executeFileOperation(agent, name, filePath = fileSystem.fs.activeReadPath, extraArgs = {}, { signal = new AbortController().signal } = {}) {
+    if (name === 'read') fileSystem.fs.setReadPath(filePath)
     callCount++
-    return ctx.tools.execute({ callId: `read-${callCount}`, name: 'read', arguments: { file_path: filePath }, agent, signal })
+    return ctx.tools.execute({
+      callId: `${name}-${callCount}`,
+      name,
+      arguments: { file_path: filePath, ...extraArgs },
+      agent,
+      signal,
+    })
+  }
+
+  async function executeRead(agent, filePath = fileSystem.fs.activeReadPath, options = {}) {
+    return executeFileOperation(agent, 'read', filePath, {}, options)
   }
 
   async function disposeFeature() {
@@ -336,6 +386,8 @@ async function makeHarness(options = {}) {
     await policyFiber?.dispose()
     await outerPolicyFiber?.dispose()
     unregisterRead()
+    unregisterWrite()
+    unregisterEdit()
     for (const detach of detachAgents.values()) detach()
     detachAgents.clear()
     for (const scope of scopes) await scope.dispose()
@@ -344,7 +396,7 @@ async function makeHarness(options = {}) {
     await systemPromptFiber.dispose()
   }
 
-  return { ctx, agents, fileSystem, finalizerCalls, createAgent, reannounce, executeRead, disposeFeature, dispose }
+  return { ctx, agents, sessions, fileSystem, finalizerCalls, createAgent, reannounce, executeFileOperation, executeRead, disposeFeature, dispose }
 }
 
 function contextTexts(result) {
@@ -374,6 +426,120 @@ test('injects alwaysApply and matching .md/.mdc rules while preserving native va
     assert.match(texts[1], /Untrusted/u)
     assert.ok(result.additionalContexts.every(message => message.role === 'user' && message.source.kind === 'user'))
   } finally {
+    await harness.dispose()
+  }
+})
+
+test('injects matching rules after successful write and edit file operations', async () => {
+  const harness = await makeHarness({ rules: {
+    '.claude/rules/source.md': rule('apply after file mutation', 'globs: "src/*.ts"'),
+  } })
+  try {
+    const writeAgent = await harness.createAgent('write-agent')
+    const writeResult = await harness.executeFileOperation(writeAgent, 'write', 'src/new.ts', { content: 'new source' })
+    assert.equal(writeResult.isError, false)
+    assert.deepEqual(writeResult.value, { body: 'src/new.ts' })
+    assert.deepEqual(writeResult.content, [{ type: 'text', text: 'write:src/new.ts' }])
+    assert.equal(contextTexts(writeResult).length, 1)
+    assert.ok(contextTexts(writeResult)[0].includes('apply after file mutation'))
+
+    const editAgent = await harness.createAgent('edit-agent')
+    const editResult = await harness.executeFileOperation(editAgent, 'edit', 'src/existing.ts', {
+      old_string: 'before',
+      new_string: 'after',
+    })
+    assert.equal(editResult.isError, false)
+    assert.deepEqual(editResult.value, { body: 'src/existing.ts' })
+    assert.deepEqual(editResult.content, [{ type: 'text', text: 'edit:src/existing.ts' }])
+    assert.equal(contextTexts(editResult).length, 1)
+    assert.ok(contextTexts(editResult)[0].includes('apply after file mutation'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('does not inject after failed, blocked, or unsafe write/edit operations', async () => {
+  const failure = await makeHarness({
+    toolErrorName: 'write',
+    rules: { '.claude/rules/all.md': rule('must not inject after failure', 'alwaysApply: true') },
+  })
+  try {
+    const agent = await failure.createAgent('failed-write')
+    const result = await failure.executeFileOperation(agent, 'write', 'src/app.ts', { content: 'source' })
+    assert.equal(result.isError, true)
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(failure.fileSystem.calls.length, 0)
+  } finally {
+    await failure.dispose()
+  }
+
+  const blocked = await makeHarness({
+    blockTool: 'edit',
+    rules: { '.claude/rules/all.md': rule('must not inject after block', 'alwaysApply: true') },
+  })
+  try {
+    const agent = await blocked.createAgent('blocked-edit')
+    const result = await blocked.executeFileOperation(agent, 'edit', 'src/app.ts', {
+      old_string: 'before',
+      new_string: 'after',
+    })
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(blocked.fileSystem.calls.length, 0)
+  } finally {
+    await blocked.dispose()
+  }
+
+  const unsafe = await makeHarness({ rules: { '.claude/rules/all.md': rule('must not inject outside cwd', 'alwaysApply: true') } })
+  try {
+    const agent = await unsafe.createAgent('unsafe-write')
+    const result = await unsafe.executeFileOperation(agent, 'write', '../outside.ts', { content: 'outside' })
+    assert.equal(result.isError, false)
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(unsafe.fileSystem.calls.length, 0)
+  } finally {
+    await unsafe.dispose()
+  }
+})
+
+test('rejects a mismatched present file-path schema and accepts an omitted optional schema', async () => {
+  const harness = await makeHarness({ rules: { '.claude/rules/all.md': rule('optional schema context', 'alwaysApply: true') } })
+  const listener = createClaudeRulesOnReadContextListener(
+    harness.agents,
+    { get: id => harness.sessions.get(id) },
+    harness.fileSystem.fs,
+  )
+  try {
+    const agent = await harness.createAgent('schema-agent')
+    const filePath = 'src/app.ts'
+    harness.fileSystem.fs.setReadPath(filePath)
+    const exec = {
+      name: 'write',
+      schema: {
+        name: 'write',
+        description: 'Mismatched test schema.',
+        parameters: { type: 'object', properties: { file_path: { type: 'number' } } },
+      },
+      arguments: { file_path: filePath },
+      agent: { id: agent.id },
+      signal: new AbortController().signal,
+    }
+    const result = { isError: false, value: {}, content: [] }
+    let nextCalls = 0
+    const mismatched = await listener(exec, result, async () => {
+      nextCalls += 1
+      return { kind: 'accept', value: {} }
+    })
+    assert.equal(nextCalls, 1)
+    assert.deepEqual(mismatched.additionalContexts ?? [], [])
+    assert.equal(harness.fileSystem.calls.length, 0)
+
+    const withoutSchema = { ...exec }
+    delete withoutSchema.schema
+    const accepted = await listener(withoutSchema, result, async () => ({ kind: 'accept', value: {} }))
+    assert.equal(contextTexts(accepted).length, 1)
+    assert.ok(contextTexts(accepted)[0].includes('optional schema context'))
+  } finally {
+    listener.dispose()
     await harness.dispose()
   }
 })

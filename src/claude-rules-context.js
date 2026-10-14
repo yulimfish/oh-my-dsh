@@ -3,11 +3,11 @@ import { posix as path } from 'node:path'
 import picomatch from 'picomatch'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
-const READ_TOOL_NAME = 'read'
+const FILE_OPERATION_TOOL_NAMES = new Set(['read', 'write', 'edit'])
 const RULES_DIRECTORY = '.claude/rules'
 const SKIP_RULE_DIRECTORIES = new Set(['node_modules', '.git', 'dist', 'build', '.turbo', '.next', 'coverage'])
 const MAX_CWD_CHARS = 4_096
-const MAX_READ_PATH_CHARS = 4_096
+const MAX_PATH_CHARS = 4_096
 const MAX_TARGET_KEY_CHARS = 4_096
 const MAX_RULE_DEPTH = 8
 const MAX_RULE_DIRECTORIES = 32
@@ -34,6 +34,16 @@ function isPlainRecord(value) {
     return prototype === Object.prototype || prototype === null
   } catch {
     return false
+  }
+}
+
+function ownDataValue(record, key) {
+  if (!isPlainRecord(record)) return undefined
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key)
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -146,17 +156,9 @@ function validCwd(cwd) {
   return segments.every(segment => segment.length > 0 && segment !== '.' && segment !== '..')
 }
 
-function validateReadPath(args, cwd) {
-  let descriptor
-  try {
-    if (!isPlainRecord(args)) return undefined
-    descriptor = Object.getOwnPropertyDescriptor(args, 'file_path')
-  } catch {
-    return undefined
-  }
-  if (!descriptor || !Object.hasOwn(descriptor, 'value')) return undefined
-  const filePath = descriptor.value
-  if (typeof filePath !== 'string' || filePath.length === 0 || filePath.length > MAX_READ_PATH_CHARS
+function validateFileOperationPath(args, cwd) {
+  const filePath = ownDataValue(args, 'file_path')
+  if (typeof filePath !== 'string' || filePath.length === 0 || filePath.length > MAX_PATH_CHARS
     || filePath !== filePath.trim() || filePath.includes('\\') || PATH_CONTROL_OR_BIDI.test(filePath)
     || filePath.startsWith('~') || /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(filePath)) return undefined
 
@@ -170,6 +172,20 @@ function validateReadPath(args, cwd) {
   const segments = relativePath.split('/')
   if (segments.some(segment => segment.length === 0 || segment === '.' || segment === '..')) return undefined
   return { filePath, relativePath, basename: segments.at(-1) }
+}
+
+// ToolExecution.schema is optional; when present, require the inspected scalar path property.
+function hasFilePathSchema(exec) {
+  const schema = ownDataValue(exec, 'schema')
+  if (schema === undefined) return true
+  if (!isPlainRecord(schema)) return false
+  const name = ownDataValue(schema, 'name')
+  const execName = ownDataValue(exec, 'name')
+  if (typeof name === 'string' && (typeof execName !== 'string' || name.toLowerCase() !== execName.toLowerCase())) return false
+  const parameters = ownDataValue(schema, 'parameters')
+  const properties = ownDataValue(parameters, 'properties')
+  const filePath = ownDataValue(properties, 'file_path')
+  return isPlainRecord(filePath) && ownDataValue(filePath, 'type') === 'string'
 }
 
 function escapePromptVariableSyntax(text) {
@@ -441,7 +457,7 @@ function parseFrontmatter(text) {
       if (typeof pattern !== 'string') throw INVALID_RULE
       const normalized = pattern.replaceAll('\\', '/')
       if (normalized.length === 0) continue
-      if (normalized.length > MAX_READ_PATH_CHARS || PATH_CONTROL_OR_BIDI.test(normalized)) throw INVALID_RULE
+      if (normalized.length > MAX_PATH_CHARS || PATH_CONTROL_OR_BIDI.test(normalized)) throw INVALID_RULE
       if (!fields.patterns.includes(normalized)) fields.patterns.push(normalized)
     }
   }
@@ -502,7 +518,7 @@ function compilePattern(pattern) {
   }
 }
 
-function ruleMatch(rule, readPath) {
+function ruleMatch(rule, targetPath) {
   if (rule.alwaysApply) return 'alwaysApply'
   const patterns = rule.patterns.map(raw => {
     const negative = raw.startsWith('!')
@@ -510,7 +526,7 @@ function ruleMatch(rule, readPath) {
     if (pattern.length === 0 || pattern.startsWith('!')) throw INVALID_RULE
     return { raw, negative, matcher: compilePattern(pattern) }
   })
-  const matches = ({ matcher }) => matcher(readPath.relativePath) || matcher(readPath.basename)
+  const matches = ({ matcher }) => matcher(targetPath.relativePath) || matcher(targetPath.basename)
   if (patterns.some(pattern => pattern.negative && matches(pattern))) return undefined
   const positive = patterns.find(pattern => !pattern.negative && matches(pattern))
   return positive ? `glob: ${positive.raw}` : undefined
@@ -571,7 +587,7 @@ function commitReservations(state, keys) {
   }
 }
 
-async function prepareRulesContext({ fs, cwd, readPath, cwdTarget, agentState, generation, signal }) {
+async function prepareRulesContext({ fs, cwd, filePath, cwdTarget, agentState, generation, signal }) {
   assertNotAborted(signal)
   const claude = await getDirectoryTarget(fs, cwd, cwdTarget, '.claude', undefined, undefined, signal)
   if (!claude) return []
@@ -638,7 +654,7 @@ async function prepareRulesContext({ fs, cwd, readPath, cwdTarget, agentState, g
       if (!parsed) continue
       let reason
       try {
-        reason = ruleMatch(parsed, readPath)
+        reason = ruleMatch(parsed, filePath)
       } catch {
         // A malformed pattern invalidates this rule without blocking the native read.
         continue
@@ -681,7 +697,7 @@ async function prepareRulesContext({ fs, cwd, readPath, cwdTarget, agentState, g
   }))
 }
 
-/** Append bounded, matched `.claude/rules` UserMessages to accepted DSH `read` results. */
+/** Append bounded, matched `.claude/rules` UserMessages to accepted DSH `read`, `write`, and `edit` results. */
 export function createClaudeRulesOnReadContextListener(agents, sessions, fs) {
   if (!agents || typeof agents.get !== 'function') throw new TypeError('Claude rules context requires DSH agents.get')
   if (!sessions || typeof sessions.get !== 'function') throw new TypeError('Claude rules context requires DSH sessions.get')
@@ -710,7 +726,8 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs) {
 
   const listener = async (exec, result, next) => {
     const decision = await next()
-    if (disposed || typeof exec?.name !== 'string' || exec.name.toLowerCase() !== READ_TOOL_NAME
+    const toolName = typeof exec?.name === 'string' ? exec.name.toLowerCase() : ''
+    if (disposed || !FILE_OPERATION_TOOL_NAMES.has(toolName) || !hasFilePathSchema(exec)
       || result?.isError !== false || decision?.kind !== 'accept') return decision
     const projection = exec?.agent
     if (!isObject(projection) || typeof projection.id !== 'string' || projection.id.length === 0
@@ -727,8 +744,8 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs) {
     }
     const cwd = session?.header?.cwd
     if (session?.header?.id !== liveAgent.id || !validCwd(cwd)) return decision
-    const readPath = validateReadPath(exec.arguments, cwd)
-    if (!readPath) return decision
+    const filePath = validateFileOperationPath(exec.arguments, cwd)
+    if (!filePath) return decision
 
     const state = getAgentState(states, liveAgent)
     const generation = state.generation
@@ -752,14 +769,14 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs) {
       const cwdInfo = await stat(fs, cwdTarget, linked.signal)
       assertNotAborted(linked.signal)
       if (cwdInfo?.type !== 'directory') return decision
-      const readTarget = await resolve(fs, readPath.filePath, cwd, linked.signal)
+      const operationTarget = await resolve(fs, filePath.filePath, cwd, linked.signal)
       assertNotAborted(linked.signal)
-      if (!safeTargetKey(readTarget) || !contains(fs, cwdTarget, readTarget)) return decision
-      const readInfo = await stat(fs, readTarget, linked.signal)
+      if (!safeTargetKey(operationTarget) || !contains(fs, cwdTarget, operationTarget)) return decision
+      const operationInfo = await stat(fs, operationTarget, linked.signal)
       assertNotAborted(linked.signal)
-      if (readInfo?.type !== 'file') return decision
+      if (operationInfo?.type !== 'file') return decision
 
-      messages = await prepareRulesContext({ fs, cwd, readPath, cwdTarget, agentState: state, generation, signal: linked.signal })
+      messages = await prepareRulesContext({ fs, cwd, filePath, cwdTarget, agentState: state, generation, signal: linked.signal })
       assertNotAborted(linked.signal)
       if (messages.length === 0) return decision
       if (state.generation !== generation || states.get(liveAgent) !== state || disposed) return decision
@@ -806,7 +823,7 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs) {
   return listener
 }
 
-/** Register the Claude rules read-result adapter and clear dedupe on clear/compact. */
+/** Register the Claude rules file-operation adapter and clear dedupe on clear/compact. */
 export function registerClaudeRulesOnReadContext(ctx, agents, sessions, fs) {
   if (typeof ctx?.on !== 'function' || typeof ctx?.effect !== 'function') {
     throw new TypeError('registerClaudeRulesOnReadContext requires Cordis ctx.on and ctx.effect')

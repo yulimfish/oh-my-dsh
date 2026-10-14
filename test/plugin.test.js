@@ -812,7 +812,7 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
   apply(disabled.ctx, baseConfig)
   assert.equal(disabled.events.has('tools/post-execute'), false, 'the default-off flag registers no post-execute hook')
   assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled/u)
-  assert.match(disabled.commands.get('omo').handler().text, /Claude rules-on-read: disabled/u)
+  assert.match(disabled.commands.get('omo').handler().text, /Claude rules after read\/write\/edit: disabled/u)
   assert.deepEqual(calls, [], 'disabled setup and status do not call filesystem or Service methods')
 
   const missingCases = [
@@ -850,7 +850,7 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
   apply(enabled.ctx, { ...baseConfig, enableClaudeRulesOnRead: true })
   assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
   assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=enabled/u)
-  assert.match(enabled.commands.get('omo').handler().text, /Claude rules-on-read: enabled/u)
+  assert.match(enabled.commands.get('omo').handler().text, /Claude rules after read\/write\/edit: enabled/u)
   assert.deepEqual(calls, [], 'enabled registration/status do not perform filesystem or Service operations')
 
   const readmeOnReadOnly = makeContext(prerequisites())
