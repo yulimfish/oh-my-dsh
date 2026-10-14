@@ -614,7 +614,7 @@ async function listOmoLabelChildren(ctx, agent, signal) {
   return descendants.filter(child => child.parentId === agent.id && matchesOmoLabelNamespace(child))
 }
 
-function registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, disabledOmoCommands, activeRoleNames, activeBundledSkills) {
+function registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills) {
   let availableCommandNames = ''
   let taskCommandHelp = ''
   let skillRefreshHelp = ''
@@ -788,11 +788,29 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
     },
     {
       name: 'omo',
-      description: 'Show the installed DSH OMO-inspired specialist roles and available commands.',
-      handler: () => ({
-        kind: 'success',
-        text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
-      }),
+      description: 'Show installed DSH OMO-inspired specialist roles and commands, or inspect local status.',
+      input: { hint: '[status]' },
+      handler: invocation => {
+        const rawInput = typeof invocation?.rawInput === 'string' ? invocation.rawInput.trim() : ''
+        if (rawInput === 'status') {
+          const presence = name => statusSnapshot.services[name] ? 'present' : 'absent'
+          const enabled = value => value ? 'enabled' : 'disabled'
+          return {
+            kind: 'success',
+            text: [
+              'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; sessionQuery=${presence('sessionQuery')}.`,
+              'Presence does not prove readiness or health. This command does not call service methods, query models, read session content, or mutate feature state.',
+            ].join('\n'),
+          }
+        }
+        if (rawInput) return { kind: 'error', text: 'Usage: /omo [status].' }
+        return {
+          kind: 'success',
+          text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
+        }
+      },
     },
   ]
   for (const registration of registrations) {
@@ -840,17 +858,16 @@ export function apply(ctx, rawConfig) {
   const config = rawConfig
   const goalService = optionalService(ctx, 'goals')
   const llmService = optionalService(ctx, 'llm')
-  const teamService = config.enableTeamTools ? optionalService(ctx, 'agentTeams') : undefined
+  const teamService = optionalService(ctx, 'agentTeams')
   if (config.enableTeamTools && !teamService) {
     throw new Error('dsh-omo: enableTeamTools requires the optional DSH agentTeams service')
   }
-  const jobController = config.enableJobTools ? optionalService(ctx, 'jobController') : undefined
+  const jobController = optionalService(ctx, 'jobController')
   if (config.enableJobTools && (!jobController
     || typeof jobController.list !== 'function' || typeof jobController.follow !== 'function')) {
     throw new Error('dsh-omo: enableJobTools requires the optional DSH jobController.list and jobController.follow methods')
   }
-  const sessionToolsEnabled = config.enableSessionSearch || config.enableSessionRead || config.enableSessionList || config.enableSessionInfo
-  const sessionQueryService = sessionToolsEnabled ? optionalService(ctx, 'sessionQuery') : undefined
+  const sessionQueryService = optionalService(ctx, 'sessionQuery')
   if (config.enableSessionSearch && (!sessionQueryService
     || typeof sessionQueryService.searchSessions !== 'function'
     || typeof sessionQueryService.observeSession !== 'function')) {
@@ -874,6 +891,24 @@ export function apply(ctx, rawConfig) {
     || typeof sessionQueryService.observeSession !== 'function')) {
     throw new Error('dsh-omo: enableSessionInfo requires DSH sessionQuery.readTitleSnapshot, filterSessions, and observeSession')
   }
+  const statusSnapshot = Object.freeze({
+    flags: Object.freeze({
+      continuableTasks: config.enableContinuableTasks === true,
+      teamTools: config.enableTeamTools === true,
+      jobTools: config.enableJobTools === true,
+      sessionSearch: config.enableSessionSearch === true,
+      sessionRead: config.enableSessionRead === true,
+      sessionList: config.enableSessionList === true,
+      sessionInfo: config.enableSessionInfo === true,
+    }),
+    services: Object.freeze({
+      goals: goalService !== undefined && goalService !== null,
+      llm: llmService !== undefined && llmService !== null,
+      agentTeams: teamService !== undefined && teamService !== null,
+      jobController: jobController !== undefined && jobController !== null,
+      sessionQuery: sessionQueryService !== undefined && sessionQueryService !== null,
+    }),
+  })
   assertPositiveInteger('maxConcurrent', config.maxConcurrent)
   assertPositiveInteger('maxDepth', config.maxDepth)
   assertPositiveInteger('maxTaskChars', config.maxTaskChars)
@@ -919,7 +954,7 @@ export function apply(ctx, rawConfig) {
     interpolate: false,
     text: buildUltraworkGuidance(disabledOmoCommands, activeRoleNames),
   })
-  registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, disabledOmoCommands, activeRoleNames, activeBundledSkills)
+  registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills)
   if (config.enableSessionSearch) {
     const disposeSessionSearch = registerSessionSearchTool(ctx, sessionQueryService)
     ctx.effect(() => disposeSessionSearch, 'dsh-omo session search tool')

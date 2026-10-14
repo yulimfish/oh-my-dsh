@@ -132,6 +132,37 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableJobTools: true }).enableJobTools, true)
 })
 
+test('/omo status reports feature flags and service presence without calling business methods', () => {
+  const calls = []
+  const services = {
+    goals: { get: () => calls.push('goals.get'), clear: () => calls.push('goals.clear') },
+    llm: { listProviders: () => calls.push('llm.listProviders'), resolveModelInfo: () => calls.push('llm.resolveModelInfo') },
+    agentTeams: { membership: () => calls.push('agentTeams.membership') },
+    jobController: { list: () => calls.push('jobController.list'), follow: () => calls.push('jobController.follow') },
+    sessionQuery: { searchSessions: () => calls.push('sessionQuery.searchSessions'), observeSession: () => calls.push('sessionQuery.observeSession') },
+  }
+  const fixture = makeContext({ services })
+  const mutableConfig = { ...baseConfig, enableJobTools: true, enableSessionSearch: true }
+  apply(fixture.ctx, mutableConfig)
+
+  const command = fixture.commands.get('omo')
+  assert.equal(command.input.hint, '[status]', 'the optional status subcommand is discoverable')
+  mutableConfig.enableJobTools = false
+  const status = command.handler({ rawInput: 'status' })
+  assert.equal(status.kind, 'success')
+  assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
+  assert.match(status.text, /teamTools=disabled; jobTools=enabled; sessionSearch=enabled/u)
+  assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; sessionQuery=present/u)
+  assert.match(status.text, /not a service health check/u)
+  assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
+  assert.equal(command.handler({ rawInput: 'status extra' }).kind, 'error')
+  assert.match(command.handler({}).text, /Use \/omo status/u)
+
+  const absent = makeContext()
+  apply(absent.ctx, baseConfig)
+  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; agentTeams=absent; jobController=absent; sessionQuery=absent/u)
+})
+
 test('project-skill filters configure only the project provider and preserve bundled registrations', () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
