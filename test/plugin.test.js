@@ -49,7 +49,10 @@ function makeContext(options = {}) {
       },
       interrupt: (childId, authority) => interrupts.push({ childId, authority }),
     },
-    systemPrompt: { section: section => { sections.push(section); return () => {} } },
+    systemPrompt: {
+      section: section => { sections.push(section); return () => {} },
+      context: () => () => {},
+    },
     commands: { register: command => { commands.set(command.name, command); return () => commands.delete(command.name) } },
     fs: options.fs ?? {},
     skills: {
@@ -554,26 +557,27 @@ test('mounts only opt-in read-only LSP navigation tools when the exact services 
   assert.deepEqual(calls, [], 'registration and status inspect presence only; query methods wait for explicit tool calls')
 })
 
-test('mounts opt-in root AGENTS context only when session and filesystem dependencies are available', () => {
-  const services = { sessions: { get: () => undefined } }
+test('mounts opt-in Agent-scoped root AGENTS prompt context only with DSH prerequisites', () => {
+  const services = { agents: { get: () => undefined }, sessions: { get: () => undefined } }
   const fs = {
     resolve: async () => ({}), contains: () => true, lstat: async () => undefined,
     stat: async () => undefined, readBytes: async () => new Uint8Array(),
   }
   const disabled = makeContext({ services, fs })
   apply(disabled.ctx, baseConfig)
-  assert.equal(disabled.events.has('tools/post-execute'), false, 'the default-off flag registers no event hook even when services exist')
+  assert.equal(disabled.events.has('agent/created'), false, 'the default-off flag registers no event hook even when services exist')
+  assert.equal(disabled.events.has('tools/post-execute'), false, 'root instructions do not depend on post-execute tool provenance')
 
   const missing = makeContext()
   assert.throws(
     () => apply(missing.ctx, { ...baseConfig, enableRootAgentsContext: true }),
-    /enableRootAgentsContext requires DSH sessions\.get/u,
+    /enableRootAgentsContext requires DSH agents\.get/u,
   )
-  assert.equal(missing.events.has('tools/post-execute'), false, 'missing prerequisites fail before hook registration')
+  assert.equal(missing.events.has('agent/created'), false, 'missing prerequisites fail before hook registration')
 
   const enabled = makeContext({ services, fs })
   apply(enabled.ctx, { ...baseConfig, enableRootAgentsContext: true })
-  assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
+  assert.equal(typeof enabled.events.get('agent/created'), 'function')
   assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled/u)
 })
 

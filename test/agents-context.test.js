@@ -1,273 +1,293 @@
 import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
 import test from 'node:test'
-import { createRootAgentsContextListener, registerRootAgentsContext } from '../src/agents-context.js'
+import { Context } from '@deepseek-ai/cordis'
+import SystemPrompt, { renderContextSections } from '@deepseek-ai/dsh-system-prompt'
+import { registerRootAgentsContext } from '../src/agents-context.js'
 
-const CWD = '/workspace/project'
-const AGENTS_TEXT = '# Repository guidance\u202e\u0000\nUse the project formatter.\n'
+const systemPromptRequire = createRequire(import.meta.resolve('@deepseek-ai/dsh-system-prompt'))
+const { createScope } = await import(systemPromptRequire.resolve('@deepseek-ai/dsh-scope'))
+const agentRequire = createRequire(import.meta.resolve('@deepseek-ai/dsh-subagent'))
+const { AgentRegistry } = await import(agentRequire.resolve('@deepseek-ai/dsh-agent'))
+const CONTEXT_NAME = 'dsh-omo:root-agents'
+const CWD_A = '/workspace/project-a'
+const CWD_B = '/workspace/project-b'
+const PROJECT_A = '# Project A\u202a\u202b\u202c\u202d\u202e\u0000\u061c\u200e\u200f\u2066\u2067\u2068\u2069\nLiteral braces: {{known}}, {{not_registered}}, {{bad-name}}, and {{unterminated.\nUse formatter A.\n'
+const PROJECT_B = '# Project B\nUse formatter B.\n'
 
-function makeFixture(options = {}) {
+function makeFileSystem(records) {
   const calls = []
-  const rootTarget = { targetKey: 'root-target' }
-  const fileTarget = { targetKey: 'agents-target' }
+  const roots = new Map()
+  const files = new Map()
+  const recordsByTarget = new Map()
+  for (const [cwd, record] of records) {
+    const root = { targetKey: `root:${cwd}` }
+    const file = { targetKey: `agents:${cwd}` }
+    roots.set(cwd, root)
+    files.set(cwd, file)
+    recordsByTarget.set(root, { cwd, record, type: 'directory' })
+    recordsByTarget.set(file, { cwd, record, type: 'file' })
+  }
+
   const fs = {
-    async resolve(path, opts) {
-      calls.push(['resolve', path, opts])
-      if (path === CWD) return rootTarget
-      if (path === 'AGENTS.md') return fileTarget
-      throw new Error('unexpected path')
+    async resolve(path, options = {}) {
+      calls.push(['resolve', path, options])
+      if (roots.has(path)) return roots.get(path)
+      if (path === 'AGENTS.md') {
+        const record = records.get(options.cwd)
+        if (record?.replacedAfterRead && typeof record.afterTargetKey === 'string') {
+          const target = { targetKey: record.afterTargetKey }
+          recordsByTarget.set(target, { cwd: options.cwd, record, type: 'file' })
+          return target
+        }
+        return files.get(options.cwd)
+      }
+      throw new Error(`unexpected path: ${path}`)
     },
     contains(parent, child) {
       calls.push(['contains', parent, child])
-      return options.contains ? options.contains(parent, child) : parent === rootTarget && child === fileTarget
+      const parentEntry = recordsByTarget.get(parent)
+      const record = parentEntry?.record
+      const containment = record?.replacedAfterRead && record.afterContains !== undefined
+        ? record.afterContains
+        : record?.contains
+      if (typeof containment === 'function') return containment(parent, child)
+      if (containment !== undefined) return containment === true
+      return child === files.get(parentEntry?.cwd)
     },
-    async lstat(path, opts, signal) {
-      calls.push(['lstat', path, opts, signal])
-      return Object.hasOwn(options, 'pathInfo') ? options.pathInfo : { type: 'file' }
+    async lstat(path, options, signal) {
+      calls.push(['lstat', path, options, signal])
+      const record = records.get(options.cwd)
+      if (!record) return undefined
+      const key = record.replacedAfterRead ? 'afterPathInfo' : 'pathInfo'
+      return Object.hasOwn(record, key) ? record[key] : { type: 'file' }
     },
     async stat(target, signal) {
       calls.push(['stat', target, signal])
-      if (target === rootTarget) return options.rootInfo ?? { type: 'directory' }
-      return options.fileInfo ?? { type: 'file' }
+      const entry = recordsByTarget.get(target)
+      if (!entry) return undefined
+      return entry.type === 'directory'
+        ? entry.record.rootInfo ?? { type: 'directory' }
+        : entry.record.fileInfo ?? { type: 'file' }
     },
     async readBytes(target, signal, maxBytes) {
       calls.push(['readBytes', target, signal, maxBytes])
-      if (options.readBytes) return options.readBytes(target, signal, maxBytes)
-      return new TextEncoder().encode(AGENTS_TEXT)
+      const entry = recordsByTarget.get(target)
+      if (!entry || entry.type !== 'file') throw new Error('unexpected target')
+      if (entry.record.readBytes) return entry.record.readBytes(target, signal, maxBytes)
+      return new TextEncoder().encode(entry.record.text ?? '')
     },
   }
-  const sessions = {
-    get: id => {
-      calls.push(['sessions.get', id])
-      if (options.sessionError) throw new Error('private session error')
-      return options.session ?? { header: { id, cwd: CWD } }
-    },
-  }
-  const listener = createRootAgentsContextListener(sessions, fs)
-  return { calls, fs, sessions, listener, rootTarget, fileTarget }
+  return { fs, calls }
 }
 
-function execution({ name = 'read', id = 'session-1', cwd = CWD, signal = new AbortController().signal } = {}) {
-  return { name, agent: { id }, signal, ...(cwd === undefined ? {} : { cwd }) }
-}
+async function makeHarness(records) {
+  const ctx = new Context()
+  const systemPromptFiber = await ctx.plugin(SystemPrompt)
+  const agentRegistryFiber = await ctx.plugin(AgentRegistry)
+  const agents = ctx.agents
+  const sessions = new Map()
+  const sessionService = { get: id => sessions.get(id) }
+  const scopes = []
+  const detachById = new Map()
+  const { fs, calls } = makeFileSystem(records)
+  const featureFiber = await ctx.plugin(pluginCtx => registerRootAgentsContext(pluginCtx, agents, sessionService, fs))
 
-function acceptedDecision(overrides = {}) {
-  return { kind: 'accept', value: { exact: 'original value' }, ...overrides }
-}
-
-function contextText(message) {
-  return message.content.map(block => block.type === 'text' ? block.text : '').join('')
-}
-
-test('adds bounded cwd AGENTS.md as additional user context without changing the accepted result', async () => {
-  const fixture = makeFixture()
-  const resultContext = { role: 'user', content: [{ type: 'text', text: 'context from the original tool result' }] }
-  const previousContext = { role: 'user', content: [{ type: 'text', text: 'earlier post-execute context' }] }
-  const decision = acceptedDecision({ additionalContexts: [previousContext] })
-  const result = { isError: false, value: { tool: 'read' }, content: [{ type: 'text', text: 'tool output stays unchanged' }], additionalContexts: [resultContext] }
-  const output = await fixture.listener(execution(), result, async () => decision)
-
-  assert.notEqual(output, decision)
-  assert.equal(output.value, decision.value)
-  assert.equal(output.additionalContexts[0], resultContext)
-  assert.equal(output.additionalContexts[1], previousContext)
-  assert.equal(decision.additionalContexts.length, 1, 'the prior decision is not mutated')
-  assert.equal(output.additionalContexts.length, 3)
-  assert.equal(output.additionalContexts[2].role, 'user')
-  assert.deepEqual(output.additionalContexts[2].source, { kind: 'user' })
-  assert.match(contextText(output.additionalContexts[2]), /Repository guidance/u)
-  assert.match(contextText(output.additionalContexts[2]), /untrusted/u)
-  assert.doesNotMatch(contextText(output.additionalContexts[2]), /[\u202e\u0000]/u, 'bidi and NUL controls are replaced before context injection')
-  assert.equal(fixture.calls.find(call => call[0] === 'readBytes')[3], 16_384)
-  assert.ok(fixture.calls.some(call => call[0] === 'contains' && call[1] === fixture.rootTarget && call[2] === fixture.fileTarget))
-})
-
-test('preserves content-form decisions and skips non-read, failed, and blocked outcomes', async () => {
-  const fixture = makeFixture()
-  const blocks = [{ type: 'text', text: 'original tool content' }]
-  const contentDecision = { kind: 'accept', content: blocks }
-  const contentOutput = await fixture.listener(execution(), { isError: false }, async () => contentDecision)
-  assert.equal(contentOutput.content, blocks)
-  assert.equal(contentOutput.additionalContexts.length, 1)
-
-  for (const { exec, result, decision } of [
-    { exec: execution({ name: 'search' }), result: { isError: false }, decision: acceptedDecision() },
-    { exec: execution(), result: { isError: true }, decision: acceptedDecision() },
-    { exec: execution(), result: { isError: false }, decision: { kind: 'block', reason: 'policy' } },
-  ]) {
-    const other = makeFixture()
-    const output = await other.listener(exec, result, async () => decision)
-    assert.equal(output, decision)
-    assert.equal(other.calls.some(call => call[0] === 'readBytes'), false)
+  async function createAgent(id, cwd) {
+    const agent = { id, session: { id } }
+    // RC2 runtime Agent types augment the compact `{ id }` projection with this scope-owned `ctx`.
+    const scope = createScope(ctx, agent)
+    scopes.push(scope)
+    let agentContext
+    await scope.ctx.inject(['systemPrompt'], injected => { agentContext = injected })
+    agent.ctx = agentContext
+    sessions.set(id, { header: { id, cwd } })
+    return { agent, scope }
   }
-})
 
-test('requires a matching current session and uses only its absolute cwd', async () => {
-  const mismatch = makeFixture({ session: { header: { id: 'different-session', cwd: CWD } } })
-  const decision = acceptedDecision()
-  assert.equal(await mismatch.listener(execution(), { isError: false }, async () => decision), decision)
-  assert.equal(mismatch.calls.some(call => call[0] === 'resolve'), false)
-
-  const relative = makeFixture({ session: { header: { id: 'session-1', cwd: 'project' } } })
-  assert.equal(await relative.listener(execution(), { isError: false }, async () => decision), decision)
-  assert.equal(relative.calls.some(call => call[0] === 'resolve'), false)
-})
-
-test('rejects absent, symlink, non-file, and out-of-workspace AGENTS targets', async () => {
-  for (const options of [
-    { pathInfo: undefined },
-    { pathInfo: { type: 'symlink' } },
-    { pathInfo: { type: 'directory' } },
-    { contains: () => false },
-    { fileInfo: { type: 'directory' } },
-  ]) {
-    const fixture = makeFixture(options)
-    const decision = acceptedDecision()
-    const output = await fixture.listener(execution(), { isError: false }, async () => decision)
-    assert.equal(output, decision)
-    assert.equal(fixture.calls.some(call => call[0] === 'readBytes'), false)
-    const filesystemCallsAfterDone = fixture.calls.filter(call => call[0] !== 'sessions.get').length
-    const nextDecision = acceptedDecision()
-    assert.equal(await fixture.listener(execution(), { isError: false }, async () => nextDecision), nextDecision)
-    assert.equal(fixture.calls.filter(call => call[0] !== 'sessions.get').length, filesystemCallsAfterDone, 'completed absent/invalid target checks are memoized')
+  async function created(agent, { source = 'startup', signal } = {}) {
+    const detach = agents.enter(agent, undefined)
+    detachById.set(agent.id, detach)
+    await agents.announce(agent, source, signal)
   }
-})
 
-test('skips oversized and invalid UTF-8 instruction files without failing the read tool', async () => {
-  for (const readBytes of [
-    async () => { throw Object.assign(new Error('too large'), { code: 'FS_TOO_LARGE' }) },
-    async () => new Uint8Array([0xc3, 0x28]),
-    async () => new Uint8Array(16_385),
-  ]) {
-    const fixture = makeFixture({ readBytes })
-    const decision = acceptedDecision()
-    assert.equal(await fixture.listener(execution(), { isError: false }, async () => decision), decision)
-    const readsAfterDone = fixture.calls.filter(call => call[0] === 'readBytes').length
-    const nextDecision = acceptedDecision()
-    assert.equal(await fixture.listener(execution(), { isError: false }, async () => nextDecision), nextDecision)
-    assert.equal(fixture.calls.filter(call => call[0] === 'readBytes').length, readsAfterDone, 'completed invalid/oversized checks are memoized')
-  }
-})
-
-test('deduplicates per session, retries transient failures/cancellation, and cancels on disposal', async () => {
-  const fixture = makeFixture()
-  const decision = acceptedDecision()
-  const first = await fixture.listener(execution(), { isError: false }, async () => decision)
-  assert.equal(first.additionalContexts.length, 1)
-  const readsAfterFirst = fixture.calls.filter(call => call[0] === 'readBytes').length
-  const secondDecision = acceptedDecision()
-  const second = await fixture.listener(execution(), { isError: false }, async () => secondDecision)
-  assert.equal(second, secondDecision)
-  assert.equal(fixture.calls.filter(call => call[0] === 'readBytes').length, readsAfterFirst)
-
-  let concurrentReadResolve
-  let concurrentStartedResolve
-  const concurrentStarted = new Promise(resolve => { concurrentStartedResolve = resolve })
-  const concurrent = makeFixture({ readBytes: () => new Promise(resolve => {
-    concurrentReadResolve = resolve
-    concurrentStartedResolve()
-  }) })
-  const concurrentFirstDecision = acceptedDecision()
-  const concurrentFirst = concurrent.listener(execution(), { isError: false }, async () => concurrentFirstDecision)
-  await concurrentStarted
-  const concurrentSecondDecision = acceptedDecision()
-  const concurrentSecond = await concurrent.listener(execution(), { isError: false }, async () => concurrentSecondDecision)
-  assert.equal(concurrentSecond, concurrentSecondDecision, 'a concurrent post-execute call reuses the in-flight session reservation')
-  concurrentReadResolve(new TextEncoder().encode(AGENTS_TEXT))
-  assert.equal((await concurrentFirst).additionalContexts.length, 1)
-  assert.equal(concurrent.calls.filter(call => call[0] === 'readBytes').length, 1)
-
-  const bounded = makeFixture()
-  const invokeFor = id => bounded.listener(execution({ id }), { isError: false }, async () => acceptedDecision())
-  for (let index = 0; index < 256; index += 1) await invokeFor(`session-${index}`)
-  await invokeFor('session-0')
-  await invokeFor('session-256')
-  assert.equal(bounded.calls.filter(call => call[0] === 'readBytes').length, 257)
-  await invokeFor('session-0')
-  assert.equal(bounded.calls.filter(call => call[0] === 'readBytes').length, 257, 'recently used sessions remain in the bounded LRU')
-  await invokeFor('session-1')
-  assert.equal(bounded.calls.filter(call => call[0] === 'readBytes').length, 258, 'the least-recent session is evicted and may be injected again')
-
-  let attempts = 0
-  const transient = makeFixture({ readBytes: async () => {
-    attempts += 1
-    if (attempts === 1) throw new Error('temporary provider failure')
-    return new TextEncoder().encode(AGENTS_TEXT)
-  } })
-  const firstAttempt = acceptedDecision()
-  assert.equal(await transient.listener(execution(), { isError: false }, async () => firstAttempt), firstAttempt)
-  const retried = await transient.listener(execution(), { isError: false }, async () => acceptedDecision())
-  assert.equal(retried.additionalContexts.length, 1, 'transient filesystem errors do not stick in the session cache')
-  assert.equal(attempts, 2)
-
-  const aborted = new AbortController()
-  const retryFixture = makeFixture({ readBytes: async (_target, signal) => {
-    signal?.throwIfAborted()
-    aborted.abort()
-    return new TextEncoder().encode(AGENTS_TEXT)
-  } })
-  const retryDecision = acceptedDecision()
-  const cancelled = await retryFixture.listener(execution({ signal: aborted.signal }), { isError: false }, async () => retryDecision)
-  assert.equal(cancelled, retryDecision)
-  const retry = await retryFixture.listener(execution(), { isError: false }, async () => acceptedDecision())
-  assert.equal(retry.additionalContexts.length, 1)
-
-  let pendingReadStartedResolve
-  const pendingReadStarted = new Promise(resolve => { pendingReadStartedResolve = resolve })
-  const pendingController = new AbortController()
-  const pendingFixture = makeFixture({ readBytes: () => {
-    pendingReadStartedResolve()
-    return new Promise(() => {})
-  } })
-  const pendingDecision = acceptedDecision()
-  const pendingRead = pendingFixture.listener(execution({ signal: pendingController.signal }), { isError: false }, async () => pendingDecision)
-  await pendingReadStarted
-  pendingController.abort()
-  assert.equal(await pendingRead, pendingDecision, 'caller cancellation settles even if a filesystem provider ignores its signal')
-  pendingFixture.listener.dispose()
-
-  fixture.listener.dispose()
-  const afterDisposeDecision = acceptedDecision()
-  const afterDispose = await fixture.listener(execution(), { isError: false }, async () => afterDisposeDecision)
-  assert.equal(afterDispose, afterDisposeDecision, 'a disposed listener does not inject or read again')
-  assert.equal(fixture.calls.filter(call => call[0] === 'readBytes').length, readsAfterFirst)
-  const remounted = createRootAgentsContextListener(fixture.sessions, fixture.fs)
-  const remountedOutput = await remounted(execution(), { isError: false }, async () => acceptedDecision())
-  assert.equal(remountedOutput.additionalContexts.length, 1, 'a new listener starts with an empty cache')
-  remounted.dispose()
-
-  let readStartedResolve
-  const readStarted = new Promise(resolve => { readStartedResolve = resolve })
-  let observedLifecycleAbort = false
-  const disposing = makeFixture({ readBytes: (_target, signal) => new Promise(resolve => {
-    readStartedResolve()
-    if (signal.aborted) {
-      observedLifecycleAbort = true
-      resolve(new TextEncoder().encode(AGENTS_TEXT))
-      return
+  function disposeAgent(agent) {
+    const detach = detachById.get(agent.id)
+    if (detach) {
+      detachById.delete(agent.id)
+      detach()
     }
-    signal.addEventListener('abort', () => {
-      observedLifecycleAbort = true
-      resolve(new TextEncoder().encode(AGENTS_TEXT))
-    }, { once: true })
-  }) })
-  const disposeDecision = acceptedDecision()
-  const pending = disposing.listener(execution(), { isError: false }, async () => disposeDecision)
-  await readStarted
-  disposing.listener.dispose()
-  assert.equal(await pending, disposeDecision)
-  assert.equal(observedLifecycleAbort, true, 'disposal aborts in-flight filesystem reads')
+  }
+
+  function promptContexts(agent) {
+    return ctx.systemPrompt.assemble({ scope: agent }).then(assembly => renderContextSections(assembly).filter(context => context.name === CONTEXT_NAME))
+  }
+
+  return {
+    ctx,
+    calls,
+    agents,
+    createAgent,
+    created,
+    disposeAgent,
+    promptContexts,
+    async disposeFeature() { await featureFiber.dispose() },
+    async dispose() {
+      await featureFiber.dispose()
+      for (const scope of scopes) await scope.dispose()
+      for (const detach of detachById.values()) detach()
+      detachById.clear()
+      await agentRegistryFiber.dispose()
+      await systemPromptFiber.dispose()
+    },
+  }
+}
+
+test('snapshots root AGENTS into isolated Agent systemPrompt scopes before the first assembly', async () => {
+  const harness = await makeHarness(new Map([
+    [CWD_A, { text: PROJECT_A }],
+    [CWD_B, { text: PROJECT_B }],
+  ]))
+  const a = await harness.createAgent('agent-a', CWD_A)
+  const b = await harness.createAgent('agent-b', CWD_B)
+  const disposeVariable = harness.ctx.systemPrompt.variable('known', () => 'SHOULD_NOT_INTERPOLATE')
+  try {
+    assert.deepEqual(await harness.promptContexts(a.agent), [])
+    await harness.created(a.agent)
+    await harness.created(b.agent, { source: 'resume' })
+    assert.strictEqual(harness.agents.get(a.agent.id).ctx, a.agent.ctx, 'the real DSH AgentRegistry exposes the live Agent scope used for prompt registration')
+
+    const contextsA = await harness.promptContexts(a.agent)
+    const contextsB = await harness.promptContexts(b.agent)
+    const globalContexts = (await harness.ctx.systemPrompt.assemble()).contexts.filter(context => context.name === CONTEXT_NAME)
+    assert.equal(contextsA.length, 1)
+    assert.equal(contextsB.length, 1)
+    assert.match(contextsA[0].text, /Project A/u)
+    assert.ok(contextsA[0].text.includes('｛｛known｝｝'), 'known prompt variables remain literal')
+    assert.ok(contextsA[0].text.includes('｛｛not_registered｝｝'), 'unknown prompt variables cannot break assembly')
+    assert.ok(contextsA[0].text.includes('｛｛bad-name｝｝'), 'malformed prompt variables cannot break assembly')
+    assert.ok(contextsA[0].text.includes('｛｛unterminated.'), 'unmatched prompt-variable braces remain literal')
+    assert.doesNotMatch(contextsA[0].text, /SHOULD_NOT_INTERPOLATE/u)
+    assert.match(contextsA[0].text, /untrusted/u)
+    assert.doesNotMatch(contextsA[0].text, /[\u0000\p{Bidi_Control}]/u)
+    assert.match(contextsB[0].text, /Project B/u)
+    assert.doesNotMatch(contextsB[0].text, /Project A/u)
+    assert.deepEqual(globalContexts, [], 'project context does not leak into the global prompt')
+    assert.ok(harness.calls.some(call => call[0] === 'readBytes' && call[3] === 16_384))
+
+    await a.scope.dispose()
+    assert.deepEqual(await harness.promptContexts(a.agent), [], 'Agent-scope teardown removes its context')
+    harness.disposeAgent(a.agent)
+    const replacement = await harness.createAgent('agent-a', CWD_A)
+    await harness.created(replacement.agent, { source: 'compact' })
+    assert.equal((await harness.promptContexts(replacement.agent)).length, 1, 'Agent-scope teardown also releases tracking for a later Agent with the same session id')
+    assert.equal((await harness.promptContexts(b.agent)).length, 1, 'disposing one Agent leaves another Agent context intact')
+    await harness.disposeFeature()
+    assert.deepEqual(await harness.promptContexts(b.agent), [], 'plugin unload removes contexts from still-live Agents')
+    assert.deepEqual(await harness.promptContexts(replacement.agent), [], 'plugin unload also clears replacement Agent contexts')
+  } finally {
+    disposeVariable()
+    await harness.dispose()
+  }
 })
 
-test('registers the scoped post-execute hook and cache cleanup effect', () => {
-  const fixture = makeFixture()
-  const events = new Map()
-  const effects = []
-  const ctx = {
-    on: (name, listener) => { events.set(name, listener) },
-    effect: (factory, label) => effects.push({ dispose: factory(), label }),
+test('skips absent, unsafe, oversized, malformed, blank, and changed-during-read AGENTS files', async () => {
+  const records = new Map([
+    ['/workspace/missing', { pathInfo: undefined }],
+    ['/workspace/symlink', { pathInfo: { type: 'symlink' } }],
+    ['/workspace/directory', { pathInfo: { type: 'directory' } }],
+    ['/workspace/escaped', { contains: false }],
+    ['/workspace/not-file', { fileInfo: { type: 'directory' } }],
+    ['/workspace/oversized-stat', { fileInfo: { type: 'file', size: 16_385 }, text: 'not read' }],
+    ['/workspace/partial-read', { fileInfo: { type: 'file', size: 9 }, text: 'short' }],
+    ['/workspace/too-large-error', { readBytes: async () => { throw Object.assign(new Error('too large'), { code: 'FS_TOO_LARGE' }) } }],
+    ['/workspace/invalid-utf8', { readBytes: async () => new Uint8Array([0xc3, 0x28]) }],
+    ['/workspace/over-limit', { readBytes: async () => new Uint8Array(16_385) }],
+    ['/workspace/blank', { text: ' \n\t' }],
+    ['/workspace/replaced-during-read', {
+      pathInfo: { type: 'file' },
+      afterPathInfo: { type: 'symlink' },
+      async readBytes() {
+        records.get('/workspace/replaced-during-read').replacedAfterRead = true
+        return new TextEncoder().encode('external replacement must not reach the prompt')
+      },
+    }],
+    ['/workspace/escaped-after-read', {
+      pathInfo: { type: 'file' },
+      afterPathInfo: { type: 'file' },
+      afterContains: false,
+      async readBytes() {
+        records.get('/workspace/escaped-after-read').replacedAfterRead = true
+        return new TextEncoder().encode('outside-root contents must not reach the prompt')
+      },
+    }],
+    ['/workspace/replaced-in-root', {
+      pathInfo: { type: 'file' },
+      afterPathInfo: { type: 'file' },
+      afterTargetKey: 'agents:replacement-in-root',
+      afterContains: true,
+      async readBytes() {
+        records.get('/workspace/replaced-in-root').replacedAfterRead = true
+        return new TextEncoder().encode('valid')
+      },
+    }],
+  ])
+  const harness = await makeHarness(records)
+  try {
+    let index = 0
+    for (const cwd of records.keys()) {
+      const { agent } = await harness.createAgent(`skip-${index++}`, cwd)
+      await harness.created(agent)
+      assert.deepEqual(await harness.promptContexts(agent), [], `no prompt context for ${cwd}`)
+    }
+    assert.equal(records.get('/workspace/escaped-after-read').replacedAfterRead, true)
+    assert.equal(records.get('/workspace/replaced-in-root').replacedAfterRead, true)
+    assert.equal(harness.calls.some(call => call[0] === 'readBytes' && call[1]?.targetKey === 'agents:/workspace/oversized-stat'), false)
+    assert.equal(harness.calls.filter(call => call[0] === 'readBytes').length, 8)
+  } finally {
+    await harness.dispose()
   }
-  registerRootAgentsContext(ctx, fixture.sessions, fixture.fs)
-  assert.equal(typeof events.get('tools/post-execute'), 'function')
-  assert.equal(effects[0].label, 'dsh-omo root AGENTS context cache')
-  effects[0].dispose()
+})
+
+test('cancellation and transient reads do not block Agent creation or leak a partial context', async () => {
+  let attempts = 0
+  const retryRecord = {
+    readBytes: async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('temporary filesystem failure')
+      return new TextEncoder().encode('Recovered project instructions.')
+    },
+  }
+  const neverRecord = { readBytes: (_target, signal) => new Promise(() => { signal.addEventListener('abort', () => {}, { once: true }) }) }
+  const harness = await makeHarness(new Map([
+    ['/workspace/retry', retryRecord],
+    ['/workspace/cancel', neverRecord],
+    ['/workspace/unload', { readBytes: (_target, signal) => new Promise(() => { signal.addEventListener('abort', () => {}, { once: true }) }) }],
+  ]))
+  try {
+    const failed = await harness.createAgent('failed-once', '/workspace/retry')
+    await harness.created(failed.agent)
+    assert.deepEqual(await harness.promptContexts(failed.agent), [])
+    const retry = await harness.createAgent('retry-next-agent', '/workspace/retry')
+    await harness.created(retry.agent)
+    assert.match((await harness.promptContexts(retry.agent))[0].text, /Recovered project instructions/u)
+    assert.equal(attempts, 2)
+
+    const cancelled = await harness.createAgent('cancelled', '/workspace/cancel')
+    const controller = new AbortController()
+    const cancelledEvent = harness.created(cancelled.agent, { source: 'clear', signal: controller.signal })
+    await new Promise(resolve => setImmediate(resolve))
+    controller.abort()
+    await cancelledEvent
+    assert.deepEqual(await harness.promptContexts(cancelled.agent), [])
+
+    const pending = await harness.createAgent('unloading', '/workspace/unload')
+    const pendingEvent = harness.created(pending.agent, { source: 'compact' })
+    await new Promise(resolve => setImmediate(resolve))
+    await harness.disposeFeature()
+    await pendingEvent
+    assert.deepEqual(await harness.promptContexts(pending.agent), [])
+  } finally {
+    await harness.dispose()
+  }
 })
