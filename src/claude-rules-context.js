@@ -1,0 +1,824 @@
+import { createHash } from 'node:crypto'
+import { posix as path } from 'node:path'
+import picomatch from 'picomatch'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+
+const READ_TOOL_NAME = 'read'
+const RULES_DIRECTORY = '.claude/rules'
+const SKIP_RULE_DIRECTORIES = new Set(['node_modules', '.git', 'dist', 'build', '.turbo', '.next', 'coverage'])
+const MAX_CWD_CHARS = 4_096
+const MAX_READ_PATH_CHARS = 4_096
+const MAX_TARGET_KEY_CHARS = 4_096
+const MAX_RULE_DEPTH = 8
+const MAX_RULE_DIRECTORIES = 32
+const MAX_PROCESSED_ENTRIES = 256
+const MAX_INJECTED_RULES = 8
+const MAX_FILE_BYTES = 16_384
+const MAX_TOTAL_BYTES = 32_768
+const MAX_AGENT_CACHE_ENTRIES = 256
+const READ_PIPELINE_TIMEOUT_MS = 5_000
+const CONTROL_OR_BIDI_GLOBAL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\p{Bidi_Control}]/gu
+const PATH_CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\p{Bidi_Control}]/u
+const ABORTED = Symbol('Claude rules read context cancelled')
+const LIMIT_REACHED = Symbol('Claude rules scan limit reached')
+const INVALID_RULE = Symbol('invalid Claude rule frontmatter')
+
+function isObject(value) {
+  return value !== null && typeof value === 'object'
+}
+
+function isPlainRecord(value) {
+  if (!isObject(value) || Array.isArray(value)) return false
+  try {
+    const prototype = Object.getPrototypeOf(value)
+    return prototype === Object.prototype || prototype === null
+  } catch {
+    return false
+  }
+}
+
+function validSignal(signal) {
+  return isObject(signal) && typeof signal.aborted === 'boolean'
+    && typeof signal.addEventListener === 'function' && typeof signal.removeEventListener === 'function'
+}
+
+function assertNotAborted(signal) {
+  if (signal?.aborted) throw ABORTED
+}
+
+function awaitWithSignal(operation, signal) {
+  if (signal?.aborted) return Promise.reject(ABORTED)
+  let pending
+  try {
+    pending = operation()
+  } catch (error) {
+    return Promise.reject(error)
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const cleanup = () => {
+      try {
+        signal.removeEventListener('abort', onAbort)
+      } catch {}
+    }
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(ABORTED)
+    }
+    Promise.resolve(pending).then(value => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(value)
+    }, error => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(error)
+    })
+    signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) onAbort()
+  })
+}
+
+function linkSignals(signals) {
+  const controller = new AbortController()
+  const removers = []
+  const abort = () => {
+    if (!controller.signal.aborted) controller.abort()
+  }
+  for (const signal of signals) {
+    if (!signal) continue
+    if (signal.aborted) {
+      abort()
+      break
+    }
+    const onAbort = () => abort()
+    signal.addEventListener('abort', onAbort, { once: true })
+    removers.push(() => {
+      try {
+        signal.removeEventListener('abort', onAbort)
+      } catch {}
+    })
+    if (signal.aborted) {
+      abort()
+      break
+    }
+  }
+  return {
+    signal: controller.signal,
+    dispose() {
+      for (const remove of removers) remove()
+    },
+  }
+}
+
+function createDeadline(milliseconds) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), milliseconds)
+  return {
+    signal: controller.signal,
+    dispose() { clearTimeout(timer) },
+  }
+}
+
+function safeTargetKey(target) {
+  try {
+    const key = target?.targetKey
+    return typeof key === 'string' && key.length > 0 && key.length <= MAX_TARGET_KEY_CHARS
+      && !PATH_CONTROL_OR_BIDI.test(key) ? key : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function validSize(size, limit) {
+  return size === undefined || (Number.isSafeInteger(size) && size >= 0 && size <= limit)
+}
+
+function validCwd(cwd) {
+  if (typeof cwd !== 'string' || cwd.length === 0 || cwd.length > MAX_CWD_CHARS
+    || !path.isAbsolute(cwd) || cwd.includes('\\') || PATH_CONTROL_OR_BIDI.test(cwd)) return false
+  const normalized = cwd.length > 1 && cwd.endsWith('/') ? cwd.slice(0, -1) : cwd
+  const segments = normalized === '/' ? [] : normalized.slice(1).split('/')
+  return segments.every(segment => segment.length > 0 && segment !== '.' && segment !== '..')
+}
+
+function validateReadPath(args, cwd) {
+  let descriptor
+  try {
+    if (!isPlainRecord(args)) return undefined
+    descriptor = Object.getOwnPropertyDescriptor(args, 'file_path')
+  } catch {
+    return undefined
+  }
+  if (!descriptor || !Object.hasOwn(descriptor, 'value')) return undefined
+  const filePath = descriptor.value
+  if (typeof filePath !== 'string' || filePath.length === 0 || filePath.length > MAX_READ_PATH_CHARS
+    || filePath !== filePath.trim() || filePath.includes('\\') || PATH_CONTROL_OR_BIDI.test(filePath)
+    || filePath.startsWith('~') || /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(filePath)) return undefined
+
+  const absolute = path.isAbsolute(filePath)
+  if (absolute && filePath.slice(1).split('/').some(segment => segment.length === 0 || segment === '.' || segment === '..')) {
+    return undefined
+  }
+  const relativePath = absolute ? path.relative(cwd, filePath) : filePath
+  if (relativePath.length === 0 || relativePath === '.' || relativePath === '..'
+    || relativePath.startsWith('../') || path.isAbsolute(relativePath)) return undefined
+  const segments = relativePath.split('/')
+  if (segments.some(segment => segment.length === 0 || segment === '.' || segment === '..')) return undefined
+  return { filePath, relativePath, basename: segments.at(-1) }
+}
+
+function escapePromptVariableSyntax(text) {
+  return text
+    .replace(/\{+/gu, run => run.length > 1 ? '\uff5b'.repeat(run.length) : run)
+    .replace(/\}+/gu, run => run.length > 1 ? '\uff5d'.repeat(run.length) : run)
+}
+
+function contains(fs, parent, child) {
+  try {
+    return fs.contains(parent, child) === true
+  } catch {
+    return false
+  }
+}
+
+function metadataMatches(left, right) {
+  return (left?.version === undefined || right?.version === left.version)
+    && (left?.size === undefined || right?.size === left.size)
+}
+
+function compareName(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+function validEntryName(name) {
+  return typeof name === 'string' && name.length > 0 && name.length <= 255
+    && name !== '.' && name !== '..' && !name.includes('/') && !name.includes('\\')
+    && !PATH_CONTROL_OR_BIDI.test(name)
+}
+
+function safeCall(operation, signal) {
+  return awaitWithSignal(operation, signal)
+}
+
+async function resolve(fs, value, cwd, signal) {
+  return safeCall(() => fs.resolve(value, { cwd, signal }), signal)
+}
+
+async function lstat(fs, relative, cwd, signal) {
+  return safeCall(() => fs.lstat(relative, { cwd }, signal), signal)
+}
+
+async function stat(fs, target, signal) {
+  return safeCall(() => fs.stat(target, signal), signal)
+}
+
+function assertFileSystem(fs) {
+  if (!fs || typeof fs.resolve !== 'function' || typeof fs.contains !== 'function'
+    || typeof fs.lstat !== 'function' || typeof fs.stat !== 'function'
+    || typeof fs.readBytes !== 'function' || typeof fs.listDir !== 'function') {
+    throw new TypeError('Claude rules context requires DSH fs.resolve, contains, lstat, stat, readBytes, and listDir')
+  }
+}
+
+async function getDirectoryTarget(fs, cwd, cwdTarget, relative, expectedKey, expectedEntry, signal, knownPathInfo) {
+  assertNotAborted(signal)
+  const pathInfo = knownPathInfo ?? await lstat(fs, relative, cwd, signal)
+  assertNotAborted(signal)
+  if (pathInfo?.type !== 'directory' || (expectedEntry && expectedEntry.type !== 'directory')) return undefined
+
+  const target = await resolve(fs, relative, cwd, signal)
+  assertNotAborted(signal)
+  const key = safeTargetKey(target)
+  if (!key || (expectedKey && key !== expectedKey) || !contains(fs, cwdTarget, target)) return undefined
+  if (expectedEntry && safeTargetKey(expectedEntry.target) !== key) return undefined
+
+  const info = await stat(fs, target, signal)
+  assertNotAborted(signal)
+  if (info?.type !== 'directory' || !metadataMatches(pathInfo, info)
+    || (expectedEntry && (!metadataMatches(expectedEntry, pathInfo) || !metadataMatches(expectedEntry, info)))) return undefined
+  return { target, key, pathInfo, info }
+}
+
+async function getFileTarget(fs, cwd, cwdTarget, rulesTarget, relative, entry, signal, knownPathInfo) {
+  assertNotAborted(signal)
+  const pathInfo = knownPathInfo ?? await lstat(fs, relative, cwd, signal)
+  assertNotAborted(signal)
+  if (pathInfo?.type !== 'file' || entry?.type !== 'file') return undefined
+
+  const target = await resolve(fs, relative, cwd, signal)
+  assertNotAborted(signal)
+  const key = safeTargetKey(target)
+  if (!key || safeTargetKey(entry.target) !== key
+    || !contains(fs, cwdTarget, target) || !contains(fs, rulesTarget, target)) return undefined
+
+  const info = await stat(fs, target, signal)
+  assertNotAborted(signal)
+  if (info?.type !== 'file' || !metadataMatches(pathInfo, info)
+    || !metadataMatches(entry, pathInfo) || !metadataMatches(entry, info)) return undefined
+  if (!validSize(info.size, MAX_FILE_BYTES)) throw LIMIT_REACHED
+  return { target, key, pathInfo, info }
+}
+
+async function readRuleFile(fs, cwd, cwdTarget, rulesTarget, relative, entry, aggregate, signal, knownFile) {
+  const file = knownFile ?? await getFileTarget(fs, cwd, cwdTarget, rulesTarget, relative, entry, signal)
+  if (!file) return undefined
+  const remaining = MAX_TOTAL_BYTES - aggregate.bytes
+  if (remaining <= 0 || (file.info.size !== undefined && file.info.size > remaining)) throw LIMIT_REACHED
+  const readLimit = Math.min(MAX_FILE_BYTES, remaining)
+  const bytes = await safeCall(() => fs.readBytes(file.target, signal, readLimit), signal)
+  assertNotAborted(signal)
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength > readLimit
+    || (file.info.size !== undefined && bytes.byteLength !== file.info.size)) throw LIMIT_REACHED
+  // Charge every bounded read, including files that later fail identity or UTF-8 checks.
+  aggregate.bytes += bytes.byteLength
+
+  const afterPathInfo = await lstat(fs, relative, cwd, signal)
+  assertNotAborted(signal)
+  if (afterPathInfo?.type !== 'file') return undefined
+  const afterTarget = await resolve(fs, relative, cwd, signal)
+  assertNotAborted(signal)
+  const afterKey = safeTargetKey(afterTarget)
+  if (!afterKey || afterKey !== file.key || !contains(fs, cwdTarget, afterTarget)
+    || !contains(fs, rulesTarget, afterTarget)) return undefined
+  const afterInfo = await stat(fs, afterTarget, signal)
+  assertNotAborted(signal)
+  if (afterInfo?.type !== 'file' || !metadataMatches(file.info, afterInfo)
+    || !metadataMatches(file.pathInfo, afterPathInfo) || !metadataMatches(file.info, afterPathInfo)
+    || !validSize(afterInfo.size, MAX_FILE_BYTES)
+    || (afterInfo.size !== undefined && bytes.byteLength !== afterInfo.size)) return undefined
+
+  let text
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return undefined
+  }
+  return { text, key: file.key }
+}
+
+function stripComment(value) {
+  let quote
+  let escaped = false
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index]
+    if (quote === '"') {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') quote = undefined
+      continue
+    }
+    if (quote === "'") {
+      if (char === "'" && value[index + 1] === "'") index++
+      else if (char === "'") quote = undefined
+      continue
+    }
+    if (char === '"' || char === "'") quote = char
+    else if (char === '#' && (index === 0 || /\s/u.test(value[index - 1]))) return value.slice(0, index).trimEnd()
+  }
+  if (quote) throw INVALID_RULE
+  return value.trimEnd()
+}
+
+function parseQuoted(value) {
+  const quote = value[0]
+  if (quote !== '"' && quote !== "'") throw INVALID_RULE
+  let result = ''
+  let index = 1
+  while (index < value.length) {
+    const char = value[index]
+    if (quote === "'" && char === "'" && value[index + 1] === "'") {
+      result += "'"
+      index += 2
+      continue
+    }
+    if (char === quote) {
+      const tail = stripComment(value.slice(index + 1)).trim()
+      if (tail !== '') throw INVALID_RULE
+      return result
+    }
+    if (quote === '"' && char === '\\') {
+      const next = value[index + 1]
+      if (next === undefined) throw INVALID_RULE
+      const escaped = { '"': '"', '\\': '\\', n: '\n', r: '\r', t: '\t' }[next]
+      if (escaped === undefined) throw INVALID_RULE
+      result += escaped
+      index += 2
+      continue
+    }
+    result += char
+    index++
+  }
+  throw INVALID_RULE
+}
+
+function parseScalar(value, { allowEmpty = false, allowGlobSyntax = false } = {}) {
+  const clean = stripComment(value).trim()
+  if (clean === '') {
+    if (allowEmpty) return ''
+    throw INVALID_RULE
+  }
+  if (clean[0] === '"' || clean[0] === "'") return parseQuoted(clean)
+  if (!allowGlobSyntax && (clean.includes('[') || clean.includes(']') || clean.includes('{') || clean.includes('}'))) throw INVALID_RULE
+  return clean
+}
+
+function splitOutsideQuotes(value, delimiter) {
+  const pieces = []
+  let start = 0
+  let quote
+  let escaped = false
+  let squareDepth = 0
+  let braceDepth = 0
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index]
+    if (quote === '"') {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') quote = undefined
+      continue
+    }
+    if (quote === "'") {
+      if (char === "'" && value[index + 1] === "'") index++
+      else if (char === "'") quote = undefined
+      continue
+    }
+    if (char === '"' || char === "'") quote = char
+    else if (char === '[') squareDepth++
+    else if (char === ']' && squareDepth > 0) squareDepth--
+    else if (char === '{') braceDepth++
+    else if (char === '}' && braceDepth > 0) braceDepth--
+    else if (char === delimiter && squareDepth === 0 && braceDepth === 0) {
+      pieces.push(value.slice(start, index))
+      start = index + 1
+    }
+  }
+  if (quote || escaped) throw INVALID_RULE
+  pieces.push(value.slice(start))
+  return pieces
+}
+
+function parseInlineArray(value) {
+  const clean = stripComment(value).trim()
+  const closing = clean.lastIndexOf(']')
+  if (!clean.startsWith('[') || closing < 0) return []
+  const content = clean.slice(1, closing)
+  if (content.trim() === '') return []
+  return splitOutsideQuotes(content, ',')
+    .map(item => parseScalar(item, { allowEmpty: true, allowGlobSyntax: true }))
+    .filter(Boolean)
+}
+
+function parseFrontmatter(text) {
+  const source = text.startsWith('\ufeff') ? text.slice(1) : text
+  const openingLength = source.startsWith('---\r\n') ? 5 : source.startsWith('---\n') ? 4 : 0
+  if (openingLength === 0) return undefined
+
+  let lineStart = openingLength
+  let closingStart
+  let bodyStart = source.length
+  while (lineStart <= source.length) {
+    const nextNewline = source.indexOf('\n', lineStart)
+    const lineEnd = nextNewline === -1 ? source.length : nextNewline
+    if (source.slice(lineStart, lineEnd).replace(/\r$/u, '') === '---') {
+      closingStart = lineStart
+      bodyStart = nextNewline === -1 ? source.length : nextNewline + 1
+      break
+    }
+    if (nextNewline === -1) break
+    lineStart = nextNewline + 1
+  }
+  if (closingStart === undefined) return undefined
+
+  const lines = source.slice(openingLength, closingStart).replace(/\r\n/gu, '\n').split('\n')
+  const fields = { description: undefined, alwaysApply: false, patterns: [] }
+  const appendPatterns = values => {
+    for (const pattern of values) {
+      if (typeof pattern !== 'string') throw INVALID_RULE
+      const normalized = pattern.replaceAll('\\', '/')
+      if (normalized.length === 0) continue
+      if (normalized.length > MAX_READ_PATH_CHARS || PATH_CONTROL_OR_BIDI.test(normalized)) throw INVALID_RULE
+      if (!fields.patterns.includes(normalized)) fields.patterns.push(normalized)
+    }
+  }
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = stripComment(lines[index] ?? '').trim()
+    if (!line) continue
+    const colon = line.indexOf(':')
+    if (colon < 0) continue
+    const name = line.slice(0, colon).trim()
+    const raw = line.slice(colon + 1).trim()
+
+    if (name === 'globs' || name === 'paths' || name === 'applyTo') {
+      if (raw.startsWith('[')) {
+        appendPatterns(parseInlineArray(raw))
+        continue
+      }
+      if (raw !== '') {
+        const value = parseScalar(raw, { allowEmpty: true, allowGlobSyntax: true })
+        const values = splitOutsideQuotes(value, ',').map(item => item.trim()).filter(Boolean)
+        appendPatterns(values)
+        continue
+      }
+      const values = []
+      let cursor = index + 1
+      while (cursor < lines.length) {
+        const child = lines[cursor] ?? ''
+        if (child.trim() === '' || /^\s*#/u.test(child)) {
+          cursor++
+          continue
+        }
+        const item = /^\s+-\s*(.*)$/u.exec(child)
+        if (!item) break
+        const parsed = parseScalar(item[1], { allowEmpty: true, allowGlobSyntax: true })
+        if (parsed) values.push(parsed)
+        cursor++
+      }
+      appendPatterns(values)
+      index = cursor - 1
+      continue
+    }
+
+    if (name === 'alwaysApply') fields.alwaysApply = raw === 'true'
+    else if (name === 'description') {
+      fields.description = parseScalar(raw, { allowEmpty: true, allowGlobSyntax: true })
+    }
+    // Unknown metadata (including mode) is ignored, as in upstream rule mode.
+  }
+
+  return { ...fields, body: source.slice(bodyStart) }
+}
+
+function compilePattern(pattern) {
+  try {
+    return picomatch(pattern, { dot: true, bash: true })
+  } catch {
+    throw INVALID_RULE
+  }
+}
+
+function ruleMatch(rule, readPath) {
+  if (rule.alwaysApply) return 'alwaysApply'
+  const patterns = rule.patterns.map(raw => {
+    const negative = raw.startsWith('!')
+    const pattern = negative ? raw.slice(1) : raw
+    if (pattern.length === 0 || pattern.startsWith('!')) throw INVALID_RULE
+    return { raw, negative, matcher: compilePattern(pattern) }
+  })
+  const matches = ({ matcher }) => matcher(readPath.relativePath) || matcher(readPath.basename)
+  if (patterns.some(pattern => pattern.negative && matches(pattern))) return undefined
+  const positive = patterns.find(pattern => !pattern.negative && matches(pattern))
+  return positive ? `glob: ${positive.raw}` : undefined
+}
+
+function escapeRuleMetadata(value) {
+  return escapePromptVariableSyntax(value.replace(CONTROL_OR_BIDI_GLOBAL, '?')
+    .replaceAll('\u2028', '\\u2028')
+    .replaceAll('\u2029', '\\u2029')
+    .replaceAll('[', '\uff3b')
+    .replaceAll(']', '\uff3d'))
+}
+
+function ruleContext(relativePath, reason, rawBody) {
+  const safePath = escapeRuleMetadata(relativePath)
+  const safeReason = escapeRuleMetadata(reason)
+  const content = escapePromptVariableSyntax(rawBody.replace(CONTROL_OR_BIDI_GLOBAL, '?'))
+  return createUserMessage({
+    source: { kind: 'user' },
+    content: [{
+      type: 'text',
+      text: `[Rule: ${safePath}]\n[Match: ${safeReason}]\n[Untrusted repository rule text]\n${content}\n[End rule]`,
+    }],
+  })
+}
+
+function getAgentState(states, agent) {
+  let state = states.get(agent)
+  if (!state) {
+    state = { generation: 0, injected: new Map(), pending: new Set() }
+    states.set(agent, state)
+  }
+  return state
+}
+
+function resetAgentState(state) {
+  state.generation++
+  state.injected.clear()
+  state.pending.clear()
+}
+
+function dedupeKey(targetKey, body) {
+  const hash = createHash('sha256').update(body).digest('hex').slice(0, 16)
+  return JSON.stringify([targetKey, hash])
+}
+
+function releaseReservations(state, keys) {
+  for (const key of keys) state.pending.delete(key)
+}
+
+function commitReservations(state, keys) {
+  for (const key of keys) {
+    state.pending.delete(key)
+    state.injected.set(key, true)
+    while (state.injected.size > MAX_AGENT_CACHE_ENTRIES) {
+      state.injected.delete(state.injected.keys().next().value)
+    }
+  }
+}
+
+async function prepareRulesContext({ fs, cwd, readPath, cwdTarget, agentState, generation, signal }) {
+  assertNotAborted(signal)
+  const claude = await getDirectoryTarget(fs, cwd, cwdTarget, '.claude', undefined, undefined, signal)
+  if (!claude) return []
+  const rules = await getDirectoryTarget(fs, cwd, cwdTarget, RULES_DIRECTORY, undefined, undefined, signal)
+  if (!rules || !contains(fs, claude.target, rules.target)) return []
+
+  const rootBefore = await getDirectoryTarget(fs, cwd, cwdTarget, RULES_DIRECTORY, rules.key, undefined, signal)
+  if (!rootBefore) return []
+
+  const scan = { directories: 0, entries: 0, bytes: 0, files: [], visited: new Set() }
+  const walk = async (directoryRelative, directoryTarget, directoryKey, depth) => {
+    assertNotAborted(signal)
+    if (depth > MAX_RULE_DEPTH) throw LIMIT_REACHED
+    if (++scan.directories > MAX_RULE_DIRECTORIES) throw LIMIT_REACHED
+    if (scan.visited.has(directoryKey)) return
+    scan.visited.add(directoryKey)
+
+    const before = await getDirectoryTarget(fs, cwd, cwdTarget, directoryRelative, directoryKey, undefined, signal)
+    if (!before) return
+    const listing = await safeCall(() => fs.listDir(before.target, signal), signal)
+    assertNotAborted(signal)
+    if (!Array.isArray(listing)) throw LIMIT_REACHED
+    // The provider may already have materialized this full direct listing before this cap is checked.
+    if (scan.entries + listing.length > MAX_PROCESSED_ENTRIES) throw LIMIT_REACHED
+
+    const entries = [...listing].sort((left, right) => compareName(left?.name, right?.name))
+    const seenNames = new Set()
+    const children = []
+    for (const entry of entries) {
+      assertNotAborted(signal)
+      if (++scan.entries > MAX_PROCESSED_ENTRIES) throw LIMIT_REACHED
+      if (!isObject(entry) || !validEntryName(entry.name)) continue
+      if (seenNames.has(entry.name)) throw LIMIT_REACHED
+      seenNames.add(entry.name)
+      if (entry.type !== 'file' && entry.type !== 'directory') continue
+      if (entry.type === 'directory' && SKIP_RULE_DIRECTORIES.has(entry.name)) continue
+      const childRelative = `${directoryRelative ? `${directoryRelative}/` : ''}${entry.name}`
+      const pathInfo = await lstat(fs, childRelative, cwd, signal)
+      assertNotAborted(signal)
+      if (pathInfo?.type !== entry.type) continue
+      if (entry.type === 'directory') {
+        const child = await getDirectoryTarget(fs, cwd, cwdTarget, childRelative, undefined, entry, signal, pathInfo)
+        if (!child || !contains(fs, before.target, child.target)) continue
+        children.push({ relative: childRelative, target: child.target, key: child.key, depth: depth + 1 })
+        continue
+      }
+      if (!/\.(?:md|mdc)$/u.test(entry.name)) {
+        // Even non-rule files are identity/type checked before being ignored.
+        const child = await getFileTarget(fs, cwd, cwdTarget, rules.target, childRelative, entry, signal, pathInfo)
+        if (!child) continue
+        continue
+      }
+      const file = await getFileTarget(fs, cwd, cwdTarget, rules.target, childRelative, entry, signal, pathInfo)
+      if (!file) continue
+      const read = await readRuleFile(fs, cwd, cwdTarget, rules.target, childRelative, entry, scan, signal, file)
+      if (!read) continue
+      let parsed
+      try {
+        parsed = parseFrontmatter(read.text)
+      } catch (error) {
+        if (error === LIMIT_REACHED) throw error
+        continue
+      }
+      if (!parsed) continue
+      let reason
+      try {
+        reason = ruleMatch(parsed, readPath)
+      } catch {
+        // A malformed pattern invalidates this rule without blocking the native read.
+        continue
+      }
+      if (!reason) continue
+      const body = parsed.body
+      if (body.trim() === '') continue
+      scan.files.push({
+        key: dedupeKey(read.key, body),
+        targetKey: read.key,
+        relativePath: childRelative,
+        reason,
+        body,
+      })
+    }
+
+    const after = await getDirectoryTarget(fs, cwd, cwdTarget, directoryRelative, directoryKey, undefined, signal)
+    if (!after || after.key !== before.key || !metadataMatches(before.pathInfo, after.pathInfo)
+      || !metadataMatches(before.info, after.info)) throw LIMIT_REACHED
+    for (const child of children) {
+      if (child.depth > MAX_RULE_DEPTH) throw LIMIT_REACHED
+      await walk(child.relative, child.target, child.key, child.depth)
+    }
+  }
+
+  await walk(RULES_DIRECTORY, rootBefore.target, rootBefore.key, 0)
+  assertNotAborted(signal)
+  if (agentState.generation !== generation) return []
+  const unique = []
+  const localKeys = new Set()
+  for (const candidate of scan.files) {
+    if (localKeys.has(candidate.key) || agentState.injected.has(candidate.key) || agentState.pending.has(candidate.key)) continue
+    localKeys.add(candidate.key)
+    unique.push(candidate)
+  }
+  if (unique.length > MAX_INJECTED_RULES || agentState.pending.size + unique.length > MAX_AGENT_CACHE_ENTRIES) throw LIMIT_REACHED
+  return unique.map(candidate => ({
+    key: candidate.key,
+    message: ruleContext(candidate.relativePath, candidate.reason, candidate.body),
+  }))
+}
+
+/** Append bounded, matched `.claude/rules` UserMessages to accepted DSH `read` results. */
+export function createClaudeRulesOnReadContextListener(agents, sessions, fs) {
+  if (!agents || typeof agents.get !== 'function') throw new TypeError('Claude rules context requires DSH agents.get')
+  if (!sessions || typeof sessions.get !== 'function') throw new TypeError('Claude rules context requires DSH sessions.get')
+  assertFileSystem(fs)
+
+  const states = new WeakMap()
+  const lifecycle = new AbortController()
+  let disposed = false
+
+  const onAgentCreated = ({ agent, source } = {}) => {
+    if (disposed || (source !== 'clear' && source !== 'compact') || !isObject(agent)) return
+    let id
+    try {
+      id = agent.id
+    } catch {
+      return
+    }
+    if (typeof id !== 'string' || id.length === 0) return
+    try {
+      const liveAgent = agents.get(id)
+      if (!isObject(liveAgent) || liveAgent.id !== id) return
+      const state = states.get(liveAgent)
+      if (state) resetAgentState(state)
+    } catch {}
+  }
+
+  const listener = async (exec, result, next) => {
+    const decision = await next()
+    if (disposed || typeof exec?.name !== 'string' || exec.name.toLowerCase() !== READ_TOOL_NAME
+      || result?.isError !== false || decision?.kind !== 'accept') return decision
+    const projection = exec?.agent
+    if (!isObject(projection) || typeof projection.id !== 'string' || projection.id.length === 0
+      || !validSignal(exec.signal) || exec.signal.aborted) return decision
+
+    let liveAgent
+    let session
+    try {
+      liveAgent = agents.get(projection.id)
+      if (!isObject(liveAgent) || liveAgent.id !== projection.id) return decision
+      session = sessions.get(liveAgent.id)
+    } catch {
+      return decision
+    }
+    const cwd = session?.header?.cwd
+    if (session?.header?.id !== liveAgent.id || !validCwd(cwd)) return decision
+    const readPath = validateReadPath(exec.arguments, cwd)
+    if (!readPath) return decision
+
+    const state = getAgentState(states, liveAgent)
+    const generation = state.generation
+    let deadline
+    let linked
+    try {
+      deadline = createDeadline(READ_PIPELINE_TIMEOUT_MS)
+      linked = linkSignals([exec.signal, lifecycle.signal, deadline.signal])
+    } catch {
+      deadline?.dispose()
+      return decision
+    }
+
+    let messages = []
+    let reservations = []
+    try {
+      const cwdTarget = await resolve(fs, cwd, cwd, linked.signal)
+      assertNotAborted(linked.signal)
+      const cwdKey = safeTargetKey(cwdTarget)
+      if (!cwdKey) return decision
+      const cwdInfo = await stat(fs, cwdTarget, linked.signal)
+      assertNotAborted(linked.signal)
+      if (cwdInfo?.type !== 'directory') return decision
+      const readTarget = await resolve(fs, readPath.filePath, cwd, linked.signal)
+      assertNotAborted(linked.signal)
+      if (!safeTargetKey(readTarget) || !contains(fs, cwdTarget, readTarget)) return decision
+      const readInfo = await stat(fs, readTarget, linked.signal)
+      assertNotAborted(linked.signal)
+      if (readInfo?.type !== 'file') return decision
+
+      messages = await prepareRulesContext({ fs, cwd, readPath, cwdTarget, agentState: state, generation, signal: linked.signal })
+      assertNotAborted(linked.signal)
+      if (messages.length === 0) return decision
+      if (state.generation !== generation || states.get(liveAgent) !== state || disposed) return decision
+      if (exec.signal.aborted || !agents || agents.get(projection.id) !== liveAgent) return decision
+
+      for (const item of messages) {
+        if (state.injected.has(item.key) || state.pending.has(item.key)) continue
+        state.pending.add(item.key)
+        reservations.push(item.key)
+      }
+      if (reservations.length === 0) return decision
+      if (reservations.length > MAX_INJECTED_RULES || state.pending.size > MAX_AGENT_CACHE_ENTRIES) {
+        releaseReservations(state, reservations)
+        reservations = []
+        return decision
+      }
+      const byKey = new Map(messages.map(item => [item.key, item.message]))
+      const contexts = reservations.map(key => byKey.get(key)).filter(Boolean)
+      if (contexts.length === 0) {
+        releaseReservations(state, reservations)
+        reservations = []
+        return decision
+      }
+      const previous = Array.isArray(decision.additionalContexts) ? decision.additionalContexts : []
+      const enriched = { ...decision, additionalContexts: [...previous, ...contexts] }
+      commitReservations(state, reservations)
+      reservations = []
+      return enriched
+    } catch {
+      releaseReservations(state, reservations)
+      return decision
+    } finally {
+      linked.dispose()
+      deadline.dispose()
+    }
+  }
+
+  listener.onAgentCreated = onAgentCreated
+  listener.dispose = () => {
+    if (disposed) return
+    disposed = true
+    lifecycle.abort()
+  }
+  return listener
+}
+
+/** Register the Claude rules read-result adapter and clear dedupe on clear/compact. */
+export function registerClaudeRulesOnReadContext(ctx, agents, sessions, fs) {
+  if (typeof ctx?.on !== 'function' || typeof ctx?.effect !== 'function') {
+    throw new TypeError('registerClaudeRulesOnReadContext requires Cordis ctx.on and ctx.effect')
+  }
+  const listener = createClaudeRulesOnReadContextListener(agents, sessions, fs)
+  try {
+    ctx.on('tools/post-execute', listener)
+    ctx.on('agent/created', listener.onAgentCreated)
+    ctx.effect(() => listener.dispose, 'dsh-omo Claude rules on read context')
+  } catch (error) {
+    listener.dispose()
+    throw error
+  }
+  return listener.dispose
+}

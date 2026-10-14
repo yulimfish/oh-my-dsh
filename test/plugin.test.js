@@ -95,6 +95,7 @@ const baseConfig = {
   enableRootAgentsContext: false,
   enableRootReadmeContext: false,
   enableReadmeOnRead: false,
+  enableClaudeRulesOnRead: false,
   projectSkillDirs: ['.opencode/skills', '.claude/skills'],
   disabledSkills: [],
   disabledOmoCommands: [],
@@ -147,6 +148,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableRootReadmeContext: true }).enableRootReadmeContext, true)
   assert.equal(Config({}).enableReadmeOnRead, false)
   assert.equal(Config({ enableReadmeOnRead: true }).enableReadmeOnRead, true)
+  assert.equal(Config({}).enableClaudeRulesOnRead, false)
+  assert.equal(Config({ enableClaudeRulesOnRead: true }).enableClaudeRulesOnRead, true)
 })
 
 test('/omo status reports feature flags and service presence without calling business methods', () => {
@@ -172,7 +175,7 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
-  assert.match(status.text, /teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; lsp=present; sessionQuery=present; sessions=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -786,6 +789,91 @@ test('mounts opt-in README-on-read injection only with DSH prerequisites and kee
   assert.equal(includedRoot.returned.additionalContexts.length, 1, 'without the root snapshot, the root README is injected after read')
   assert.deepEqual(includedRoot.paths, ['README.md', 'README.md'])
   assert.deepEqual(includedRoot.readTargets, [{ targetKey: 'root-readme' }])
+})
+
+test('mounts opt-in Claude rules-on-read independently with complete prerequisites', () => {
+  const calls = []
+  const prerequisites = () => ({
+    services: {
+      agents: { get: (...args) => calls.push(['agents.get', ...args]) },
+      sessions: { get: (...args) => calls.push(['sessions.get', ...args]) },
+    },
+    fs: {
+      resolve: (...args) => calls.push(['fs.resolve', ...args]),
+      contains: (...args) => calls.push(['fs.contains', ...args]),
+      lstat: (...args) => calls.push(['fs.lstat', ...args]),
+      stat: (...args) => calls.push(['fs.stat', ...args]),
+      readBytes: (...args) => calls.push(['fs.readBytes', ...args]),
+      listDir: (...args) => calls.push(['fs.listDir', ...args]),
+    },
+  })
+
+  const disabled = makeContext(prerequisites())
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('tools/post-execute'), false, 'the default-off flag registers no post-execute hook')
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled/u)
+  assert.match(disabled.commands.get('omo').handler().text, /Claude rules-on-read: disabled/u)
+  assert.deepEqual(calls, [], 'disabled setup and status do not call filesystem or Service methods')
+
+  const missingCases = [
+    ['agents service', deps => { deps.services.agents = undefined }],
+    ['agents.get', deps => { deps.services.agents = {} }],
+    ['sessions service', deps => { deps.services.sessions = undefined }],
+    ['sessions.get', deps => { deps.services.sessions = {} }],
+    ['fs.resolve', deps => { delete deps.fs.resolve }],
+    ['fs.contains', deps => { delete deps.fs.contains }],
+    ['fs.lstat', deps => { delete deps.fs.lstat }],
+    ['fs.stat', deps => { delete deps.fs.stat }],
+    ['fs.readBytes', deps => { delete deps.fs.readBytes }],
+    ['fs.listDir', deps => { delete deps.fs.listDir }],
+    ['ctx.on', (_deps, fixture) => { fixture.ctx.on = undefined }],
+    ['ctx.effect', (_deps, fixture) => { fixture.ctx.effect = undefined }],
+  ]
+  for (const [missingName, remove] of missingCases) {
+    const deps = prerequisites()
+    const fixture = makeContext(deps)
+    remove(deps, fixture)
+    assert.throws(
+      () => apply(fixture.ctx, { ...baseConfig, enableClaudeRulesOnRead: true }),
+      /enableClaudeRulesOnRead requires DSH agents\.get/u,
+      missingName,
+    )
+    assert.equal(fixture.events.size, 0, `${missingName} failure must not register hooks`)
+    assert.equal(fixture.tools.size, 0, `${missingName} failure must not partially register tools`)
+    assert.equal(fixture.commands.size, 0, `${missingName} failure must not partially register commands`)
+    assert.equal(fixture.skills.size, 0, `${missingName} failure must not partially register skills`)
+    assert.equal(fixture.sections.length, 0, `${missingName} failure must not partially register prompt sections`)
+    assert.equal(fixture.effects.length, 0, `${missingName} failure must not attach effects`)
+  }
+
+  const enabled = makeContext(prerequisites())
+  apply(enabled.ctx, { ...baseConfig, enableClaudeRulesOnRead: true })
+  assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=enabled/u)
+  assert.match(enabled.commands.get('omo').handler().text, /Claude rules-on-read: enabled/u)
+  assert.deepEqual(calls, [], 'enabled registration/status do not perform filesystem or Service operations')
+
+  const readmeOnReadOnly = makeContext(prerequisites())
+  apply(readmeOnReadOnly.ctx, { ...baseConfig, enableReadmeOnRead: true })
+  assert.equal(typeof readmeOnReadOnly.events.get('tools/post-execute'), 'function')
+  assert.match(readmeOnReadOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /readmeOnRead=enabled; claudeRulesOnRead=disabled/u)
+
+  const rootSnapshotsOnly = makeContext(prerequisites())
+  apply(rootSnapshotsOnly.ctx, { ...baseConfig, enableRootReadmeContext: true, enableRootAgentsContext: true })
+  assert.equal(rootSnapshotsOnly.events.has('tools/post-execute'), false)
+  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled/u)
+
+  const combined = makeContext(prerequisites())
+  apply(combined.ctx, {
+    ...baseConfig,
+    enableClaudeRulesOnRead: true,
+    enableReadmeOnRead: true,
+    enableRootReadmeContext: true,
+    enableRootAgentsContext: true,
+  })
+  assert.equal(typeof combined.events.get('tools/post-execute'), 'function', 'independent on-read and root-context flags can be combined')
+  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled/u)
+  assert.deepEqual(calls, [], 'combined registration/status remain free of runtime filesystem and Service calls')
 })
 
 test('mounts the native Goal command only with Goals and opt-in Agent Teams tools only with the Host service', async () => {
