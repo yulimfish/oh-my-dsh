@@ -18,6 +18,7 @@ function makeContext(options = {}) {
   const followups = []
   const disposals = []
   const effects = []
+  const events = new Map()
   const skillProviders = new Map()
   const skillInvalidations = []
   const ctx = {
@@ -68,9 +69,10 @@ function makeContext(options = {}) {
       effects.push({ label, dispose })
       return async () => dispose()
     },
+    on: (event, listener) => { events.set(event, listener); return ctx },
     logger: { warn: () => {} },
   }
-  return { ctx, tools, sections, commands, skills, skillProviders, skillInvalidations, starts, continuableStarts, continuableChildren, descendantCalls, interrupts, followups, disposals, effects }
+  return { ctx, tools, sections, commands, skills, skillProviders, skillInvalidations, starts, continuableStarts, continuableChildren, descendantCalls, interrupts, followups, disposals, effects, events }
 }
 
 const baseConfig = {
@@ -87,6 +89,7 @@ const baseConfig = {
   enableSessionInfo: false,
   enableJobTools: false,
   enableLspTools: false,
+  enableRootAgentsContext: false,
   projectSkillDirs: ['.opencode/skills', '.claude/skills'],
   disabledSkills: [],
   disabledOmoCommands: [],
@@ -133,6 +136,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableJobTools: true }).enableJobTools, true)
   assert.equal(Config({}).enableLspTools, false)
   assert.equal(Config({ enableLspTools: true }).enableLspTools, true)
+  assert.equal(Config({}).enableRootAgentsContext, false)
+  assert.equal(Config({ enableRootAgentsContext: true }).enableRootAgentsContext, true)
 })
 
 test('/omo status reports feature flags and service presence without calling business methods', () => {
@@ -158,7 +163,7 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
-  assert.match(status.text, /teamTools=disabled; jobTools=enabled; lspTools=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; lsp=present; sessionQuery=present; sessions=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -547,6 +552,29 @@ test('mounts only opt-in read-only LSP navigation tools when the exact services 
   assert.match(status, /lspTools=enabled/u)
   assert.match(status, /lsp=present/u)
   assert.deepEqual(calls, [], 'registration and status inspect presence only; query methods wait for explicit tool calls')
+})
+
+test('mounts opt-in root AGENTS context only when session and filesystem dependencies are available', () => {
+  const services = { sessions: { get: () => undefined } }
+  const fs = {
+    resolve: async () => ({}), contains: () => true, lstat: async () => undefined,
+    stat: async () => undefined, readBytes: async () => new Uint8Array(),
+  }
+  const disabled = makeContext({ services, fs })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('tools/post-execute'), false, 'the default-off flag registers no event hook even when services exist')
+
+  const missing = makeContext()
+  assert.throws(
+    () => apply(missing.ctx, { ...baseConfig, enableRootAgentsContext: true }),
+    /enableRootAgentsContext requires DSH sessions\.get/u,
+  )
+  assert.equal(missing.events.has('tools/post-execute'), false, 'missing prerequisites fail before hook registration')
+
+  const enabled = makeContext({ services, fs })
+  apply(enabled.ctx, { ...baseConfig, enableRootAgentsContext: true })
+  assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled/u)
 })
 
 test('mounts the native Goal command only with Goals and opt-in Agent Teams tools only with the Host service', async () => {
