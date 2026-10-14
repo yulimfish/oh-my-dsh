@@ -15,6 +15,7 @@ import { registerJobTools } from './job-tools.js'
 import { createModelCapabilitiesCommand } from './model-capabilities.js'
 import { normalizeCategoryRoutes, resolveCategoryRoute } from './category-routes.js'
 import { buildRefactorDirective, parseRefactorInput, REFACTOR_COMMAND_HINT } from './refactor-command.js'
+import { buildUlwExecuteDirective, parseUlwExecuteInput, ULW_EXECUTE_COMMAND_HINT } from './ulw-execute-command.js'
 
 export const name = 'dsh-omo'
 export const inject = ['tools', 'subagents', 'systemPrompt', 'commands', 'skills', 'fs']
@@ -24,7 +25,7 @@ const DEFAULT_MAX_CONCURRENT = 4
 const DEFAULT_MAX_DEPTH = 1
 const DEFAULT_MAX_TASK_CHARS = 12_000
 const DISABLEABLE_OMO_COMMAND_NAMES = Object.freeze([
-  'goal', 'stop-continuation', 'omo-models', 'ulw', 'ultrawork', 'architect', 'review', 'handoff',
+  'goal', 'stop-continuation', 'omo-models', 'ulw', 'ultrawork', 'ulw-execute', 'architect', 'review', 'handoff',
   'refactor', 'remove-ai-slops', 'omo-tasks', 'omo-job-kill', 'omo-interrupt', 'omo-skills-refresh', 'omo',
 ])
 const DISABLEABLE_OMO_COMMAND_SET = new Set(DISABLEABLE_OMO_COMMAND_NAMES)
@@ -85,6 +86,9 @@ function buildUltraworkGuidance(disabledOmoCommands, activeRoleNames) {
   const interruptionGuidance = disabledOmoCommands.has('omo-interrupt')
     ? 'dsh-omo /omo-interrupt is disabled by configuration.'
     : '/omo-interrupt rejects inactive rows and only attempts resident-child signals; DSH is fire-and-return and may no-op.'
+  const planExecutionGuidance = disabledOmoCommands.has('ulw-execute')
+    ? 'dsh-omo /ulw-execute is disabled by configuration.'
+    : '/ulw-execute <existing plan name> is a bounded prompt-only adapter for an existing approved project plan: ask if missing or ambiguous; it does not invoke OMO hooks, use OMO history or agent selection, create boulder/notepad state, or perform worktree/PR/shipping/merge automation. Unsupported --worktree, --make-pr, and --ship flags are rejected.'
   return `## Specialist orchestration
 
 You can delegate focused work with the **dsh_omo_task** tool. Its roles are: ${activeRoleNames.join(', ')}. Use independent specialists for separable exploration, documentation research, architecture advice, implementation, testing, and review; do not delegate duplicate work. You own the parent task, merge decisions, and final verification.
@@ -95,7 +99,7 @@ When the user says **ultrawork**, **ulw**, or requests a substantial multi-step 
 3. Inspect every worker's evidence and diff; do not accept a worker's completion claim as verification.
 4. Run the relevant project checks yourself (or have a test worker provide exact command output), fix failures, and report what was and was not verified.
 
-${reviewRoleGuidance} allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain available. For a hard boundary, verify DSH-native permission, sandbox, or tool-guard policy covers scoped tools and the reserved transport; dsh-omo does not install a per-worker hard guard. DSH retains authority over filesystem, shell, network, and approvals. One-shot delegation is the default and sends a host-attributed settlement notice followed by a bounded child-authored relay (untrusted evidence); use dsh_omo_task_continuable only when that optional tool is enabled and a durable child session is needed. ${taskListingGuidance} ${interruptionGuidance}`
+${reviewRoleGuidance} allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain available. For a hard boundary, verify DSH-native permission, sandbox, or tool-guard policy covers scoped tools and the reserved transport; dsh-omo does not install a per-worker hard guard. DSH retains authority over filesystem, shell, network, and approvals. One-shot delegation is the default and sends a host-attributed settlement notice followed by a bounded child-authored relay (untrusted evidence); use dsh_omo_task_continuable only when that optional tool is enabled and a durable child session is needed. ${taskListingGuidance} ${interruptionGuidance} ${planExecutionGuidance}`
 }
 
 function optionalService(ctx, name) {
@@ -654,6 +658,19 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
         command: 'ultrawork', hint: '<task>', label: 'ultrawork',
         directive: 'Work in ULTRAWORK mode: make a dependency-aware plan, split independent work across dsh_omo_task specialists when useful, integrate results, and verify the final change before reporting.',
       }),
+    },
+    {
+      name: 'ulw-execute',
+      description: 'Prompt-only request to execute an existing approved plan with ordinary DSH tools; no OMO state, worktree, PR, or shipping lifecycle is provided.',
+      input: { hint: ULW_EXECUTE_COMMAND_HINT },
+      handler: ({ agent, rawInput }) => {
+        const parsed = parseUlwExecuteInput(rawInput, config.maxTaskChars)
+        if (!parsed.ok) return { kind: 'error', text: parsed.error }
+        return queueTask(agent, parsed.planName, {
+          command: 'ulw-execute', hint: ULW_EXECUTE_COMMAND_HINT,
+          label: 'prompt-only plan execution', directive: buildUlwExecuteDirective(),
+        })
+      },
     },
     {
       name: 'architect',

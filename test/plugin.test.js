@@ -239,18 +239,18 @@ test('disabledOmoCommands filters only local registrations and updates /omo help
   apply(fixture.ctx, {
     ...baseConfig,
     enableContinuableTasks: true,
-    disabledOmoCommands: ['refactor', 'ultrawork', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'goal', 'omo-models'],
+    disabledOmoCommands: ['refactor', 'ultrawork', 'ulw-execute', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'goal', 'omo-models'],
   })
 
   assert.strictEqual(fixture.commands.get('refactor'), externalRefactor)
   assert.strictEqual(fixture.commands.get('native-command'), externalNative)
-  for (const name of ['ultrawork', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh']) {
+  for (const name of ['ultrawork', 'ulw-execute', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh']) {
     assert.equal(fixture.commands.has(name), false)
   }
   const help = fixture.commands.get('omo').handler({}).text
   const helpCommandList = help.match(/Commands: ([^.]+)\. Native Agent Teams/u)?.[1]
   assert.equal(helpCommandList, '/ulw, /architect, /review, /handoff, /remove-ai-slops')
-  const disabledHelpNames = /\/refactor|\/ultrawork|\/omo-tasks|\/omo-interrupt|\/omo-skills-refresh|\/goal|\/omo-models/u
+  const disabledHelpNames = /\/refactor|\/ultrawork|\/ulw-execute|\/omo-tasks|\/omo-interrupt|\/omo-skills-refresh|\/goal|\/omo-models/u
   assert.doesNotMatch(helpCommandList, disabledHelpNames)
   assert.doesNotMatch(help, disabledHelpNames)
   const continuable = fixture.tools.get('dsh_omo_task_continuable')
@@ -264,7 +264,8 @@ test('disabledOmoCommands filters only local registrations and updates /omo help
   const orchestrationGuidance = fixture.sections[0].text
   assert.match(orchestrationGuidance, /dsh-omo \/omo-tasks is disabled by configuration/u)
   assert.match(orchestrationGuidance, /dsh-omo \/omo-interrupt is disabled by configuration/u)
-  assert.doesNotMatch(orchestrationGuidance, /\/omo-tasks lists direct children|\/omo-interrupt rejects inactive/u)
+  assert.match(orchestrationGuidance, /dsh-omo \/ulw-execute is disabled by configuration/u)
+  assert.doesNotMatch(orchestrationGuidance, /\/omo-tasks lists direct children|\/omo-interrupt rejects inactive|\/ulw-execute <existing plan name>/u)
   for (const disabledOmoCommands of [[], ['omo-tasks'], ['omo-interrupt'], ['omo-tasks', 'omo-interrupt']]) {
     const partial = makeContext()
     apply(partial.ctx, { ...baseConfig, enableContinuableTasks: true, disabledOmoCommands })
@@ -324,12 +325,12 @@ test('disabledOmoCommands filters optional commands when their services are moun
   }
   const help = fixture.commands.get('omo').handler({}).text
   const helpCommandList = help.match(/Commands: ([^.]+)\. Native Agent Teams/u)?.[1]
-  assert.equal(helpCommandList, '/ulw, /ultrawork, /architect, /review, /handoff, /refactor, /remove-ai-slops, /omo-tasks, /omo-interrupt, /omo-skills-refresh')
+  assert.equal(helpCommandList, '/ulw, /ultrawork, /ulw-execute, /architect, /review, /handoff, /refactor, /remove-ai-slops, /omo-tasks, /omo-interrupt, /omo-skills-refresh')
   assert.doesNotMatch(help, /\/goal|\/stop-continuation|\/omo-models/u)
 })
 
 test('rejects invalid disabledOmoCommands before plugin registration', () => {
-  for (const disabledOmoCommands of ['refactor', ['unknown'], ['/refactor'], ['refactor', 'refactor'], Array(16).fill('refactor')]) {
+  for (const disabledOmoCommands of ['refactor', ['unknown'], ['/refactor'], ['refactor', 'refactor'], Array(17).fill('refactor')]) {
     const fixture = makeContext()
     assert.throws(() => apply(fixture.ctx, { ...baseConfig, disabledOmoCommands }), /disabledOmoCommands/u)
     assert.equal(fixture.tools.size, 0)
@@ -438,7 +439,7 @@ test('mounts specialist controls and caps the untrusted worker body', async () =
   assert.match(fixture.sections[0].text, /ULTRAWORK/i)
   assert.match(fixture.sections[0].text, /\/omo-tasks lists direct children/u)
   assert.match(fixture.sections[0].text, /\/omo-interrupt rejects inactive/u)
-  assert.deepEqual([...fixture.commands.keys()], ['ulw', 'ultrawork', 'architect', 'review', 'handoff', 'refactor', 'remove-ai-slops', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'omo'])
+  assert.deepEqual([...fixture.commands.keys()], ['ulw', 'ultrawork', 'ulw-execute', 'architect', 'review', 'handoff', 'refactor', 'remove-ai-slops', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'omo'])
   assert.deepEqual([...fixture.skills.keys()], SKILLS.map(skill => skill.name))
   assert.deepEqual([...fixture.skillProviders.keys()], ['dsh-omo-project-skills'])
   assert.equal(fixture.commands.get('omo-skills-refresh').handler().kind, 'success')
@@ -1503,6 +1504,41 @@ test('slash commands steer the current agent with explicit work modes', async ()
   assert.equal(oversized.kind, 'error')
   assert.match(oversized.text, /dsh-omo limit/u)
   assert.equal(messages.length, 2, 'oversized slash input is not copied to the parent inbox')
+})
+
+test('/ulw-execute queues one prompt-only plan request and rejects unsupported flags before follow-up', () => {
+  const fixture = makeContext()
+  const messages = []
+  const agent = { id: 'parent-agent', followup: message => messages.push(message) }
+  apply(fixture.ctx, baseConfig)
+  const command = fixture.commands.get('ulw-execute')
+  assert.ok(command)
+  assert.match(command.description, /Prompt-only/u)
+  assert.equal(fixture.tools.has('ulw-execute'), false, 'the command is not a model-facing Tool')
+  assert.match(fixture.sections[0].text, /\/ulw-execute <existing plan name> is a bounded prompt-only adapter/u)
+  assert.match(fixture.sections[0].text, /Unsupported --worktree, --make-pr, and --ship flags are rejected/u)
+  const fsTouches = []
+  let hostServiceCalls = 0
+  fixture.ctx.fs = new Proxy({}, { get(_target, property) { fsTouches.push(String(property)); throw new Error('unexpected filesystem access') } })
+  fixture.ctx.get = () => { hostServiceCalls += 1; throw new Error('unexpected Host service call') }
+
+  const result = command.handler({ agent, rawInput: 'Existing migration plan' })
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /prompt-only plan execution/u)
+  assert.equal(messages.length, 1)
+  const text = messages[0].content[0].text
+  assert.match(text, /Prompt-only DSH adapter/u)
+  assert.match(text, /ask the user for clarification/u)
+  assert.match(text, /does not invoke the upstream OMO hook/u)
+  assert.match(text, /Existing migration plan/u)
+  assert.equal(fixture.starts.length, 0, 'the command queues a current-agent follow-up without starting subagents')
+  assert.deepEqual(fsTouches, [], 'the prompt-only adapter performs no filesystem operations')
+  assert.equal(hostServiceCalls, 0, 'the prompt-only adapter makes no Host service calls')
+
+  for (const rawInput of [undefined, '', '   ', 'Plan --worktree /tmp', 'Plan --make-pr', 'Plan --ship', `x`.repeat(baseConfig.maxTaskChars + 1)]) {
+    assert.equal(command.handler({ agent, rawInput }).kind, 'error')
+  }
+  assert.equal(messages.length, 1, 'invalid and unsupported requests queue no additional follow-up')
 })
 
 test('parses /refactor options and queues only bounded prompt guidance to the current agent', () => {
