@@ -38,7 +38,7 @@ function makeContext(options = {}) {
           dispose: async () => { disposals.push(id) },
         }
       },
-      getProvider: options.getProvider ?? (provider => provider === 'spawn' ? { name: 'spawn', prepareContinuable: async () => ({}) } : undefined),
+      getProvider: options.getProvider ?? (provider => provider === 'spawn' ? { name: 'spawn', capabilities: { persona: true, agentOptions: true, toolFilter: true }, prepareContinuable: async () => ({}) } : undefined),
       startContinuable: async spec => {
         continuableStarts.push(spec)
         return { childId: `continuable-child-${continuableStarts.length}`, messageId: `accepted-${continuableStarts.length}` }
@@ -100,6 +100,7 @@ const baseConfig = {
   disabledSkills: [],
   disabledOmoCommands: [],
   disabledOmoRoles: [],
+  userAgents: [],
   categoryRoutes: [],
   roleRoutes: [],
 }
@@ -113,6 +114,10 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({ disabledOmoCommands: ['refactor', 'ulw'] }).disabledOmoCommands, ['refactor', 'ulw'])
   assert.deepEqual(Config({}).disabledOmoRoles, [])
   assert.deepEqual(Config({ disabledOmoRoles: ['architect', 'reviewer'] }).disabledOmoRoles, ['architect', 'reviewer'])
+  assert.deepEqual(Config({}).userAgents, [])
+  assert.deepEqual(Config({ userAgents: [{ name: 'docs-auditor', description: 'Review docs.', prompt: 'Check for gaps.', mode: 'subagent' }] }).userAgents, [
+    { name: 'docs-auditor', description: 'Review docs.', prompt: 'Check for gaps.', mode: 'subagent' },
+  ])
   assert.equal(Config({}).enabledProjectSkills, undefined)
   assert.equal(Config({ enabledProjectSkills: null }).enabledProjectSkills, null)
   assert.deepEqual(Config({ enabledProjectSkills: ['incident-response'] }).enabledProjectSkills, ['incident-response'])
@@ -1243,6 +1248,79 @@ test('applies configured model route and explicit tool restriction', async () =>
   })
 })
 
+test('dispatches config-defined user agents through provider persona and existing route filters', async () => {
+  const fixture = makeContext()
+  const userAgent = {
+    name: 'docs-auditor',
+    description: 'Review repository docs for concrete gaps.',
+    prompt: 'Audit documentation carefully and report actionable discrepancies.',
+    mode: 'subagent',
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    userAgents: [userAgent],
+    categoryRoutes: [{ name: 'research', provider: 'deepseek-official', model: 'deepseek-flash' }],
+    roleRoutes: [{ role: 'docs-auditor', category: 'research', reasoningEffort: 'high', allowTools: ['read', 'grep'] }],
+  })
+  const oneShot = fixture.tools.get('dsh_omo_task')
+  const continuable = fixture.tools.get('dsh_omo_task_continuable')
+  assert.ok(oneShot.parameters.properties.role.enum.includes('docs-auditor'))
+  assert.match(oneShot.description, /docs-auditor \(Review repository docs for concrete gaps\.\)/u)
+  const parent = { id: 'parent-agent', followup() {} }
+  const signal = new AbortController().signal
+  const task = 'Review the migration guide.'
+
+  await oneShot.execute({ role: 'docs-auditor', category: 'research', task }, { agent: parent, signal })
+  await continuable.execute({ role: 'docs-auditor', category: 'research', task }, { agent: parent, signal })
+
+  for (const request of [fixture.starts[0].request, fixture.continuableStarts[0].request]) {
+    assert.equal(request.persona, userAgent.prompt)
+    assert.deepEqual(request.agentOptions, {
+      provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'high',
+    })
+    assert.deepEqual(request.toolFilter, { allow: ['read', 'grep'] })
+    assert.ok(request.prompt[0].text.includes(userAgent.description))
+    assert.ok(request.prompt[0].text.includes(task))
+    assert.ok(!request.prompt[0].text.includes(userAgent.prompt), 'the persona remains separate from the task message')
+  }
+
+  const onlyUserAgent = makeContext()
+  apply(onlyUserAgent.ctx, {
+    ...baseConfig,
+    userAgents: [userAgent],
+    disabledOmoRoles: ROLE_NAMES,
+  })
+  assert.deepEqual(onlyUserAgent.tools.get('dsh_omo_task').parameters.properties.role.enum, ['docs-auditor'])
+})
+
+test('fails closed when a configured user-agent persona is unsupported by its provider', async () => {
+  const fixture = makeContext({
+    getProvider: provider => provider === 'spawn'
+      ? { name: 'spawn', capabilities: { persona: false }, prepareContinuable: async () => ({}) }
+      : undefined,
+  })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    userAgents: [{ name: 'custom-reviewer', prompt: 'Review the implementation.' }],
+  })
+  const oneShot = fixture.tools.get('dsh_omo_task')
+  const continuable = fixture.tools.get('dsh_omo_task_continuable')
+  const parent = { id: 'parent-agent', followup() {} }
+  const signal = new AbortController().signal
+  await assert.rejects(
+    oneShot.execute({ role: 'custom-reviewer', task: 'Review this patch.' }, { agent: parent, signal }),
+    /requires subagent provider "spawn" to support persona/u,
+  )
+  await assert.rejects(
+    continuable.execute({ role: 'custom-reviewer', task: 'Review this patch.' }, { agent: parent, signal }),
+    /requires subagent provider "spawn" to support persona/u,
+  )
+  assert.equal(fixture.starts.length, 0)
+  assert.equal(fixture.continuableStarts.length, 0)
+})
+
 test('composes category tools false entries as monotonic inherited-tool denies', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
@@ -1621,6 +1699,22 @@ test('rejects unknown role routes and incomplete model routes', async () => {
     roleRoutes: [{ role: 'unknown' }],
   }), /unknown role route/)
 
+  const invalidUserAgentMode = makeContext()
+  assert.throws(() => apply(invalidUserAgentMode.ctx, {
+    ...baseConfig,
+    userAgents: [{ name: 'custom-reviewer', prompt: 'Review carefully.', mode: 'primary' }],
+  }), /mode only supports "subagent"/u)
+  assert.equal(invalidUserAgentMode.tools.size, 0)
+
+  const disabledUserAgentRoute = makeContext()
+  assert.throws(() => apply(disabledUserAgentRoute.ctx, {
+    ...baseConfig,
+    userAgents: [{ name: 'custom-reviewer', prompt: 'Review carefully.' }],
+    disabledOmoRoles: ['custom-reviewer'],
+    roleRoutes: [{ role: 'custom-reviewer' }],
+  }), /references a disabled specialist role/u)
+  assert.equal(disabledUserAgentRoute.tools.size, 0)
+
   const second = makeContext()
   assert.throws(() => apply(second.ctx, {
     ...baseConfig,
@@ -1646,6 +1740,47 @@ test('rejects unknown role routes and incomplete model routes', async () => {
     roleRoutes: [{ role: 'explore', denyTools: ['  '] }],
   }), /denyTools must contain non-empty tool names/u)
   assert.equal(invalidDeny.tools.size, 0)
+
+  const tooManyToolFilters = makeContext()
+  assert.throws(() => apply(tooManyToolFilters.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'explore', allowTools: Array(65).fill('read') }],
+  }), /at most 64 tool names/u)
+  assert.equal(tooManyToolFilters.tools.size, 0)
+
+  const oversizedToolName = makeContext()
+  assert.throws(() => apply(oversizedToolName.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'explore', denyTools: ['x'.repeat(129)] }],
+  }), /128 UTF-8 bytes/u)
+  assert.equal(oversizedToolName.tools.size, 0)
+
+  for (const codePoint of [0, 0x1f, 0x7f, 0x85, 0x061c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202e, 0x2066, 0x2069]) {
+    const invalidToolName = makeContext()
+    assert.throws(() => apply(invalidToolName.ctx, {
+      ...baseConfig,
+      roleRoutes: [{ role: 'explore', allowTools: [`read${String.fromCodePoint(codePoint)}`] }],
+    }), /without control characters/u, `rejects control/bidi U+${codePoint.toString(16)}`)
+    assert.equal(invalidToolName.tools.size, 0)
+  }
+
+  const multibyteToolBoundary = makeContext()
+  apply(multibyteToolBoundary.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'explore', allowTools: ['é'.repeat(64)] }],
+  })
+  await multibyteToolBoundary.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'Exercise the UTF-8 tool-name boundary.' },
+    { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal },
+  )
+  assert.deepEqual(multibyteToolBoundary.starts[0].request.toolFilter, { allow: ['é'.repeat(64)] })
+
+  const multibyteToolOverflow = makeContext()
+  assert.throws(() => apply(multibyteToolOverflow.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'explore', allowTools: ['é'.repeat(65)] }],
+  }), /128 UTF-8 bytes/u)
+  assert.equal(multibyteToolOverflow.tools.size, 0)
 
   const invalidPromptAppend = makeContext()
   assert.throws(() => apply(invalidPromptAppend.ctx, {

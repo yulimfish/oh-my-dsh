@@ -80,9 +80,11 @@ export function getRole(role) {
   return Object.hasOwn(ROLES, role) ? ROLES[role] : undefined
 }
 
-export function buildWorkerPrompt(role, task, rolePromptAppend, categoryPromptAppend) {
-  const definition = getRole(role)
-  if (!definition) throw new TypeError(`Unknown specialist role: ${String(role)}`)
+export function buildWorkerPrompt(role, task, rolePromptAppend, categoryPromptAppend, customDefinition) {
+  const definition = getRole(role) ?? customDefinition
+  if (!definition || typeof definition.title !== 'string' || typeof definition.focus !== 'string') {
+    throw new TypeError(`Unknown specialist role: ${String(role)}`)
+  }
   if (typeof task !== 'string' || task.trim().length === 0) throw new TypeError('Task must not be empty')
   const normalizedRoleAppend = normalizeRolePromptAppend(rolePromptAppend, role)
   const normalizedCategoryAppend = normalizeCategoryPromptAppend(categoryPromptAppend)

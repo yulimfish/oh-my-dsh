@@ -21,6 +21,7 @@ import { createModelCapabilitiesCommand } from './model-capabilities.js'
 import { normalizeCategoryRoutes, resolveCategoryRoute } from './category-routes.js'
 import { buildRefactorDirective, parseRefactorInput, REFACTOR_COMMAND_HINT } from './refactor-command.js'
 import { buildUlwExecuteDirective, parseUlwExecuteInput, ULW_EXECUTE_COMMAND_HINT } from './ulw-execute-command.js'
+import { normalizeUserAgents } from './user-agents.js'
 
 export const name = 'dsh-omo'
 export const inject = ['tools', 'subagents', 'systemPrompt', 'commands', 'skills', 'fs']
@@ -29,6 +30,10 @@ const DEFAULT_PROVIDER = 'spawn'
 const DEFAULT_MAX_CONCURRENT = 4
 const DEFAULT_MAX_DEPTH = 1
 const DEFAULT_MAX_TASK_CHARS = 12_000
+const MAX_ROLE_TOOL_RULES = 64
+const MAX_ROLE_TOOL_NAME_BYTES = 128
+const ROLE_TOOL_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/u
+const ROLE_TOOL_NAME_ENCODER = new TextEncoder()
 const DISABLEABLE_OMO_COMMAND_NAMES = Object.freeze([
   'goal', 'stop-continuation', 'omo-models', 'ulw', 'ultrawork', 'ulw-execute', 'architect', 'review', 'handoff',
   'refactor', 'remove-ai-slops', 'omo-tasks', 'omo-job-kill', 'omo-interrupt', 'omo-skills-refresh', 'omo',
@@ -61,6 +66,12 @@ export const Config = z.object({
   disabledSkills: z.array(z.string()).default([]),
   disabledOmoCommands: z.array(z.string()).default([]),
   disabledOmoRoles: z.array(z.string()).default([]),
+  userAgents: z.array(z.object({
+    name: z.string().required(),
+    description: z.string(),
+    prompt: z.string().required(),
+    mode: z.string(),
+  })).default([]),
   categoryRoutes: z.array(z.object({
     name: z.string().required(),
     provider: z.string().required(),
@@ -152,26 +163,26 @@ function normalizeDisabledOmoCommands(value) {
   return disabled
 }
 
-function normalizeDisabledOmoRoles(value) {
+function normalizeDisabledOmoRoles(value, roleNames = ROLE_NAMES) {
   if (value === undefined) return new Set()
   if (!Array.isArray(value)) {
     throw new TypeError('dsh-omo: disabledOmoRoles must be an array of specialist role names')
   }
-  if (value.length > ROLE_NAMES.length) {
-    throw new TypeError(`dsh-omo: disabledOmoRoles may contain at most ${ROLE_NAMES.length} names`)
+  if (value.length > roleNames.length) {
+    throw new TypeError(`dsh-omo: disabledOmoRoles may contain at most ${roleNames.length} names`)
   }
   const disabled = new Set()
   for (let index = 0; index < value.length; index += 1) {
     const role = value[index]
-    if (typeof role !== 'string' || role.trim() !== role || !ROLE_NAMES.includes(role)) {
-      throw new TypeError(`dsh-omo: disabledOmoRoles[${index}] must name one of this plugin's specialist roles`)
+    if (typeof role !== 'string' || role.trim() !== role || !roleNames.includes(role)) {
+      throw new TypeError(`dsh-omo: disabledOmoRoles[${index}] must name one of the configured specialist roles`)
     }
     if (disabled.has(role)) {
       throw new TypeError('dsh-omo: disabledOmoRoles must not contain duplicates')
     }
     disabled.add(role)
   }
-  if (disabled.size === ROLE_NAMES.length) {
+  if (disabled.size === roleNames.length) {
     throw new TypeError('dsh-omo: disabledOmoRoles must leave at least one specialist role enabled')
   }
   return disabled
@@ -199,16 +210,33 @@ function normalizeDisabledOmoBundledSkills(value) {
 
 function normalizeToolNames(value, role, field) {
   if (value === undefined) return undefined
-  if (!Array.isArray(value) || value.some(tool => typeof tool !== 'string' || tool.trim().length === 0)) {
-    throw new Error(`dsh-omo: role route "${role}" ${field} must contain non-empty tool names`)
+  const label = `dsh-omo: role route "${role}" ${field}`
+  if (!Array.isArray(value)) throw new Error(`${label} must contain non-empty tool names`)
+  if (value.length > MAX_ROLE_TOOL_RULES) {
+    throw new Error(`${label} may contain at most ${MAX_ROLE_TOOL_RULES} tool names`)
   }
-  return Object.freeze([...new Set(value.map(tool => tool.trim()))])
+  const normalized = []
+  const seen = new Set()
+  for (const tool of value) {
+    if (typeof tool !== 'string' || tool.length > MAX_ROLE_TOOL_NAME_BYTES
+      || ROLE_TOOL_NAME_ENCODER.encode(tool).byteLength > MAX_ROLE_TOOL_NAME_BYTES
+      || ROLE_TOOL_NAME_CONTROL_CHARACTERS.test(tool)) {
+      throw new Error(`${label} must contain non-empty tool names of at most ${MAX_ROLE_TOOL_NAME_BYTES} UTF-8 bytes without control characters`)
+    }
+    const name = tool.trim()
+    if (!name) throw new Error(`${label} must contain non-empty tool names`)
+    if (!seen.has(name)) {
+      seen.add(name)
+      normalized.push(name)
+    }
+  }
+  return Object.freeze(normalized)
 }
 
-function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles) {
+function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames = ROLE_NAMES) {
   const result = new Map()
   for (const entry of routes) {
-    if (!ROLE_NAMES.includes(entry.role)) {
+    if (!roleNames.includes(entry.role)) {
       throw new Error(`dsh-omo: unknown role route "${entry.role}"`)
     }
     if (disabledOmoRoles.has(entry.role)) {
@@ -439,14 +467,35 @@ function toolFilterForRoute(route) {
   return Object.keys(filter).length > 0 ? filter : undefined
 }
 
-function taskPrompt(role, task, rolePromptAppend, categoryPromptAppend) {
-  return [{ type: 'text', text: buildWorkerPrompt(role, task, rolePromptAppend, categoryPromptAppend) }]
+function taskPrompt(role, task, rolePromptAppend, categoryPromptAppend, userAgent) {
+  const customDefinition = userAgent
+    ? { title: userAgent.name, focus: userAgent.description ?? 'Follow the configured user-agent persona.' }
+    : undefined
+  return [{ type: 'text', text: buildWorkerPrompt(role, task, rolePromptAppend, categoryPromptAppend, customDefinition) }]
 }
 
-function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet) {
+function roleLabels(activeRoleNames, userAgents) {
+  return activeRoleNames.map(role => {
+    const userAgent = userAgents.get(role)
+    return userAgent?.description ? `${role} (${userAgent.description})` : role
+  }).join(', ')
+}
+
+function requireUserAgentPersona(ctx, userAgent, providerName, knownProvider) {
+  if (!userAgent) return undefined
+  const provider = knownProvider ?? (typeof ctx.subagents.getProvider === 'function'
+    ? ctx.subagents.getProvider(providerName)
+    : undefined)
+  if (provider?.capabilities?.persona !== true) {
+    throw new Error(`User-defined agent "${userAgent.name}" requires subagent provider "${providerName}" to support persona.`)
+  }
+  return userAgent.prompt
+}
+
+function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet) {
   return defineTool({
     name: 'dsh_omo_task',
-    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Role allow/deny filters and selected-category tools:false rules affect inherited global and ancestor-scope tools; category tools:true does not grant tools; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${activeRoleNames.join(', ')}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
+    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Role allow/deny filters and selected-category tools:false rules affect inherited global and ancestor-scope tools; category tools:true does not grant tools; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: {
@@ -486,11 +535,13 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren,
         throw new Error(`dsh-omo one-shot worker limit reached (${config.maxConcurrent}); wait for a child to finish.`)
       }
 
+      const userAgent = userAgents.get(args.role)
+      const persona = requireUserAgentPersona(ctx, userAgent, providerName)
       const roleRoute = roleRoutes.get(args.role)
       const route = resolveCategoryRoute(categoryRoutes, args.category, roleRoute)
       const agentOptions = agentOptionsForRoute(route)
       const toolFilter = toolFilterForRoute(route)
-      const prompt = taskPrompt(args.role, args.task, roleRoute?.promptAppend, route?.categoryPromptAppend)
+      const prompt = taskPrompt(args.role, args.task, roleRoute?.promptAppend, route?.categoryPromptAppend, userAgent)
       const label = `${args.role}: ${args.task.trim().replace(/\s+/gu, ' ').slice(0, 72)}`
       // Reserve synchronously before the async provider start so parallel tool
       // calls cannot all pass the one-shot capacity check.
@@ -503,6 +554,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren,
           parent: exec.agent,
           prompt,
           signal: exec.signal,
+          ...(persona !== undefined ? { persona } : {}),
           ...(agentOptions ? { agentOptions } : {}),
           ...(toolFilter ? { toolFilter } : {}),
           maxDepth: config.maxDepth,
@@ -529,7 +581,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren,
   })
 }
 
-function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet) {
+function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet) {
   const continuationCommandGuidance = [
     disabledOmoCommands.has('omo-tasks')
       ? 'dsh-omo /omo-tasks is disabled by configuration'
@@ -540,7 +592,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, life
   ].join('; ')
   return defineTool({
     name: 'dsh_omo_task_continuable',
-    description: `Start a durable DSH continuable specialist session. ${continuationCommandGuidance}; this tool does not wait for or retrieve a final result. Continuable launches reject role/category/parent maxTokens ceilings because DSH RC2 does not preserve them across cold resume. Role allow/deny filters and selected-category tools:false rules affect inherited global and ancestor-scope tools; category tools:true does not grant tools; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${activeRoleNames.join(', ')}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
+    description: `Start a durable DSH continuable specialist session. ${continuationCommandGuidance}; this tool does not wait for or retrieve a final result. Continuable launches reject role/category/parent maxTokens ceilings because DSH RC2 does not preserve them across cold resume. Role allow/deny filters and selected-category tools:false rules affect inherited global and ancestor-scope tools; category tools:true does not grant tools; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: { type: 'string', enum: activeRoleNames, required: true, description: 'Specialist role matched to this task.' },
@@ -575,6 +627,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, life
       if (typeof ctx.subagents.startContinuable !== 'function') {
         throw new Error('DSH continuation services are unavailable in this profile; use one-shot mode.')
       }
+      const userAgent = userAgents.get(args.role)
       const roleRoute = roleRoutes.get(args.role)
       const route = resolveCategoryRoute(categoryRoutes, args.category, roleRoute)
       if (route?.maxTokens !== undefined || exec.agent.options?.maxTokens !== undefined) {
@@ -586,6 +639,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, life
       if (!provider || typeof provider.prepareContinuable !== 'function') {
         throw new Error(`DSH subagent provider "${providerName}" does not support continuable tasks; use one-shot mode or choose a capable provider.`)
       }
+      const persona = requireUserAgentPersona(ctx, userAgent, providerName, provider)
       const agentOptions = agentOptionsForRoute(route, { includeMaxTokens: false })
       const toolFilter = toolFilterForRoute(route)
       const accepted = await ctx.subagents.startContinuable({
@@ -593,7 +647,8 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, life
         label: `dsh-omo:${args.role}`,
         request: {
           parent: exec.agent,
-          prompt: taskPrompt(args.role, args.task, roleRoute?.promptAppend, route?.categoryPromptAppend),
+          prompt: taskPrompt(args.role, args.task, roleRoute?.promptAppend, route?.categoryPromptAppend, userAgent),
+          ...(persona !== undefined ? { persona } : {}),
           ...(agentOptions ? { agentOptions } : {}),
           ...(toolFilter ? { toolFilter } : {}),
           maxDepth: config.maxDepth,
@@ -971,10 +1026,12 @@ export function apply(ctx, rawConfig) {
   assertPositiveInteger('maxResultChars', config.maxResultChars)
   const providerName = normalizeProvider(config.provider)
   const categoryRoutes = normalizeCategoryRoutes(config.categoryRoutes ?? [])
-  const disabledOmoRoles = normalizeDisabledOmoRoles(config.disabledOmoRoles ?? [])
-  const activeRoleNames = ROLE_NAMES.filter(role => !disabledOmoRoles.has(role))
+  const userAgents = normalizeUserAgents(config.userAgents ?? [])
+  const roleNames = [...ROLE_NAMES, ...userAgents.keys()]
+  const disabledOmoRoles = normalizeDisabledOmoRoles(config.disabledOmoRoles ?? [], roleNames)
+  const activeRoleNames = roleNames.filter(role => !disabledOmoRoles.has(role))
   const activeRoleSet = new Set(activeRoleNames)
-  const roleRoutes = normalizeRoleRoutes(config.roleRoutes, categoryRoutes, disabledOmoRoles)
+  const roleRoutes = normalizeRoleRoutes(config.roleRoutes, categoryRoutes, disabledOmoRoles, roleNames)
   const disabledOmoCommands = normalizeDisabledOmoCommands(config.disabledOmoCommands ?? [])
   const projectSkillDirs = normalizeProjectSkillDirs(config.projectSkillDirs)
   const enabledProjectSkills = normalizeEnabledProjectSkills(config.enabledProjectSkills)
@@ -988,8 +1045,8 @@ export function apply(ctx, rawConfig) {
   const activeRuns = new Map()
   const lifecycle = { disposed: false }
 
-  ctx.tools.register(specialistTool(ctx, config, roleRoutes, categoryRoutes, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet))
-  if (config.enableContinuableTasks) ctx.tools.register(continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet))
+  ctx.tools.register(specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet))
+  if (config.enableContinuableTasks) ctx.tools.register(continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet))
   if (config.enableTeamTools) {
     const disposeTeamTools = registerTeamTools(ctx, teamService)
     ctx.effect(() => disposeTeamTools, 'dsh-omo Agent Teams tools')
