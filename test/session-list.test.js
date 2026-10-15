@@ -22,7 +22,7 @@ function sessionRecord(id, createdAt, cwd = '/workspace/project', fields = {}) {
 }
 
 function makeSessionQuery(options = {}) {
-  const calls = { observations: [], filters: [], lists: [], titleReads: [], fullReads: 0 }
+  const calls = { observations: [], filters: [], lists: [], titleReads: [], titleBatches: [], fullReads: 0 }
   const records = options.records ?? [
     sessionRecord('session-new', JAN_2 + 12 * 60 * 60 * 1_000, '/workspace/project', {
       live: true, persisted: true, isSeeded: true, parentSession: 'parent-1',
@@ -62,6 +62,22 @@ function makeSessionQuery(options = {}) {
         session: record?.header,
         title: { title: `Title ${sessionId}`, eventSeq: 1, updatedAt: JAN_2, source: { kind: 'fallback' } },
       }
+    },
+    async readTitleSnapshots(sessionIds, signal) {
+      calls.titleBatches.push({ sessionIds: [...sessionIds], signal })
+      const observations = []
+      for (const sessionId of sessionIds) {
+        if (signal?.aborted) throw new Error('aborted')
+        try {
+          const value = await sessionQuery.readTitleSnapshot(sessionId, signal)
+          if (signal?.aborted) throw new Error('aborted')
+          observations.push({ sessionId, status: 'fulfilled', value })
+        } catch (reason) {
+          if (signal?.aborted) throw reason
+          observations.push({ sessionId, status: 'rejected', reason })
+        }
+      }
+      return observations
     },
     async readSession() { calls.fullReads += 1 },
   }
@@ -132,6 +148,7 @@ test('reads sanitized titles only for a bounded displayed prefix when explicitly
   const result = await tool.execute({ includeOtherProjects: true, includeTitles: true, limit: 5 }, { signal })
 
   assert.deepEqual(fixture.calls.titleReads, records.slice(0, 3).map(record => ({ sessionId: record.header.id, signal })))
+  assert.deepEqual(fixture.calls.titleBatches, [{ sessionIds: records.slice(0, 3).map(record => record.header.id), signal }])
   assert.equal(result.titleLookupCount, 3)
   assert.equal(result.titlesCapped, true)
   assert.equal(result.results[0].hasTitle, true)
@@ -164,6 +181,13 @@ test('validates title snapshot identity and listed workspace/date scope before r
     await assert.rejects(tool.execute({ includeTitles: true }, { agent: { id: 'agent-1' } }), /outside the verified metadata scope|invalid session info metadata/u)
     assert.equal(fixture.calls.titleReads.length, 1)
   }
+
+  const malformed = makeSessionQuery()
+  malformed.sessionQuery.readTitleSnapshots = async () => [{
+    sessionId: 'unexpected-session', status: 'fulfilled', value: { session: malformed.records[0].header },
+  }]
+  const malformedTool = createSessionListTool(malformed.sessionQuery)
+  await assert.rejects(malformedTool.execute({ includeOtherProjects: true, includeTitles: true }), /invalid session title batch metadata/u)
 })
 
 test('sanitizes title Host failures and reports title-read cancellation', async () => {
@@ -184,9 +208,20 @@ test('sanitizes title Host failures and reports title-read cancellation', async 
   assert.equal(cancelled.calls.titleReads.length, 1)
 })
 
+test('falls back to single title snapshots when the batch method is absent', async () => {
+  const fixture = makeSessionQuery()
+  delete fixture.sessionQuery.readTitleSnapshots
+  const tool = createSessionListTool(fixture.sessionQuery)
+  const result = await tool.execute({ includeOtherProjects: true, includeTitles: true, limit: 1 })
+  assert.equal(result.titleLookupCount, 1)
+  assert.deepEqual(fixture.calls.titleReads, [{ sessionId: 'session-new', signal: undefined }])
+  assert.deepEqual(fixture.calls.titleBatches, [])
+})
+
 test('keeps titles opt-in when the Host title snapshot method is absent', async () => {
   const fixture = makeSessionQuery()
   delete fixture.sessionQuery.readTitleSnapshot
+  delete fixture.sessionQuery.readTitleSnapshots
   const tool = createSessionListTool(fixture.sessionQuery)
   assert.equal('includeTitles' in tool.parameters, false)
   await assert.rejects(tool.execute({ includeTitles: true }, { agent: { id: 'agent-1' } }), /unavailable/u)

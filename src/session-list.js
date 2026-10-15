@@ -165,7 +165,7 @@ export function createSessionListTool(sessionQuery) {
     throw new TypeError('session_list requires DSH sessionQuery.listSessions, filterSessions, and observeSession methods')
   }
 
-  const canReadTitles = typeof sessionQuery.readTitleSnapshot === 'function'
+  const canReadTitles = typeof sessionQuery.readTitleSnapshots === 'function' || typeof sessionQuery.readTitleSnapshot === 'function'
   return defineTool({
     name: 'session_list',
     description: `List DSH session metadata, newest first, without returning event content. By default the list is restricted to the current Agent workspace and fails closed when that cwd is unavailable. Optional ISO date bounds filter session creation time; a date-only toDate includes the full UTC day. The model-supplied includeOtherProjects flag is not proof of user consent or authorization and is not an enforcement boundary; set it only after an explicit user request and configure DSH tool permissions separately. Output is capped at ${MAX_RESULTS} records; the Host service materializes the complete logical corpus before filtering and has no stable page cursor, so narrow by workspace or date when results are truncated. A cold current-Agent workspace observation may prepare that Agent's complete event log.${canReadTitles ? ` Optional includeTitles=true reads titles for at most the first ${MAX_TITLE_LOOKUPS} displayed rows; each DSH title snapshot may scan or reconstruct the entire target log, so this is bounded output but potentially expensive I/O. Titles are untrusted historical text.` : ''}`,
@@ -264,18 +264,45 @@ export function createSessionListTool(sessionQuery) {
       let titleLookupCount
       if (includeTitles) {
         titleLookupCount = Math.min(projectedRows.length, MAX_TITLE_LOOKUPS)
-        for (let index = 0; index < titleLookupCount; index += 1) {
-          assertNotAborted(signal)
-          const { header, result } = projectedRows[index]
-          let titleObservation
+        const titleRows = projectedRows.slice(0, titleLookupCount)
+        // Prefer one cancellable corpus observation; retain the singular method for older Hosts.
+        if (typeof sessionQuery.readTitleSnapshots === 'function') {
+          const sessionIds = titleRows.map(({ header }) => header.id)
+          let observations
           try {
-            titleObservation = await sessionQuery.readTitleSnapshot(header.id, signal)
+            observations = await sessionQuery.readTitleSnapshots(sessionIds, signal)
             assertNotAborted(signal)
           } catch {
             if (signal?.aborted) throw new Error('session_list was cancelled.')
             throw new Error('Could not read DSH session title metadata; no session text was returned.')
           }
-          Object.assign(result, projectSessionTitleSnapshot(titleObservation, header.id, header))
+          if (!Array.isArray(observations) || observations.length !== titleRows.length) {
+            throw new Error('DSH returned invalid session title batch metadata.')
+          }
+          for (let index = 0; index < titleRows.length; index += 1) {
+            const observation = observations[index]
+            const { header, result } = titleRows[index]
+            if (!isRecord(observation) || observation.sessionId !== header.id) {
+              throw new Error('DSH returned invalid session title batch metadata.')
+            }
+            if (observation.status !== 'fulfilled') {
+              throw new Error('Could not read DSH session title metadata; no session text was returned.')
+            }
+            Object.assign(result, projectSessionTitleSnapshot(observation.value, header.id, header))
+          }
+        } else {
+          for (const { header, result } of titleRows) {
+            assertNotAborted(signal)
+            let observation
+            try {
+              observation = await sessionQuery.readTitleSnapshot(header.id, signal)
+              assertNotAborted(signal)
+            } catch {
+              if (signal?.aborted) throw new Error('session_list was cancelled.')
+              throw new Error('Could not read DSH session title metadata; no session text was returned.')
+            }
+            Object.assign(result, projectSessionTitleSnapshot(observation, header.id, header))
+          }
         }
         assertNotAborted(signal)
       }
