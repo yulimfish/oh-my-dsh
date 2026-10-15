@@ -8,7 +8,8 @@ const MAX_CATEGORY_TOOL_NAME_BYTES = 128
 const MAX_PROVIDER_CHARS = 128
 const MAX_MODEL_CHARS = 256
 const MAX_REASONING_EFFORT_CHARS = 64
-const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'disable', 'promptAppend', 'description', 'tools'])
+const MAX_CATEGORY_FALLBACK_MODELS = 3
+const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'fallbackModels', 'disable', 'promptAppend', 'description', 'tools'])
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u
 const CATEGORY_TOOL_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u
 const DESCRIPTION_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u
@@ -86,6 +87,50 @@ function normalizeCategoryTools(value, categoryName) {
   })
 }
 
+function normalizeCategoryFallbackModels(value, categoryName, primary) {
+  if (value === undefined) return undefined
+  const label = `category route "${categoryName}" fallbackModels`
+  if (!Array.isArray(value)) {
+    throw new TypeError(`${label} must be an array with at most ${MAX_CATEGORY_FALLBACK_MODELS} explicit provider/model candidates`)
+  }
+  if (value.length > MAX_CATEGORY_FALLBACK_MODELS) {
+    throw new TypeError(`${label} may contain at most ${MAX_CATEGORY_FALLBACK_MODELS} candidates`)
+  }
+  if (value.length === 0) return undefined
+
+  const seen = new Set([JSON.stringify([primary.provider, primary.model])])
+  const candidates = []
+  for (let index = 0; index < value.length; index += 1) {
+    const entry = value[index]
+    if (!isRecord(entry)) throw new TypeError(`${label}[${index}] must be an object`)
+    for (const key of Reflect.ownKeys(entry)) {
+      if (typeof key !== 'string' || !['provider', 'model', 'reasoningEffort'].includes(key)) {
+        throw new TypeError(`${label}[${index}] contains unsupported field "${String(key)}"`)
+      }
+    }
+    const hasProvider = Object.hasOwn(entry, 'provider') && entry.provider !== undefined
+    const hasModel = Object.hasOwn(entry, 'model') && entry.model !== undefined
+    if (!hasProvider || !hasModel) {
+      throw new TypeError(`${label}[${index}] must set both provider and model`)
+    }
+    const provider = normalizeString(entry.provider, `${label}[${index}] provider`, MAX_PROVIDER_CHARS)
+    const model = normalizeString(entry.model, `${label}[${index}] model`, MAX_MODEL_CHARS)
+    const rawReasoningEffort = Object.hasOwn(entry, 'reasoningEffort') ? entry.reasoningEffort : undefined
+    const reasoningEffort = rawReasoningEffort === undefined
+      ? undefined
+      : normalizeString(rawReasoningEffort, `${label}[${index}] reasoningEffort`, MAX_REASONING_EFFORT_CHARS)
+    const key = JSON.stringify([provider, model])
+    if (seen.has(key)) throw new TypeError(`${label} must not contain duplicate provider/model candidates`)
+    seen.add(key)
+    candidates.push(Object.freeze({
+      provider,
+      model,
+      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+    }))
+  }
+  return Object.freeze(candidates)
+}
+
 function normalizeMaxTokens(value, label) {
   if (value === undefined) return undefined
   if (!Number.isSafeInteger(value) || value < 1) {
@@ -123,12 +168,11 @@ function createReadonlyRegistry(routes) {
 }
 
 /**
- * Validate one provider/model route per category plus optional reasoning,
- * positive safe-integer token ceiling, task-delegation disable flag, bounded
- * literal prompt guidance, bounded single-line tool-prompt descriptions, and
- * a bounded boolean tool map whose true/false entries become inherited-tool
- * allow/deny filters.
- * Routes cannot declare chains or fallback.
+ * Validate one required primary provider/model route per category plus optional
+ * bounded explicit fallback candidates, reasoning, token ceiling, task-disable
+ * flag, prompt guidance, chooser description, and inherited-tool allow/deny
+ * filters. Fallback resolution is a DSH-native spawn-time capability preflight,
+ * not the upstream model-resolution pipeline or a runtime retry policy.
  */
 export function normalizeCategoryRoutes(entries) {
   if (!Array.isArray(entries) || entries.length > MAX_CATEGORY_ROUTES) {
@@ -173,6 +217,7 @@ export function normalizeCategoryRoutes(entries) {
     const promptAppend = normalizeCategoryPromptAppend(entry.promptAppend, name)
     const description = normalizeCategoryDescription(entry.description, name)
     const categoryToolFilters = normalizeCategoryTools(entry.tools, name)
+    const fallbackModels = normalizeCategoryFallbackModels(entry.fallbackModels, name, { provider, model })
 
     routes.set(name, Object.freeze({
       name,
@@ -181,6 +226,7 @@ export function normalizeCategoryRoutes(entries) {
       ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
       disable,
+      ...(fallbackModels !== undefined ? { fallbackModels } : {}),
       ...(promptAppend !== undefined ? { promptAppend } : {}),
       ...(description !== undefined ? { description } : {}),
       ...(categoryToolFilters?.allowTools !== undefined ? { categoryAllowTools: categoryToolFilters.allowTools } : {}),
@@ -207,7 +253,8 @@ function normalizeRolePin(roleRoute) {
 /**
  * Resolve explicit category over the role's default category. A role's explicit
  * provider/model pin, reasoning effort, and maxTokens override the category;
- * category promptAppend is carried separately from role promptAppend and filters.
+ * paired provider/model pins bypass category fallback preflight. Category
+ * promptAppend is carried separately from role promptAppend and filters.
  */
 export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute) {
   if (roleRoute !== undefined && !isRecord(roleRoute)) {
@@ -265,6 +312,8 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
   const maxTokens = roleMaxTokens ?? categoryRoute.maxTokens
   if (maxTokens === undefined) delete resolved.maxTokens
   else resolved.maxTokens = maxTokens
+  if (categoryRoute.fallbackModels === undefined) delete resolved.fallbackModels
+  else resolved.fallbackModels = categoryRoute.fallbackModels
   if (categoryRoute.promptAppend === undefined) delete resolved.categoryPromptAppend
   else resolved.categoryPromptAppend = categoryRoute.promptAppend
   if (categoryRoute.categoryAllowTools === undefined) delete resolved.categoryAllowTools

@@ -7,7 +7,7 @@ const routes = () => normalizeCategoryRoutes([
   { name: 'review', provider: 'provider-review', model: 'model-review', reasoningEffort: 'low', maxTokens: 1024 },
 ])
 
-test('normalizes immutable single provider/model routes and rejects invalid category entries', () => {
+test('normalizes immutable category primary routes and rejects invalid entries', () => {
   assert.throws(() => normalizeCategoryRoutes(undefined), /array/u)
   assert.throws(() => normalizeCategoryRoutes([null]), /must be an object/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: '  ', provider: 'p', model: 'm' }]), /name/u)
@@ -32,6 +32,50 @@ test('normalizes immutable single provider/model routes and rejects invalid cate
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', disable: 'true' }]), /disable must be a boolean/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', disable: true }]), /requires both provider and model/u)
   assert.throws(() => resolveCategoryRoute(routes(), 'build', { maxTokens: 1.5 }), /role route maxTokens must be a positive safe integer/u)
+})
+
+test('normalizes bounded explicit category fallback model chains immutably', () => {
+  const categoryRoutes = normalizeCategoryRoutes([{
+    name: 'chain', provider: 'primary-provider', model: 'primary-model',
+    fallbackModels: [
+      { provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'high' },
+      { provider: 'second-provider', model: 'second-model' },
+    ],
+  }])
+  const route = categoryRoutes.get('chain')
+  assert.deepEqual(route.fallbackModels, [
+    { provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'high' },
+    { provider: 'second-provider', model: 'second-model' },
+  ])
+  assert.equal(Object.isFrozen(route.fallbackModels), true)
+  assert.equal(Object.isFrozen(route.fallbackModels[0]), true)
+  assert.strictEqual(resolveCategoryRoute(categoryRoutes, 'chain', {}).fallbackModels, route.fallbackModels)
+
+  const empty = normalizeCategoryRoutes([{
+    name: 'empty', provider: 'p', model: 'm', fallbackModels: [],
+  }]).get('empty')
+  assert.equal(Object.hasOwn(empty, 'fallbackModels'), false)
+
+  const invalid = [
+    ['not an array', 'backup-provider/backup-model'],
+    ['too many candidates', Array.from({ length: 4 }, (_value, index) => ({ provider: `p${index}`, model: `m${index}` }))],
+    ['non-object candidate', [null]],
+    ['missing pair', [{ provider: 'backup-provider' }]],
+    ['blank provider', [{ provider: ' ', model: 'backup-model' }]],
+    ['blank model', [{ provider: 'backup-provider', model: ' ' }]],
+    ['blank reasoning', [{ provider: 'backup-provider', model: 'backup-model', reasoningEffort: ' ' }]],
+    ['unsupported field', [{ provider: 'backup-provider', model: 'backup-model', temperature: 0 }]],
+    ['duplicate primary', [{ provider: 'primary-provider', model: 'primary-model' }]],
+    ['duplicate candidate', [
+      { provider: 'backup-provider', model: 'backup-model' },
+      { provider: ' backup-provider ', model: ' backup-model ' },
+    ]],
+  ]
+  for (const [label, fallbackModels] of invalid) {
+    assert.throws(() => normalizeCategoryRoutes([{
+      name: 'invalid-chain', provider: 'primary-provider', model: 'primary-model', fallbackModels,
+    }]), /fallbackModels/u, label)
+  }
 })
 
 test('resolves explicit category before the role default category', () => {

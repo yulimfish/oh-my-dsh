@@ -182,8 +182,15 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).disabledOmoBundledSkills, [])
   assert.deepEqual(Config({ disabledOmoBundledSkills: ['debugging'] }).disabledOmoBundledSkills, ['debugging'])
   assert.deepEqual(Config({}).categoryRoutes, [])
-  const categoryConfig = Config({ categoryRoutes: [{ name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true, promptAppend: 'Use a bounded budget.', description: 'A short chooser description.', tools: { read: false, bash: true } }] })
+  const categoryConfig = Config({ categoryRoutes: [{
+    name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true,
+    promptAppend: 'Use a bounded budget.', description: 'A short chooser description.', tools: { read: false, bash: true },
+    fallbackModels: [{ provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'high' }],
+  }] })
   assert.equal(categoryConfig.categoryRoutes[0].maxTokens, 128)
+  assert.deepEqual(categoryConfig.categoryRoutes[0].fallbackModels, [
+    { provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'high' },
+  ])
   assert.equal(categoryConfig.categoryRoutes[0].disable, true)
   assert.equal(categoryConfig.categoryRoutes[0].promptAppend, 'Use a bounded budget.')
   assert.equal(categoryConfig.categoryRoutes[0].description, 'A short chooser description.')
@@ -2109,6 +2116,230 @@ test('resolves category routes for one-shot and continuable delegation with role
   assert.equal(fixture.starts.length, 2, 'invalid category is rejected before child start and reservation')
 })
 
+test('preflights a configured category primary route and uses only resolver-materialized reasoning', async () => {
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: {
+      resolveCallConfig: async (config, signal) => {
+        calls.push({ config, signal })
+        return { ...config, reasoningEffort: 'medium', maxTokens: 9999, temperature: 0.4 }
+      },
+    },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{
+      name: 'primary', provider: 'primary-provider', model: 'primary-model',
+      fallbackModels: [{ provider: 'backup-provider', model: 'backup-model' }],
+    }],
+  })
+  const signal = new AbortController().signal
+  await fixture.tools.get('dsh_omo_task').execute({
+    role: 'quick', category: 'primary', task: 'Use the first valid route.',
+  }, { agent: { id: 'parent-agent', followup() {} }, signal })
+  assert.deepEqual(calls, [{
+    config: { provider: 'primary-provider', model: 'primary-model' }, signal,
+  }])
+  assert.deepEqual(fixture.starts[0].request.agentOptions, {
+    provider: 'primary-provider', model: 'primary-model', reasoningEffort: 'medium',
+  })
+  assert.strictEqual(fixture.starts[0].request.signal, signal)
+})
+
+test('selects the first valid category fallback for one-shot and continuable children', async () => {
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: {
+      resolveCallConfig: async (config, signal) => {
+        calls.push({ config, signal })
+        if (config.provider.endsWith('primary')) throw new Error('route unavailable')
+        return { ...config, reasoningEffort: 'materialized-default', maxTokens: 9999, temperature: 0.4 }
+      },
+    },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    categoryRoutes: [
+      {
+        name: 'bounded', provider: 'one-primary', model: 'one-model', maxTokens: 512,
+        fallbackModels: [
+          { provider: 'one-fallback', model: 'one-backup' },
+          { provider: 'one-last', model: 'one-last-model' },
+        ],
+      },
+      {
+        name: 'durable', provider: 'durable-primary', model: 'durable-model', reasoningEffort: 'medium',
+        fallbackModels: [{ provider: 'durable-fallback', model: 'durable-backup', reasoningEffort: 'low' }],
+      },
+    ],
+    roleRoutes: [{ role: 'explore', category: 'durable', reasoningEffort: 'high' }],
+  })
+  const parent = { id: 'parent-agent', followup() {} }
+  const signal = new AbortController().signal
+  const oneShot = fixture.tools.get('dsh_omo_task')
+  const continuable = fixture.tools.get('dsh_omo_task_continuable')
+
+  await oneShot.execute({ role: 'quick', category: 'bounded', task: 'Select the first fallback.' }, { agent: parent, signal })
+  assert.deepEqual(fixture.starts[0].request.agentOptions, {
+    provider: 'one-fallback', model: 'one-backup', reasoningEffort: 'materialized-default', maxTokens: 512,
+  })
+  await continuable.execute({ role: 'quick', category: 'durable', task: 'Persist the selected fallback.' }, { agent: parent, signal })
+  assert.deepEqual(fixture.continuableStarts[0].request.agentOptions, {
+    provider: 'durable-fallback', model: 'durable-backup', reasoningEffort: 'low',
+  })
+  await oneShot.execute({ role: 'explore', category: 'durable', task: 'Keep role reasoning precedence.' }, { agent: parent, signal })
+  assert.deepEqual(fixture.starts[1].request.agentOptions, {
+    provider: 'durable-fallback', model: 'durable-backup', reasoningEffort: 'high',
+  })
+
+  assert.deepEqual(calls.map(({ config }) => [config.provider, config.model, config.reasoningEffort, config.maxTokens]), [
+    ['one-primary', 'one-model', undefined, 512],
+    ['one-fallback', 'one-backup', undefined, 512],
+    ['durable-primary', 'durable-model', 'medium', undefined],
+    ['durable-fallback', 'durable-backup', 'low', undefined],
+    ['durable-primary', 'durable-model', 'high', undefined],
+    ['durable-fallback', 'durable-backup', 'high', undefined],
+  ])
+  assert.ok(calls.every(call => call.signal === signal), 'the exact caller signal is forwarded to every preflight')
+  assert.strictEqual(fixture.starts[0].request.signal, signal)
+  assert.strictEqual(fixture.continuableStarts[0].signal, signal)
+  assert.strictEqual(fixture.starts[1].request.signal, signal)
+})
+
+test('role provider/model pins bypass category fallback resolution', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{
+      name: 'pinned', provider: 'category-provider', model: 'category-model',
+      fallbackModels: [{ provider: 'fallback-provider', model: 'fallback-model' }],
+    }],
+    roleRoutes: [{
+      role: 'explore', category: 'pinned', provider: 'role-provider', model: 'role-model',
+      reasoningEffort: 'high',
+    }],
+  })
+  await fixture.tools.get('dsh_omo_task').execute({
+    role: 'explore', category: 'pinned', task: 'Preserve the explicit role route.',
+  }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal })
+  assert.deepEqual(fixture.starts[0].request.agentOptions, {
+    provider: 'role-provider', model: 'role-model', reasoningEffort: 'high',
+  })
+})
+
+test('fails closed on missing or rejected category fallback capability resolution', async t => {
+  await t.test('missing optional LLM resolver', async () => {
+    const fixture = makeContext()
+    apply(fixture.ctx, {
+      ...baseConfig,
+      categoryRoutes: [{
+        name: 'chain', provider: 'primary-provider', model: 'primary-model',
+        fallbackModels: [{ provider: 'fallback-provider', model: 'fallback-model' }],
+      }],
+    })
+    await assert.rejects(fixture.tools.get('dsh_omo_task').execute({
+      role: 'quick', category: 'chain', task: 'Do not start without route validation.',
+    }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal }), /llm.resolveCallConfig/u)
+    assert.equal(fixture.starts.length, 0)
+  })
+  await t.test('LLM service without resolveCallConfig', async () => {
+    const fixture = makeContext({ services: { llm: {} } })
+    apply(fixture.ctx, {
+      ...baseConfig,
+      categoryRoutes: [{
+        name: 'chain', provider: 'primary-provider', model: 'primary-model',
+        fallbackModels: [{ provider: 'fallback-provider', model: 'fallback-model' }],
+      }],
+    })
+    await assert.rejects(fixture.tools.get('dsh_omo_task').execute({
+      role: 'quick', category: 'chain', task: 'Require the exact capability resolver.',
+    }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal }), /llm.resolveCallConfig/u)
+    assert.equal(fixture.starts.length, 0)
+  })
+  await t.test('all candidates rejected; capacity reservation rolls back and raw errors stay private', async () => {
+    let shouldPass = false
+    const fixture = makeContext({ services: {
+      llm: { resolveCallConfig: async () => {
+        if (!shouldPass) throw new Error('secret endpoint token')
+        return {}
+      } },
+    } })
+    apply(fixture.ctx, {
+      ...baseConfig,
+      maxConcurrent: 1,
+      enableContinuableTasks: true,
+      categoryRoutes: [{
+        name: 'chain', provider: 'primary-provider', model: 'primary-model',
+        fallbackModels: [
+          { provider: 'fallback-one', model: 'model-one' },
+          { provider: 'fallback-two', model: 'model-two' },
+        ],
+      }],
+    })
+    const tool = fixture.tools.get('dsh_omo_task')
+    const exec = { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal }
+    await assert.rejects(tool.execute({ role: 'quick', category: 'chain', task: 'Wait for a route.' }, exec), error => {
+      assert.match(error.message, /3 candidates checked/u)
+      assert.equal(error.message.includes('secret endpoint token'), false)
+      return true
+    })
+    assert.equal(fixture.starts.length, 0)
+    await assert.rejects(fixture.tools.get('dsh_omo_task_continuable').execute({
+      role: 'quick', category: 'chain', task: 'Do not create a continuable child either.',
+    }, exec), /3 candidates checked/u)
+    assert.equal(fixture.continuableStarts.length, 0)
+    shouldPass = true
+    await tool.execute({ role: 'quick', category: 'chain', task: 'Retry after capability recovers.' }, exec)
+    assert.equal(fixture.starts.length, 1)
+  })
+})
+
+test('cancellation stops category fallback probing before any child starts', async () => {
+  const controller = new AbortController()
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: { resolveCallConfig: (config, signal) => {
+      calls.push({ config, signal })
+      controller.abort(new Error('parent cancelled'))
+      return new Promise(() => {})
+    } },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{
+      name: 'chain', provider: 'primary-provider', model: 'primary-model',
+      fallbackModels: [{ provider: 'fallback-provider', model: 'fallback-model' }],
+    }],
+  })
+  await assert.rejects(fixture.tools.get('dsh_omo_task').execute({
+    role: 'quick', category: 'chain', task: 'Cancel capability resolution.',
+  }, { agent: { id: 'parent-agent', followup() {} }, signal: controller.signal }), /parent cancelled/u)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].signal, controller.signal)
+  assert.equal(fixture.starts.length, 0)
+})
+
+test('continuable category maxTokens rejects before fallback capability resolution', async () => {
+  let calls = 0
+  const fixture = makeContext({ services: {
+    llm: { resolveCallConfig: async () => { calls += 1; return {} } },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    categoryRoutes: [{
+      name: 'bounded', provider: 'primary-provider', model: 'primary-model', maxTokens: 512,
+      fallbackModels: [{ provider: 'fallback-provider', model: 'fallback-model' }],
+    }],
+  })
+  await assert.rejects(fixture.tools.get('dsh_omo_task_continuable').execute({
+    role: 'quick', category: 'bounded', task: 'Reject before any capability query.',
+  }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal }), /maxTokens/u)
+  assert.equal(calls, 0)
+  assert.equal(fixture.continuableStarts.length, 0)
+})
+
 test('applies category maxTokens to one-shot routes and rejects unpersisted continuation ceilings', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
@@ -2220,8 +2451,8 @@ test('excludes disabled categories from delegation and rejects disabled defaults
   const allDisabledContinuable = allDisabled.tools.get('dsh_omo_task_continuable')
   assert.equal(Object.hasOwn(allDisabledOneShot.parameters.properties, 'category'), false)
   assert.equal(Object.hasOwn(allDisabledContinuable.parameters.properties, 'category'), false)
-  assert.doesNotMatch(allDisabledOneShot.description, /Configured single-route categories/u)
-  assert.doesNotMatch(allDisabledContinuable.description, /Configured single-route categories/u)
+  assert.doesNotMatch(allDisabledOneShot.description, /Configured categories/u)
+  assert.doesNotMatch(allDisabledContinuable.description, /Configured categories/u)
   const allDisabledParent = { id: 'all-disabled-parent', followup() {} }
   const allDisabledSignal = new AbortController().signal
   await allDisabledOneShot.execute(
