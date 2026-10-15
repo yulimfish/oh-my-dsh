@@ -96,6 +96,7 @@ DSH filesystem reads are plugin-level, not an approval-gated model Tool, and ide
     enableSessionInfo: false
     enableJobTools: false
     enableToolResultPruning: false
+    enableAgentTerminalTools: false
     enableLspTools: false
     enableRootAgentsContext: false
     enableAgentsOnRead: false
@@ -201,6 +202,16 @@ enableJobTools: true
 ```yaml
 enableJobTools: true
 enableToolResultPruning: true
+```
+
+## Agent-owned DSH PTY tools
+
+`enableAgentTerminalTools` defaults to `false`. When explicitly enabled, dsh-omo calls the optional Host `terminals.listBackends()` during setup and registers five tools only if a backend and the required Host methods are available: owner-scoped list, spawn, read, send, and close. Registration is at plugin/profile scope, so every Agent that receives this plugin's tools can see them; each call still passes its exact `exec.agent` object to the Host, which fences access to that caller's sessions. The tool schema exposes no owner id or cwd and the adapter forwards only backend type/name; extra input fields are not forwarded. List is never global. Spawn uses the backend's default cwd and accepts only a registered backend type plus optional display name. Reads are capped at 200 lines and 16 KiB of text; sends are capped at 4 KiB and wait at most 12 seconds, with output capped at 16 KiB. Cancellation requests Host operation cancellation and drains for up to one second; if the Host operation still has not settled, the tool reports that the PTY may remain busy. Terminal text and backend MOTDs are untrusted.
+
+This grants an enabled Agent the ability to send interactive input that may execute commands. dsh-omo adds no sandbox or approval layer; execution/approval semantics belong to the configured Host backend, which must be trusted and reviewed before opting in. This is an Agent-owned PTY adapter, not tmux panes/layouts, worktree isolation, or a claim of full OMO terminal parity. No live terminal backend was verified in this session.
+
+```yaml
+enableAgentTerminalTools: true
 ```
 
 ## Project skills

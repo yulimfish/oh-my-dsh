@@ -141,6 +141,7 @@ const baseConfig = {
   enableSessionInfo: false,
   enableJobTools: false,
   enableToolResultPruning: false,
+  enableAgentTerminalTools: false,
   enableLspTools: false,
   enableRootAgentsContext: false,
   enableAgentsOnRead: false,
@@ -222,6 +223,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableJobTools: true }).enableJobTools, true)
   assert.equal(Config({}).enableToolResultPruning, false)
   assert.equal(Config({ enableToolResultPruning: true }).enableToolResultPruning, true)
+  assert.equal(Config({}).enableAgentTerminalTools, false)
+  assert.equal(Config({ enableAgentTerminalTools: true }).enableAgentTerminalTools, true)
   assert.equal(Config({}).enableLspTools, false)
   assert.equal(Config({ enableLspTools: true }).enableLspTools, true)
   assert.equal(Config({}).enableRootAgentsContext, false)
@@ -321,8 +324,8 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; toolResultPruning=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
-  assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; toolResultPruner=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
   assert.equal(command.handler({ rawInput: 'status extra' }).kind, 'error')
@@ -330,7 +333,62 @@ test('/omo status reports feature flags and service presence without calling bus
 
   const absent = makeContext()
   apply(absent.ctx, baseConfig)
-  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; agentTeams=absent; jobController=absent; toolResultPruner=absent; lsp=absent; sessionQuery=absent; sessions=absent; mcpResources=absent/u)
+  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; agentTeams=absent; jobController=absent; toolResultPruner=absent; terminals=absent; lsp=absent; sessionQuery=absent; sessions=absent; mcpResources=absent/u)
+})
+
+test('Agent terminal tools are opt-in and require a registered Agent-owned PTY backend', async () => {
+  let backendReads = 0
+  const terminalService = {
+    listBackends() { backendReads += 1; return ['pty-default'] },
+    list() { return [] },
+    spawn() {},
+    read() {},
+    startSend() {},
+    kill() {},
+  }
+  const disabled = makeContext({ services: { terminals: terminalService } })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(backendReads, 0, 'default-off setup does not query terminal backends')
+  assert.equal(disabled.tools.has('dsh_omo_terminal_spawn'), false)
+  const disabledStatus = disabled.commands.get('omo').handler({ rawInput: 'status' }).text
+  assert.match(disabledStatus, /agentTerminalTools=disabled/u)
+  assert.match(disabledStatus, /terminals=present/u)
+
+  const missing = makeContext()
+  assert.throws(
+    () => apply(missing.ctx, { ...baseConfig, enableAgentTerminalTools: true }),
+    /enableAgentTerminalTools requires the optional DSH terminals service/u,
+  )
+  assert.equal(missing.tools.size, 0)
+
+  const incomplete = makeContext({ services: { terminals: { listBackends: () => ['pty-default'] } } })
+  assert.throws(
+    () => apply(incomplete.ctx, { ...baseConfig, enableAgentTerminalTools: true }),
+    /requires the optional DSH terminals service and listBackends\/spawn\/list\/read\/startSend\/kill methods/u,
+  )
+  assert.equal(incomplete.tools.size, 0)
+
+  const noBackend = makeContext({ services: { terminals: { ...terminalService, listBackends: () => [] } } })
+  assert.throws(
+    () => apply(noBackend.ctx, { ...baseConfig, enableAgentTerminalTools: true }),
+    /No usable DSH terminal backend/u,
+  )
+  assert.equal(noBackend.tools.size, 0)
+
+  const enabled = makeContext({ services: { terminals: terminalService } })
+  apply(enabled.ctx, { ...baseConfig, enableAgentTerminalTools: true })
+  assert.equal(backendReads, 1, 'enabled setup reads the available backend names once')
+  assert.deepEqual(
+    [...enabled.tools.keys()].filter(name => name.startsWith('dsh_omo_terminal_')),
+    ['dsh_omo_terminal_list', 'dsh_omo_terminal_spawn', 'dsh_omo_terminal_read', 'dsh_omo_terminal_send', 'dsh_omo_terminal_close'],
+  )
+  assert.deepEqual(enabled.tools.get('dsh_omo_terminal_spawn').parameters.properties.type.enum, ['pty-default'])
+  const enabledStatus = enabled.commands.get('omo').handler({ rawInput: 'status' }).text
+  assert.match(enabledStatus, /agentTerminalTools=enabled/u)
+  const effect = enabled.effects.find(item => item.label === 'dsh-omo Agent terminal tools')
+  await effect.dispose()
+  assert.equal(enabled.tools.has('dsh_omo_terminal_spawn'), false)
+  assert.equal(enabled.tools.has('dsh_omo_terminal_send'), false)
 })
 
 test('/omo status capabilities explicitly queries bounded live provider registries', () => {
