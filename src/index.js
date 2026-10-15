@@ -35,6 +35,10 @@ const DEFAULT_MAX_DEPTH = 1
 const DEFAULT_MAX_TASK_CHARS = 12_000
 const MAX_ROLE_TOOL_RULES = 64
 const MAX_ROLE_TOOL_NAME_BYTES = 128
+const MAX_STATUS_LLM_PROVIDER_IDS = 32
+const MAX_STATUS_PROVIDER_ID_CHARS = 128
+const MAX_STATUS_CAPABILITIES_CHARS = 8_192
+const STATUS_SUBAGENT_CAPABILITIES = Object.freeze(['agentOptions', 'persona', 'toolFilter', 'outputSchema', 'depthLimit'])
 const ROLE_TOOL_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/u
 const ROLE_TOOL_NAME_ENCODER = new TextEncoder()
 const DISABLEABLE_OMO_COMMAND_NAMES = Object.freeze([
@@ -944,7 +948,96 @@ async function listOmoLabelChildren(ctx, agent, signal) {
   return descendants.filter(child => child.parentId === agent.id && matchesOmoLabelNamespace(child))
 }
 
-function registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills) {
+function safeStatusProviderId(value) {
+  if (typeof value !== 'string') return undefined
+  const safe = value.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu, '?').trim()
+  if (!safe) return undefined
+  const characters = Array.from(safe)
+  return characters.length > MAX_STATUS_PROVIDER_ID_CHARS
+    ? `${characters.slice(0, MAX_STATUS_PROVIDER_ID_CHARS - 1).join('')}…`
+    : safe
+}
+
+function safeStatusErrorName(error) {
+  return safeStatusProviderId(safeErrorName(error)) ?? 'UnknownError'
+}
+
+function renderCapabilityStatus(ctx, providerName) {
+  const lines = [
+    'dsh-omo live capability registry query: registrations and declared flags only; this is not a health check or a model-call guarantee.',
+  ]
+  const displayedProvider = safeStatusProviderId(providerName) ?? '(invalid configured provider id)'
+  if (typeof ctx.subagents?.getProvider !== 'function') {
+    lines.push(`Configured DSH subagent provider ${JSON.stringify(displayedProvider)}: provider lookup unavailable.`)
+  } else {
+    try {
+      const provider = ctx.subagents.getProvider(providerName)
+      if (!provider || typeof provider !== 'object') {
+        lines.push(`Configured DSH subagent provider ${JSON.stringify(displayedProvider)}: not registered.`)
+      } else {
+        const capabilities = provider.capabilities && typeof provider.capabilities === 'object'
+          ? provider.capabilities
+          : undefined
+        const flags = STATUS_SUBAGENT_CAPABILITIES.map(capability => {
+          const value = capabilities?.[capability]
+          const status = value === true ? 'true' : value === false ? 'false' : 'not declared'
+          return `${capability}=${status}`
+        }).join('; ')
+        lines.push(`Configured DSH subagent provider ${JSON.stringify(displayedProvider)}: registered; ${flags}.`)
+      }
+    } catch (error) {
+      lines.push(`Configured DSH subagent provider ${JSON.stringify(displayedProvider)}: lookup failed (${safeStatusErrorName(error)}; details omitted).`)
+    }
+  }
+
+  let llm
+  let llmLookupFailed = false
+  try {
+    llm = optionalService(ctx, 'llm')
+  } catch (error) {
+    llmLookupFailed = true
+    lines.push(`DSH LLM provider registry: lookup failed (${safeStatusErrorName(error)}; details omitted).`)
+  }
+  if (!llmLookupFailed && (llm === undefined || llm === null)) {
+    lines.push('DSH LLM provider registry: service not mounted.')
+  } else if (!llmLookupFailed && typeof llm.listProviders !== 'function') {
+    lines.push('DSH LLM provider registry: listProviders is unavailable.')
+  } else if (!llmLookupFailed) {
+    try {
+      const providers = llm.listProviders()
+      if (!Array.isArray(providers)) {
+        lines.push('DSH LLM provider registry: listProviders returned an invalid response.')
+      } else {
+        const sample = providers.slice(0, MAX_STATUS_LLM_PROVIDER_IDS)
+        const ids = []
+        let invalid = 0
+        for (const provider of sample) {
+          const id = provider !== null && typeof provider === 'object'
+            ? safeStatusProviderId(provider.id)
+            : undefined
+          if (id === undefined) invalid += 1
+          else ids.push(id)
+        }
+        const uninspected = Math.max(0, providers.length - sample.length)
+        const omitted = invalid + uninspected
+        const suffix = omitted > 0 ? `; ${omitted} entries omitted` : ''
+        lines.push(`Registered DSH LLM provider IDs (${providers.length} routes): ${JSON.stringify(ids)}${suffix}.`)
+      }
+    } catch (error) {
+      lines.push(`DSH LLM provider registry: query failed (${safeStatusErrorName(error)}; details omitted).`)
+    }
+  }
+  lines.push('Provider registrations and capability declarations do not prove credentials, endpoint/model availability, route compatibility, or future call success.')
+  const text = lines.join('\n')
+  return {
+    kind: 'success',
+    text: text.length <= MAX_STATUS_CAPABILITIES_CHARS
+      ? text
+      : `${text.slice(0, MAX_STATUS_CAPABILITIES_CHARS - 14)}\n[truncated]`,
+  }
+}
+
+function registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName) {
   let availableCommandNames = ''
   let taskCommandHelp = ''
   let skillRefreshHelp = ''
@@ -1118,10 +1211,11 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
     },
     {
       name: 'omo',
-      description: 'Show installed DSH OMO-inspired specialist roles and commands, or inspect local status.',
-      input: { hint: '[status]' },
+      description: 'Show installed DSH OMO-inspired specialist roles and commands; /omo status is passive, while /omo status capabilities explicitly queries read-only provider registries.',
+      input: { hint: '[status|status capabilities]' },
       handler: invocation => {
         const rawInput = typeof invocation?.rawInput === 'string' ? invocation.rawInput.trim() : ''
+        if (rawInput === 'status capabilities') return renderCapabilityStatus(ctx, providerName)
         if (rawInput === 'status') {
           const presence = name => statusSnapshot.services[name] ? 'present' : 'absent'
           const enabled = value => value ? 'enabled' : 'disabled'
@@ -1135,7 +1229,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             ].join('\n'),
           }
         }
-        if (rawInput) return { kind: 'error', text: 'Usage: /omo [status].' }
+        if (rawInput) return { kind: 'error', text: 'Usage: /omo [status|status capabilities].' }
         return {
           kind: 'success',
           text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Project agent files: ${config.enableProjectAgentFiles ? 'enabled' : 'disabled'} (current-session cwd only; prompt persona with optional DSH toolFilter allowlist). Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). LSP navigation: ${config.enableLspTools ? 'enabled' : 'disabled'} (two read-only queries; provider-dependent and not a path authorization boundary). Root AGENTS context: ${config.enableRootAgentsContext ? 'enabled' : 'disabled'} (bounded cwd/AGENTS.md snapshot for new Agent scopes before their first step; root-only, no watcher, repository text is untrusted). AGENTS-on-read: ${config.enableAgentsOnRead ? 'enabled' : 'disabled'} (post-read injection; root AGENTS skipped when the root snapshot is enabled; repository text is untrusted). Root README context: ${config.enableRootReadmeContext ? 'enabled' : 'disabled'} (opt-in root README.md snapshot for Agent prompt context). README-on-read: ${config.enableReadmeOnRead ? 'enabled' : 'disabled'} (post-read injection; root README skipped when the root snapshot is enabled). Claude rules after read/write/edit: ${config.enableClaudeRulesOnRead ? 'enabled' : 'disabled'} (legacy opt-in flag; no verified multiedit schema). Write-existing-file guard: ${config.enableWriteExistingFileGuard ? 'enabled' : 'disabled'} (final isError:false result for case-insensitive read of preflighted in-cwd regular file required before one same-Agent case-insensitive write; same-named custom Tools count; raw .omo slash-segment including .omo/.. aliases or overwrite boolean true/exact case-insensitive "true" without trimming bypass; args unchanged; verified missing/outside normally pass below caps, but caps may busy-deny writes; UX only, read/write TOCTOU remains). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
@@ -1378,7 +1472,7 @@ export function apply(ctx, rawConfig) {
     interpolate: false,
     text: buildUltraworkGuidance(disabledOmoCommands, activeRoleNames, config.enableWriteExistingFileGuard, config.enableProjectAgentFiles),
   })
-  registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills)
+  registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName)
   if (config.enableSessionSearch) {
     const disposeSessionSearch = registerSessionSearchTool(ctx, sessionQueryService)
     ctx.effect(() => disposeSessionSearch, 'dsh-omo session search tool')

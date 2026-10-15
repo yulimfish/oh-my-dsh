@@ -275,7 +275,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.equal(fixture.tools.has('lsp_find_references'), false, 'present LSP services do not enable tools by default')
 
   const command = fixture.commands.get('omo')
-  assert.equal(command.input.hint, '[status]', 'the optional status subcommand is discoverable')
+  assert.equal(command.input.hint, '[status|status capabilities]', 'both status modes are discoverable')
   mutableConfig.enableJobTools = false
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
@@ -290,6 +290,77 @@ test('/omo status reports feature flags and service presence without calling bus
   const absent = makeContext()
   apply(absent.ctx, baseConfig)
   assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; agentTeams=absent; jobController=absent; lsp=absent; sessionQuery=absent; sessions=absent; mcpResources=absent/u)
+})
+
+test('/omo status capabilities explicitly queries bounded live provider registries', () => {
+  const calls = []
+  const fixture = makeContext({
+    getProvider: provider => {
+      calls.push(`subagents.getProvider:${provider}`)
+      return { capabilities: { agentOptions: true, persona: false, toolFilter: true, outputSchema: false, depthLimit: true } }
+    },
+    services: {
+      llm: {
+        listProviders: () => {
+          calls.push('llm.listProviders')
+          return [{ id: 'provider-alpha' }, { id: 'provider-beta' }]
+        },
+        resolveCallConfig: () => calls.push('llm.resolveCallConfig'),
+      },
+    },
+  })
+  apply(fixture.ctx, baseConfig)
+  const status = fixture.commands.get('omo').handler({ rawInput: 'status capabilities' })
+  assert.equal(status.kind, 'success')
+  assert.match(status.text, /live capability registry query/u)
+  assert.match(status.text, /Configured DSH subagent provider "spawn": registered; agentOptions=true; persona=false; toolFilter=true; outputSchema=false; depthLimit=true/u)
+  assert.match(status.text, /Registered DSH LLM provider IDs \(2 routes\): \["provider-alpha","provider-beta"\]/u)
+  assert.match(status.text, /do not prove credentials, endpoint\/model availability, route compatibility, or future call success/u)
+  assert.deepEqual(calls, ['subagents.getProvider:spawn', 'llm.listProviders'])
+})
+
+test('/omo status capabilities reports missing providers and sanitizes provider failures', () => {
+  const absent = makeContext({ getProvider: () => undefined })
+  apply(absent.ctx, baseConfig)
+  const absentStatus = absent.commands.get('omo').handler({ rawInput: 'status capabilities' })
+  assert.match(absentStatus.text, /subagent provider "spawn": not registered/u)
+  assert.match(absentStatus.text, /LLM provider registry: service not mounted/u)
+
+  const noListMethod = makeContext({ services: { llm: {} } })
+  apply(noListMethod.ctx, baseConfig)
+  assert.match(noListMethod.commands.get('omo').handler({ rawInput: 'status capabilities' }).text, /listProviders is unavailable/u)
+
+  const failed = makeContext({
+    getProvider: () => {
+      const error = new Error('secret provider endpoint')
+      error.name = 'Provider\nFailure\u202e'
+      throw error
+    },
+    services: { llm: { listProviders: () => { throw new Error('secret llm endpoint') } } },
+  })
+  apply(failed.ctx, baseConfig)
+  const failedStatus = failed.commands.get('omo').handler({ rawInput: 'status capabilities' })
+  assert.match(failedStatus.text, /lookup failed \(Provider\?Failure\?; details omitted\)/u)
+  assert.match(failedStatus.text, /query failed \(Error; details omitted\)/u)
+  assert.equal(failedStatus.text.includes('secret provider endpoint'), false)
+  assert.equal(failedStatus.text.includes('secret llm endpoint'), false)
+})
+
+test('/omo status capabilities bounds provider IDs and output', () => {
+  const providers = Array.from({ length: 100 }, (_value, index) => ({
+    id: index === 0 ? 'unsafe\nprovider\u202e' : `provider-${index}-${'x'.repeat(200)}`,
+  }))
+  const fixture = makeContext({ services: { llm: { listProviders: () => providers } } })
+  apply(fixture.ctx, baseConfig)
+  const status = fixture.commands.get('omo').handler({ rawInput: 'status capabilities' })
+  assert.equal(status.kind, 'success')
+  assert.ok(status.text.length <= 8_192)
+  assert.match(status.text, /100 routes/u)
+  assert.match(status.text, /68 entries omitted/u)
+  assert.match(status.text, /unsafe\?provider\?/u)
+  assert.equal(status.text.includes('\u202e'), false)
+  assert.match(status.text, /provider-31/u)
+  assert.doesNotMatch(status.text, /provider-32/u)
 })
 
 test('project-skill filters configure only the project provider and preserve bundled registrations', () => {
