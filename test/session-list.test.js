@@ -22,8 +22,8 @@ function sessionRecord(id, createdAt, cwd = '/workspace/project', fields = {}) {
 }
 
 function makeSessionQuery(options = {}) {
-  const calls = { observations: [], filters: [], lists: [], fullReads: 0 }
-  const records = [
+  const calls = { observations: [], filters: [], lists: [], titleReads: [], fullReads: 0 }
+  const records = options.records ?? [
     sessionRecord('session-new', JAN_2 + 12 * 60 * 60 * 1_000, '/workspace/project', {
       live: true, persisted: true, isSeeded: true, parentSession: 'parent-1',
     }),
@@ -49,6 +49,19 @@ function makeSessionQuery(options = {}) {
       options.onList?.()
       if (options.listError) throw new Error(options.listError)
       return options.listedRecords ?? records
+    },
+    async readTitleSnapshot(sessionId, signal) {
+      calls.titleReads.push({ sessionId, signal })
+      options.onTitle?.(sessionId)
+      if (options.titleError) throw new Error(options.titleError)
+      if (options.titleObservations && Object.hasOwn(options.titleObservations, sessionId)) {
+        return options.titleObservations[sessionId]
+      }
+      const record = records.find(candidate => candidate.header.id === sessionId)
+      return {
+        session: record?.header,
+        title: { title: `Title ${sessionId}`, eventSeq: 1, updatedAt: JAN_2, source: { kind: 'fallback' } },
+      }
     },
     async readSession() { calls.fullReads += 1 },
   }
@@ -85,6 +98,7 @@ test('defaults to current workspace, applies inclusive date filters, and caps me
     signal: controller.signal,
   }])
   assert.deepEqual(fixture.calls.lists, [])
+  assert.deepEqual(fixture.calls.titleReads, [], 'default metadata listing must never read titles')
   assert.equal(result.scope, 'current-workspace')
   assert.equal(result.totalMatches, 2)
   assert.equal(result.truncated, true)
@@ -102,6 +116,82 @@ test('defaults to current workspace, applies inclusive date filters, and caps me
   assert.match(rendered, /additional matches omitted/u)
   assert.match(rendered, /no stable cursor/u)
   assert.equal(fixture.calls.fullReads, 0)
+})
+
+test('reads sanitized titles only for a bounded displayed prefix when explicitly requested', async () => {
+  const records = Array.from({ length: 5 }, (_, index) => sessionRecord(`session-${index}`, JAN_2 + index * 1_000))
+  const titleObservations = {
+    'session-0': {
+      session: records[0].header,
+      title: { title: `  Project\u202e ${'x'.repeat(500)} `, eventSeq: 9, updatedAt: JAN_2 + 10, source: { kind: 'user' } },
+    },
+  }
+  const fixture = makeSessionQuery({ records, titleObservations })
+  const tool = createSessionListTool(fixture.sessionQuery)
+  const signal = new AbortController().signal
+  const result = await tool.execute({ includeOtherProjects: true, includeTitles: true, limit: 5 }, { signal })
+
+  assert.deepEqual(fixture.calls.titleReads, records.slice(0, 3).map(record => ({ sessionId: record.header.id, signal })))
+  assert.equal(result.titleLookupCount, 3)
+  assert.equal(result.titlesCapped, true)
+  assert.equal(result.results[0].hasTitle, true)
+  assert.equal(result.results[0].titleSource, 'user')
+  assert.equal(result.results[0].titleTruncated, true)
+  assert.equal(result.results[0].title.length, 400)
+  assert.doesNotMatch(result.results[0].title, /[\u202a-\u202e]/u)
+  assert.equal(result.results[1].title, 'Title session-1')
+  assert.equal(result.results[2].title, 'Title session-2')
+  assert.equal('hasTitle' in result.results[3], false, 'rows beyond the title cap must not be read')
+  assert.equal('title' in result.results[4], false)
+  const rendered = tool.output.render({ includeTitles: true }, result)[0].text
+  assert.match(rendered, /title \(untrusted\)/u)
+  assert.match(rendered, /title not fetched \(bounded title cap\)/u)
+  assert.match(rendered, /may scan\/reconstruct a complete target log/u)
+  assert.equal(fixture.calls.fullReads, 0)
+})
+
+test('validates title snapshot identity and listed workspace/date scope before returning titles', async () => {
+  const listed = sessionRecord('listed-session', JAN_2, '/workspace/project')
+  const baseTitle = { title: { title: 'untrusted title', eventSeq: 1, updatedAt: JAN_2, source: { kind: 'fallback' } } }
+  const mismatches = [
+    { session: { ...listed.header, id: 'other-session' }, ...baseTitle },
+    { session: { ...listed.header, cwd: '/elsewhere' }, ...baseTitle },
+    { session: { ...listed.header, createdAt: JAN_2 + 1 }, ...baseTitle },
+  ]
+  for (const titleObservation of mismatches) {
+    const fixture = makeSessionQuery({ filteredRecords: [listed], titleObservations: { 'listed-session': titleObservation } })
+    const tool = createSessionListTool(fixture.sessionQuery)
+    await assert.rejects(tool.execute({ includeTitles: true }, { agent: { id: 'agent-1' } }), /outside the verified metadata scope|invalid session info metadata/u)
+    assert.equal(fixture.calls.titleReads.length, 1)
+  }
+})
+
+test('sanitizes title Host failures and reports title-read cancellation', async () => {
+  const failed = makeSessionQuery({ titleError: 'private host detail' })
+  const failedTool = createSessionListTool(failed.sessionQuery)
+  await assert.rejects(failedTool.execute({ includeOtherProjects: true, includeTitles: true }), error => {
+    assert.match(error.message, /Could not read DSH session title metadata/u)
+    assert.equal(error.message.includes('private host detail'), false)
+    return true
+  })
+
+  const controller = new AbortController()
+  const cancelled = makeSessionQuery({ onTitle: () => controller.abort() })
+  const cancelledTool = createSessionListTool(cancelled.sessionQuery)
+  await assert.rejects(cancelledTool.execute(
+    { includeOtherProjects: true, includeTitles: true }, { signal: controller.signal },
+  ), /cancelled/u)
+  assert.equal(cancelled.calls.titleReads.length, 1)
+})
+
+test('keeps titles opt-in when the Host title snapshot method is absent', async () => {
+  const fixture = makeSessionQuery()
+  delete fixture.sessionQuery.readTitleSnapshot
+  const tool = createSessionListTool(fixture.sessionQuery)
+  assert.equal('includeTitles' in tool.parameters, false)
+  await assert.rejects(tool.execute({ includeTitles: true }, { agent: { id: 'agent-1' } }), /unavailable/u)
+  assert.deepEqual(fixture.calls.observations, [])
+  assert.deepEqual(fixture.calls.filters, [])
 })
 
 test('uses listSessions only for unfiltered global scope and accepts no current Agent there', async () => {
@@ -150,6 +240,7 @@ test('rejects invalid date bounds, limits, scope flags, and missing current Agen
     { limit: 0 },
     { limit: 26 },
     { includeOtherProjects: 'true' },
+    { includeTitles: 'true' },
   ]
   for (const args of invalid) await assert.rejects(tool.execute(args, { agent: { id: 'agent-1' } }))
   await assert.rejects(tool.execute({}, { agent: undefined }), /current Agent/u)

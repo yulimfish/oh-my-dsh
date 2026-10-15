@@ -118,6 +118,20 @@ function projectTitle(snapshot) {
   }
 }
 
+/** Validate a title snapshot against the exact metadata row before projecting untrusted title text. */
+export function projectSessionTitleSnapshot(titleObservation, sessionId, expectedHeader) {
+  if (!isRecord(titleObservation) || !isRecord(titleObservation.session)) {
+    throw new Error('DSH returned invalid session title observation metadata.')
+  }
+  const titleHeader = validateHeader(titleObservation.session, sessionId)
+  if (!isRecord(expectedHeader) || expectedHeader.id !== sessionId
+    || (expectedHeader.cwd ?? null) !== (titleHeader.cwd ?? null)
+    || expectedHeader.createdAt !== titleHeader.createdAt) {
+    throw new Error('DSH returned a session outside the verified metadata scope.')
+  }
+  return projectTitle(titleObservation.title)
+}
+
 function projectInfo(record, titleObservation, sessionId, scope) {
   const { header, live, persisted } = record
   const titleHeader = validateHeader(titleObservation.session, sessionId)
