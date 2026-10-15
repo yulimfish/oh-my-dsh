@@ -8,6 +8,7 @@ An independent DeepSeek Harness plugin that brings an Oh My OpenCode-inspired sp
 - Adds role personas, opt-in per-role model routes, reasoning effort and token ceilings, inherited tool-scope allow/deny filters, and bounded literal `promptAppend` guidance in delegated task messages.
 - Adds twelve packaged workflow skills: four `/omo-*` skills plus `debugging`, `frontend`, `git-master`, `init-deep`, `remove-ai-slops`, `review-work`, `security-research`, and `visual-qa`; these guides do not reproduce upstream lifecycle integrations.
 - Adds a cwd-aware provider for project `.opencode/skills` and `.claude/skills` files through DSH skill/filesystem services.
+- Adds default-off, one-shot support for safe current-session-CWD `.claude/agents/*.md` prompt personas; no global discovery or permission parity.
 - Adds `/omo-skills-refresh` to invalidate the project-skill catalog after local edits; filesystem watchers normally refresh it automatically.
 - Adds persistent system-prompt guidance for task decomposition, parallel delegation, integration, and verification.
 - Adds `/ulw`, `/ultrawork`, `/ulw-execute`, `/architect`, `/review`, `/handoff`, `/refactor`, `/remove-ai-slops`, `/omo` (including `/omo status`), `/omo-tasks`, `/omo-interrupt`, and `/omo-skills-refresh`; `/goal` and read-only `/omo-models` are registered when their optional native DSH services are available. `/stop-continuation` is registered only when the native DSH Goal service exposes `get` and `clear`. Task commands still report DSH residency/interrupt attempts, not plugin origin or guaranteed completion.
@@ -54,7 +55,21 @@ The user-facing app should be restarted after adding the package. Test the isola
 
 ## Configure roles
 
-The package installs a bundle row in `cordis.patch.yml`. Add entries to `roleRoutes` for provider/model, reasoning, token ceilings, inherited tool-scope filters (`allowTools`/`denyTools`, at most 64 names of up to 128 UTF-8 bytes each), and bounded literal `promptAppend` guidance. For one-shot launches that emit a filter, the DSH subagent provider must advertise `toolFilter`; DSH rejects unsupported filters before publishing a child. Continuable tasks apply the filter through DSH's scoped `tools.restrict` path and do not require that provider capability flag. `enableContinuableTasks` defaults to `false`; turn it on only after verifying the selected DSH subagent provider implements the optional `prepareContinuable` method and the DSH persistence path is available. Optional DSH-native `userAgents` definitions require `name` and `prompt`, accept optional `description` and `mode` (omitted `mode` defaults to `subagent`), and add up to 32 config-only named subagents. Names are ASCII slugs of at most 64 characters, descriptions are limited to 512 UTF-8 bytes, and raw persona prompts are limited to 16 KiB each (64 KiB total). Only `mode: subagent` is supported. The prompt is passed as DSH `SubagentStartRequest.persona`, so a custom role fails closed unless the selected DSH subagent provider advertises `persona`; use `roleRoutes`/`categoryRoutes` for model and inherited-tool routing, and `disabledOmoRoles` may disable built-in or custom names. dsh-omo has no `.md`, `.json`, or `.jsonc` agent-file loader or project/global source merge; these definitions cannot switch the current/primary agent or appear in a Host-native agent picker. The existing role/filter warning above applies to them as well.
+The package installs a bundle row in `cordis.patch.yml`. Add entries to `roleRoutes` for provider/model, reasoning, token ceilings, inherited tool-scope filters (`allowTools`/`denyTools`, at most 64 names of up to 128 UTF-8 bytes each), and bounded literal `promptAppend` guidance. For one-shot launches that emit a filter, the DSH subagent provider must advertise `toolFilter`; DSH rejects unsupported filters before publishing a child. Continuable tasks apply the filter through DSH's scoped `tools.restrict` path and do not require that provider capability flag. `enableContinuableTasks` defaults to `false`; turn it on only after verifying the selected DSH subagent provider implements the optional `prepareContinuable` method and the DSH persistence path is available. Optional DSH-native `userAgents` definitions require `name` and `prompt`, accept optional `description` and `mode` (omitted `mode` defaults to `subagent`), and add up to 32 config-only named subagents. Names are ASCII slugs of at most 64 characters, descriptions are limited to 512 UTF-8 bytes, and raw persona prompts are limited to 16 KiB each (64 KiB total). Only `mode: subagent` is supported. The prompt is passed as DSH `SubagentStartRequest.persona`, so a custom role fails closed unless the selected DSH subagent provider advertises `persona`; use `roleRoutes`/`categoryRoutes` for model and inherited-tool routing, and `disabledOmoRoles` may disable built-in or custom names.
+
+### Project agent files
+
+With `enableProjectAgentFiles: true`, an extra dsh-omo roster tool scans only the active session cwd's direct `.claude/agents/*.md` files; select one in the one-shot task tool with `role: __project_agent_file__` and `agentFile: <lowercase ASCII slug filename stem>`. This adapter accepts stems matching `[a-z][a-z0-9-]{0,63}` only. The loader rereads the selected file, requires a matching `name`, optional single-line `description`, and a non-empty file body (it does not parse Markdown syntax), and rejects unsupported metadata (including tools/model/permissions), YAML tags/aliases/nesting/multiline values, invalid UTF-8, symlinks, and paths outside cwd. Listing and launch fail closed unless the configured DSH subagent provider advertises `persona`.
+
+This feature is default-off and bounded at the adapter level (it copies/processes at most the first 256 direct entries, returns at most 32 roster entries, reads at most 16 KiB/file and 128 KiB per roster, and applies a five-second deadline per list/load operation; a backend that ignores `AbortSignal` may continue I/O after return). DSH `fs.listDir` has no paging/limit contract and returns the full direct-child array, so an unusually large directory can still cause Host-side allocation before the adapter cap.
+
+The roster returns only filename/name/description, while only the sanitized body becomes provider `persona`.
+
+Project instructions are untrusted prompt text: they cannot directly add permissions or tools, but may influence a child that already inherits tools, and the warning is advisory rather than an enforcement boundary. Treat this mode as trusted-repository-only; select a category with restrictive inherited-tool filters and retain DSH approvals/policy; project-file agents have no role-specific route.
+
+Files cannot define model routes or permissions, and the selected file is reread at launch. There is no home/global/ancestor scan or merge, primary-agent switching, Host-native picker, per-agent skills/display metadata, or full permission semantics.
+
+DSH filesystem reads are plugin-level, not an approval-gated model Tool, and identity/version rechecks cannot remove TOCTOU risk. The existing role/filter warning above applies to these definitions as well.
 
 ```yaml
 - id: dsh-omo
@@ -77,6 +92,7 @@ The package installs a bundle row in `cordis.patch.yml`. Add entries to `roleRou
     enableLspTools: false
     enableRootAgentsContext: false
     enableAgentsOnRead: false
+    enableProjectAgentFiles: false
     enableRootReadmeContext: false
     enableReadmeOnRead: false
     enableClaudeRulesOnRead: false

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { posix as path } from 'node:path'
 import { resolveChildAgentOptions, snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { apply, Config, inject, name } from '../src/index.js'
 import { buildWorkerPrompt, getRole, ROLE_NAMES } from '../src/roles.js'
@@ -82,6 +83,49 @@ function makeContext(options = {}) {
   return { ctx, tools, sections, commands, skills, skillProviders, skillInvalidations, starts, continuableStarts, continuableChildren, descendantCalls, interrupts, followups, disposals, effects, events, guards }
 }
 
+function makeProjectAgentFs({ source = '---\nname: repo-auditor\ndescription: Review the selected task\n---\nReview the target files carefully.', onRead } = {}) {
+  const cwd = '/workspace'
+  const nodes = new Map()
+  const putDirectory = target => nodes.set(target, { type: 'directory', version: `v-${target}` })
+  const bytes = new TextEncoder().encode(source)
+  putDirectory(cwd)
+  putDirectory(`${cwd}/.claude`)
+  putDirectory(`${cwd}/.claude/agents`)
+  nodes.set(`${cwd}/.claude/agents/repo-auditor.md`, { type: 'file', bytes, size: bytes.byteLength, version: 'v1' })
+  const absolute = (value, base = cwd) => path.resolve(base, value)
+  const target = value => ({ targetKey: value, path: value })
+  const fs = {
+    resolve: async (value, options = {}) => {
+      const resolved = absolute(value, options.cwd ?? cwd)
+      if (!nodes.has(resolved)) throw new Error('not found')
+      return target(resolved)
+    },
+    contains: (parent, child) => {
+      const root = parent.path.endsWith('/') ? parent.path.slice(0, -1) : parent.path
+      return child.path === root || child.path.startsWith(`${root}/`)
+    },
+    lstat: async (value, options = {}) => {
+      const entry = nodes.get(absolute(value, options.cwd ?? cwd))
+      return entry ? { type: entry.type, ...(entry.size !== undefined ? { size: entry.size } : {}) } : undefined
+    },
+    stat: async value => {
+      const entry = nodes.get(value.path)
+      return entry ? { type: entry.type, ...(entry.size !== undefined ? { size: entry.size } : {}), version: entry.version } : undefined
+    },
+    listDir: async value => [...nodes.entries()]
+      .filter(([candidate]) => path.dirname(candidate) === value.path)
+      .map(([candidate, entry]) => ({ name: path.basename(candidate), type: entry.type, target: target(candidate) })),
+    readBytes: async (value, _signal, maxBytes) => {
+      const entry = nodes.get(value.path)
+      if (!entry || entry.type !== 'file') throw new Error('not a file')
+      if (entry.bytes.byteLength > maxBytes) throw Object.assign(new Error('too large'), { code: 'FS_TOO_LARGE' })
+      onRead?.(value.path, entry)
+      return new Uint8Array(entry.bytes)
+    },
+  }
+  return { fs, nodes, cwd }
+}
+
 const baseConfig = {
   provider: 'spawn',
   maxConcurrent: 4,
@@ -98,6 +142,7 @@ const baseConfig = {
   enableLspTools: false,
   enableRootAgentsContext: false,
   enableAgentsOnRead: false,
+  enableProjectAgentFiles: false,
   enableRootReadmeContext: false,
   enableReadmeOnRead: false,
   enableClaudeRulesOnRead: false,
@@ -121,6 +166,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).disabledOmoRoles, [])
   assert.deepEqual(Config({ disabledOmoRoles: ['architect', 'reviewer'] }).disabledOmoRoles, ['architect', 'reviewer'])
   assert.deepEqual(Config({}).userAgents, [])
+  assert.equal(Config({}).enableProjectAgentFiles, false)
+  assert.equal(Config({ enableProjectAgentFiles: true }).enableProjectAgentFiles, true)
   assert.equal(Config({}).enableWriteExistingFileGuard, false)
   assert.equal(Config({ enableWriteExistingFileGuard: true }).enableWriteExistingFileGuard, true)
   assert.deepEqual(Config({ userAgents: [{ name: 'docs-auditor', description: 'Review docs.', prompt: 'Check for gaps.', mode: 'subagent' }] }).userAgents, [
@@ -225,7 +272,7 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -540,6 +587,9 @@ test('mounts specialist controls and caps the untrusted worker body', async () =
   const fixture = makeContext({ outputText: 'worker-output-'.repeat(30) })
   apply(fixture.ctx, { ...baseConfig, maxResultChars: 64 })
   assert.ok(fixture.tools.has('dsh_omo_task'))
+  assert.equal(fixture.tools.has('dsh_omo_project_agents'), false)
+  assert.equal(fixture.tools.get('dsh_omo_task').parameters.required.includes('role'), true)
+  assert.equal(Object.hasOwn(fixture.tools.get('dsh_omo_task').parameters.properties, 'agentFile'), false)
   assert.equal(fixture.sections.length, 1)
   assert.match(fixture.sections[0].text, /ULTRAWORK/i)
   assert.match(fixture.sections[0].text, /\/omo-tasks lists direct children/u)
@@ -1029,7 +1079,7 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
   const rootSnapshotsOnly = makeContext(prerequisites())
   apply(rootSnapshotsOnly.ctx, { ...baseConfig, enableRootReadmeContext: true, enableRootAgentsContext: true })
   assert.equal(rootSnapshotsOnly.events.has('tools/post-execute'), false)
-  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
+  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
 
   const combined = makeContext(prerequisites())
   apply(combined.ctx, {
@@ -1040,7 +1090,7 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
     enableRootAgentsContext: true,
   })
   assert.equal(typeof combined.events.get('tools/post-execute'), 'function', 'independent on-read and root-context flags can be combined')
-  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; writeExistingFileGuard=disabled/u)
+  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; writeExistingFileGuard=disabled/u)
   assert.deepEqual(calls, [], 'combined registration/status remain free of runtime filesystem and Service calls')
 })
 
@@ -1531,6 +1581,216 @@ test('fails closed when a configured user-agent persona is unsupported by its pr
   )
   assert.equal(fixture.starts.length, 0)
   assert.equal(fixture.continuableStarts.length, 0)
+})
+
+test('uses opt-in current-cwd project agent files as one-shot prompt-only personas', async () => {
+  const parent = { id: 'parent-agent', followup() {} }
+  const state = makeProjectAgentFs()
+  const session = { header: { id: parent.id, cwd: state.cwd } }
+  const fixture = makeContext({
+    fs: state.fs,
+    services: {
+      agents: { get: id => id === parent.id ? parent : undefined },
+      sessions: { get: id => id === parent.id ? session : undefined },
+    },
+  })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableProjectAgentFiles: true,
+    enableContinuableTasks: true,
+    categoryRoutes: [{ name: 'research', provider: 'route-provider', model: 'route-model' }],
+  })
+  const oneShot = fixture.tools.get('dsh_omo_task')
+  const rosterTool = fixture.tools.get('dsh_omo_project_agents')
+  const continuable = fixture.tools.get('dsh_omo_task_continuable')
+  assert.equal(oneShot.parameters.required.includes('role'), true)
+  assert.equal(oneShot.parameters.properties.role.enum.at(-1), '__project_agent_file__')
+  assert.equal(oneShot.parameters.required.includes('agentFile'), false)
+  assert.equal(Object.hasOwn(continuable.parameters.properties, 'agentFile'), false)
+  assert.match(fixture.sections[0].text, /call dsh_omo_project_agents/u)
+
+  const exec = { agent: parent, signal: new AbortController().signal }
+  const roster = await rosterTool.execute({}, exec)
+  assert.deepEqual(roster, {
+    agents: [{ agentFile: 'repo-auditor', name: 'repo-auditor', description: 'Review the selected task' }],
+    truncated: false,
+  })
+  assert.equal(JSON.stringify(roster).includes('Review the target files carefully'), false)
+
+  await assert.rejects(oneShot.execute({ role: '__project_agent_file__', task: 'Missing file selector.' }, exec), /role "__project_agent_file__" with agentFile/u)
+  await assert.rejects(oneShot.execute({ role: 'explore', agentFile: 'repo-auditor', task: 'Mismatched selectors.' }, exec), /role "__project_agent_file__" with agentFile/u)
+  await assert.rejects(oneShot.execute({ role: '__project_agent_file__', agentFile: '../repo-auditor', task: 'Unsafe selector.' }, exec), /safe project agent filename stem/u)
+
+  const fileResult = await oneShot.execute({ role: '__project_agent_file__', agentFile: 'repo-auditor', category: 'research', task: 'Inspect the patch.' }, exec)
+  assert.deepEqual(fileResult, { childId: 'child-1', role: 'project-agent:repo-auditor', status: 'started' })
+  const fileRequest = fixture.starts[0].request
+  assert.equal(fileRequest.persona, 'Review the target files carefully.')
+  assert.deepEqual(fileRequest.agentOptions, { provider: 'route-provider', model: 'route-model' })
+  assert.equal(fileRequest.toolFilter, undefined)
+  assert.match(fileRequest.label, /^project-agent:repo-auditor:/u)
+  assert.match(fileRequest.prompt[0].text, /Inspect the patch/u)
+  assert.match(fileRequest.prompt[0].text, /untrusted project-provided prompt text/u)
+  assert.equal(fileRequest.prompt[0].text.includes('Review the target files carefully'), false)
+  assert.equal(fileRequest.prompt[0].text.includes('Review the selected task'), false)
+
+  await oneShot.execute({ role: 'explore', task: 'Keep the static role path working.' }, exec)
+  assert.equal(fixture.starts[1].request.persona, undefined)
+  assert.equal(fixture.starts[1].request.label.startsWith('explore:'), true)
+})
+
+test('skips configured-role collisions before the project-agent roster cap', async () => {
+  const parent = { id: 'parent-agent', followup() {} }
+  const state = makeProjectAgentFs()
+  const configuredAgents = Array.from({ length: 32 }, (_value, index) => ({
+    name: `config-agent-${index}`,
+    prompt: 'Configured persona.',
+  }))
+  for (const agent of configuredAgents) {
+    const source = `---\nname: ${agent.name}\n---\nNot a selectable project agent.`
+    const bytes = new TextEncoder().encode(source)
+    state.nodes.set(`${state.cwd}/.claude/agents/${agent.name}.md`, {
+      type: 'file', bytes, size: bytes.byteLength, version: `v-${agent.name}`,
+    })
+  }
+  let readCalls = 0
+  const originalRead = state.fs.readBytes
+  state.fs.readBytes = async (...args) => { readCalls += 1; return originalRead(...args) }
+  const session = { header: { id: parent.id, cwd: state.cwd } }
+  const fixture = makeContext({
+    fs: state.fs,
+    services: {
+      agents: { get: id => id === parent.id ? parent : undefined },
+      sessions: { get: id => id === parent.id ? session : undefined },
+    },
+  })
+  apply(fixture.ctx, { ...baseConfig, enableProjectAgentFiles: true, userAgents: configuredAgents })
+  const exec = { agent: parent, signal: new AbortController().signal }
+  const roster = await fixture.tools.get('dsh_omo_project_agents').execute({}, exec)
+  assert.deepEqual(roster, {
+    agents: [{ agentFile: 'repo-auditor', name: 'repo-auditor', description: 'Review the selected task' }],
+    truncated: false,
+  })
+  assert.equal(readCalls, 1)
+  const result = await fixture.tools.get('dsh_omo_task').execute({
+    role: '__project_agent_file__', agentFile: 'repo-auditor', task: 'Use the selectable file only.',
+  }, exec)
+  assert.equal(result.role, 'project-agent:repo-auditor')
+  assert.equal(readCalls, 2)
+})
+
+test('reserves one-shot capacity before an asynchronous project-agent scan', async () => {
+  const parent = { id: 'parent-agent', followup() {} }
+  const state = makeProjectAgentFs()
+  let markStarted
+  const started = new Promise(resolve => { markStarted = resolve })
+  let releaseScan
+  const scanGate = new Promise(resolve => { releaseScan = resolve })
+  const originalList = state.fs.listDir
+  state.fs.listDir = async (target, signal) => {
+    markStarted()
+    await scanGate
+    return originalList(target, signal)
+  }
+  const session = { header: { id: parent.id, cwd: state.cwd } }
+  const fixture = makeContext({
+    fs: state.fs,
+    services: {
+      agents: { get: id => id === parent.id ? parent : undefined },
+      sessions: { get: id => id === parent.id ? session : undefined },
+    },
+  })
+  apply(fixture.ctx, { ...baseConfig, enableProjectAgentFiles: true, maxConcurrent: 1 })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: parent, signal: new AbortController().signal }
+  const first = tool.execute({ role: '__project_agent_file__', agentFile: 'repo-auditor', task: 'Scan once.' }, exec)
+  await started
+  await assert.rejects(tool.execute({ role: 'explore', task: 'Do not overbook.' }, exec), /worker limit reached/u)
+  assert.equal(fixture.starts.length, 0)
+  releaseScan()
+  assert.deepEqual(await first, { childId: 'child-1', role: 'project-agent:repo-auditor', status: 'started' })
+  assert.equal(fixture.starts.length, 1)
+})
+
+test('releases project-agent capacity when a selected file is unavailable', async () => {
+  const parent = { id: 'parent-agent', followup() {} }
+  const state = makeProjectAgentFs()
+  const session = { header: { id: parent.id, cwd: state.cwd } }
+  const fixture = makeContext({
+    fs: state.fs,
+    services: {
+      agents: { get: id => id === parent.id ? parent : undefined },
+      sessions: { get: id => id === parent.id ? session : undefined },
+    },
+  })
+  apply(fixture.ctx, { ...baseConfig, enableProjectAgentFiles: true, maxConcurrent: 1 })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: parent, signal: new AbortController().signal }
+  await assert.rejects(tool.execute({
+    role: '__project_agent_file__', agentFile: 'missing', task: 'Reject the absent file.',
+  }, exec), /unavailable in the safe current-session roster/u)
+  assert.deepEqual(await tool.execute({ role: 'explore', task: 'Use the released slot.' }, exec), {
+    childId: 'child-1', role: 'explore', status: 'started',
+  })
+  assert.equal(fixture.starts.length, 1)
+})
+
+test('checks project-agent persona capability before listing or reading files', async () => {
+  const parent = { id: 'parent-agent' }
+  const state = makeProjectAgentFs()
+  let listCalls = 0
+  let readCalls = 0
+  const originalList = state.fs.listDir
+  const originalRead = state.fs.readBytes
+  state.fs.listDir = async (...args) => { listCalls += 1; return originalList(...args) }
+  state.fs.readBytes = async (...args) => { readCalls += 1; return originalRead(...args) }
+  const fixture = makeContext({
+    fs: state.fs,
+    getProvider: () => ({ name: 'spawn', capabilities: { persona: false } }),
+    services: {
+      agents: { get: id => id === parent.id ? parent : undefined },
+      sessions: { get: id => id === parent.id ? { header: { id, cwd: state.cwd } } : undefined },
+    },
+  })
+  apply(fixture.ctx, { ...baseConfig, enableProjectAgentFiles: true })
+  const exec = { agent: parent, signal: new AbortController().signal }
+  await assert.rejects(fixture.tools.get('dsh_omo_project_agents').execute({}, exec), /support persona/u)
+  await assert.rejects(fixture.tools.get('dsh_omo_task').execute({ role: '__project_agent_file__', agentFile: 'repo-auditor', task: 'Inspect.' }, exec), /support persona/u)
+  assert.equal(listCalls, 0)
+  assert.equal(readCalls, 0)
+  assert.equal(fixture.starts.length, 0)
+})
+
+test('plugin unload aborts a pending project-agent directory scan', async () => {
+  const parent = { id: 'parent-agent' }
+  const state = makeProjectAgentFs()
+  let markStarted
+  const started = new Promise(resolve => { markStarted = resolve })
+  state.fs.listDir = (_target, signal) => new Promise((_resolve, reject) => {
+    markStarted()
+    signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true })
+  })
+  const fixture = makeContext({
+    fs: state.fs,
+    services: {
+      agents: { get: id => id === parent.id ? parent : undefined },
+      sessions: { get: id => id === parent.id ? { header: { id, cwd: state.cwd } } : undefined },
+    },
+  })
+  apply(fixture.ctx, { ...baseConfig, enableProjectAgentFiles: true })
+  const pending = fixture.tools.get('dsh_omo_project_agents').execute({}, {
+    agent: parent, signal: new AbortController().signal,
+  })
+  await started
+  const cleanup = fixture.effects.find(effect => effect.label === 'dsh-omo background workers')?.dispose
+  assert.equal(typeof cleanup, 'function')
+  await cleanup()
+  await assert.rejects(pending, /cancelled or exceeded/u)
+})
+
+test('requires live filesystem and session services when project agent files are enabled', () => {
+  const fixture = makeContext()
+  assert.throws(() => apply(fixture.ctx, { ...baseConfig, enableProjectAgentFiles: true }), /enableProjectAgentFiles requires/u)
+  assert.equal(fixture.tools.size, 0)
 })
 
 test('composes category tools false entries as monotonic inherited-tool denies', async () => {
