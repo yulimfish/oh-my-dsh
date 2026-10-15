@@ -78,6 +78,26 @@ test('normalizes bounded explicit category fallback model chains immutably', () 
   }
 })
 
+test('requires a paired role pin before resolving role fallback chains', () => {
+  const categoryRoutes = normalizeCategoryRoutes([{
+    name: 'chain', provider: 'category-primary', model: 'category-model',
+    fallbackModels: [{ provider: 'category-backup', model: 'category-backup-model' }],
+  }])
+  const unpinnedRole = {
+    role: 'explore',
+    fallbackModels: [{ provider: 'role-backup', model: 'role-backup-model' }],
+  }
+  assert.throws(() => resolveCategoryRoute(categoryRoutes, undefined, unpinnedRole), /fallbackModels require an explicit provider\/model pin/u)
+  assert.throws(() => resolveCategoryRoute(categoryRoutes, 'chain', unpinnedRole), /fallbackModels require an explicit provider\/model pin/u)
+
+  const pinnedRole = {
+    role: 'explore', provider: 'role-primary', model: 'role-primary-model',
+    fallbackModels: [{ provider: 'role-backup', model: 'role-backup-model' }],
+  }
+  assert.strictEqual(resolveCategoryRoute(categoryRoutes, undefined, pinnedRole).fallbackModels, pinnedRole.fallbackModels)
+  assert.strictEqual(resolveCategoryRoute(categoryRoutes, 'chain', pinnedRole).fallbackModels, pinnedRole.fallbackModels)
+})
+
 test('resolves explicit category before the role default category', () => {
   const categoryRoutes = routes()
   const roleRoute = Object.freeze({ category: 'build', allowTools: Object.freeze(['read']) })

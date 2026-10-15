@@ -196,6 +196,12 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(categoryConfig.categoryRoutes[0].description, 'A short chooser description.')
   assert.deepEqual(categoryConfig.categoryRoutes[0].tools, { read: false, bash: true })
   assert.deepEqual(Config({ roleRoutes: [{ role: 'reviewer', denyTools: ['bash'] }] }).roleRoutes[0].denyTools, ['bash'])
+  assert.deepEqual(Config({ roleRoutes: [{
+    role: 'reviewer', provider: 'primary', model: 'primary-model',
+    fallbackModels: [{ provider: 'backup', model: 'backup-model', reasoningEffort: 'low' }],
+  }] }).roleRoutes[0].fallbackModels, [
+    { provider: 'backup', model: 'backup-model', reasoningEffort: 'low' },
+  ])
   assert.deepEqual(Config({}).providerConcurrency, {})
   assert.deepEqual(Config({}).modelConcurrency, {})
   const concurrencyConfig = Config({ providerConcurrency: { 'deepseek-official': 2 }, modelConcurrency: { 'deepseek-official/deepseek-flash': 1 } })
@@ -2331,6 +2337,200 @@ test('role provider/model pins bypass category fallback resolution', async () =>
   })
 })
 
+test('preflights no-category role fallback chains with role settings over candidate settings', async () => {
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: {
+      resolveCallConfig: async (config, signal) => {
+        calls.push({ config, signal })
+        if (config.provider !== 'role-last') throw new Error('route unavailable')
+        return { ...config, reasoningEffort: 'materialized-default' }
+      },
+    },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    roleRoutes: [{
+      role: 'explore', provider: 'role-primary', model: 'primary-model',
+      reasoningEffort: 'medium', maxTokens: 1024,
+      fallbackModels: [
+        { provider: 'role-first', model: 'first-model', reasoningEffort: 'low' },
+        { provider: 'role-last', model: 'last-model', reasoningEffort: 'high' },
+      ],
+    }],
+  })
+  const signal = new AbortController().signal
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'Use a pinned role fallback without a category.' },
+    { agent: { id: 'parent-agent', followup() {} }, signal },
+  )
+  assert.deepEqual(calls.map(({ config }) => config), [
+    { provider: 'role-primary', model: 'primary-model', reasoningEffort: 'medium', maxTokens: 1024 },
+    { provider: 'role-first', model: 'first-model', reasoningEffort: 'medium', maxTokens: 1024 },
+    { provider: 'role-last', model: 'last-model', reasoningEffort: 'medium', maxTokens: 1024 },
+  ])
+  assert.ok(calls.every(call => call.signal === signal))
+  assert.deepEqual(fixture.starts[0].request.agentOptions, {
+    provider: 'role-last', model: 'last-model', reasoningEffort: 'medium', maxTokens: 1024,
+  })
+})
+
+test('role fallback chains override category fallback chains and preserve candidate-over-category reasoning', async () => {
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: {
+      resolveCallConfig: async config => {
+        calls.push(config)
+        if (config.provider === 'role-primary') throw new Error('primary route unavailable')
+        return config
+      },
+    },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{
+      name: 'research', provider: 'category-primary', model: 'category-model',
+      reasoningEffort: 'high', maxTokens: 2048,
+      fallbackModels: [{ provider: 'category-backup', model: 'category-backup-model' }],
+    }],
+    roleRoutes: [{
+      role: 'explore', category: 'research', provider: 'role-primary', model: 'role-model', maxTokens: 1024,
+      fallbackModels: [{ provider: 'role-backup', model: 'role-backup-model', reasoningEffort: 'low' }],
+    }],
+  })
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'explore', category: 'research', task: 'Use the role chain rather than the category chain.' },
+    { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal },
+  )
+  assert.deepEqual(calls, [
+    { provider: 'role-primary', model: 'role-model', reasoningEffort: 'high', maxTokens: 1024 },
+    { provider: 'role-backup', model: 'role-backup-model', reasoningEffort: 'low', maxTokens: 1024 },
+  ])
+  assert.deepEqual(fixture.starts[0].request.agentOptions, {
+    provider: 'role-backup', model: 'role-backup-model', reasoningEffort: 'low', maxTokens: 1024,
+  })
+})
+
+test('a valid role primary avoids querying its fallback chain', async () => {
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: { resolveCallConfig: async config => { calls.push(config); return config } },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    roleRoutes: [{
+      role: 'explore', provider: 'role-primary', model: 'primary-model',
+      fallbackModels: [{ provider: 'role-backup', model: 'backup-model' }],
+    }],
+  })
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'Primary route is capability-valid.' },
+    { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal },
+  )
+  assert.deepEqual(calls, [{ provider: 'role-primary', model: 'primary-model' }])
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { provider: 'role-primary', model: 'primary-model' })
+})
+
+test('role fallback chains support continuable children but preserve the maxTokens rejection', async () => {
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: {
+      resolveCallConfig: async config => {
+        calls.push(config)
+        if (config.provider === 'role-primary') throw new Error('primary route unavailable')
+        return config
+      },
+    },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    roleRoutes: [{
+      role: 'explore', provider: 'role-primary', model: 'primary-model',
+      fallbackModels: [{ provider: 'role-backup', model: 'backup-model' }],
+    }],
+  })
+  const signal = new AbortController().signal
+  await fixture.tools.get('dsh_omo_task_continuable').execute(
+    { role: 'explore', task: 'Persist a capability-valid role fallback.' },
+    { agent: { id: 'parent-agent', followup() {} }, signal },
+  )
+  assert.deepEqual(calls.map(({ provider, model }) => [provider, model]), [
+    ['role-primary', 'primary-model'], ['role-backup', 'backup-model'],
+  ])
+  assert.deepEqual(fixture.continuableStarts[0].request.agentOptions, {
+    provider: 'role-backup', model: 'backup-model',
+  })
+  assert.strictEqual(fixture.continuableStarts[0].signal, signal)
+
+  const cappedCalls = []
+  const capped = makeContext({ services: {
+    llm: { resolveCallConfig: async config => { cappedCalls.push(config); return config } },
+  } })
+  apply(capped.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    roleRoutes: [{
+      role: 'explore', provider: 'role-primary', model: 'primary-model', maxTokens: 512,
+      fallbackModels: [{ provider: 'role-backup', model: 'backup-model' }],
+    }],
+  })
+  await assert.rejects(capped.tools.get('dsh_omo_task_continuable').execute(
+    { role: 'explore', task: 'Do not lose the token ceiling.' },
+    { agent: { id: 'parent-agent', followup() {} }, signal },
+  ), /maxTokens/u)
+  assert.equal(cappedCalls.length, 0)
+  assert.equal(capped.continuableStarts.length, 0)
+})
+
+test('role fallback chains fail closed on missing, rejected, and cancelled preflight', async t => {
+  const roleRoute = {
+    role: 'explore', provider: 'role-primary', model: 'primary-model',
+    fallbackModels: [{ provider: 'role-backup', model: 'backup-model' }],
+  }
+  await t.test('missing resolver', async () => {
+    const fixture = makeContext()
+    apply(fixture.ctx, { ...baseConfig, roleRoutes: [roleRoute] })
+    await assert.rejects(fixture.tools.get('dsh_omo_task').execute(
+      { role: 'explore', task: 'Do not start without DSH route validation.' },
+      { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal },
+    ), /Configured role "explore" fallbackModels require.*resolveCallConfig/u)
+    assert.equal(fixture.starts.length, 0)
+  })
+  await t.test('all candidates reject', async () => {
+    const fixture = makeContext({ services: {
+      llm: { resolveCallConfig: async () => { throw new Error('private provider detail') } },
+    } })
+    apply(fixture.ctx, { ...baseConfig, roleRoutes: [roleRoute] })
+    await assert.rejects(fixture.tools.get('dsh_omo_task').execute(
+      { role: 'explore', task: 'Use the bounded role chain.' },
+      { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal },
+    ), /role "explore" \(2 candidates checked\)/u)
+    assert.equal(fixture.starts.length, 0)
+  })
+  await t.test('caller cancellation', async () => {
+    const calls = []
+    const fixture = makeContext({ services: {
+      llm: { resolveCallConfig: config => {
+        calls.push(config)
+        if (config.provider === 'role-primary') return Promise.reject(new Error('primary unsupported'))
+        return new Promise(() => {})
+      } },
+    } })
+    apply(fixture.ctx, { ...baseConfig, roleRoutes: [roleRoute] })
+    const controller = new AbortController()
+    const pending = fixture.tools.get('dsh_omo_task').execute(
+      { role: 'explore', task: 'Cancel role-chain preflight.' },
+      { agent: { id: 'parent-agent', followup() {} }, signal: controller.signal },
+    )
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(calls.length, 2)
+    controller.abort(new Error('role preflight cancelled'))
+    await assert.rejects(pending, /role preflight cancelled/u)
+    assert.equal(fixture.starts.length, 0)
+  })
+})
+
 test('fails closed on missing or rejected category fallback capability resolution', async t => {
   await t.test('missing optional LLM resolver', async () => {
     const fixture = makeContext()
@@ -2617,6 +2817,58 @@ test('omits an empty deny list as a no-op', async () => {
     { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal },
   )
   assert.equal(Object.hasOwn(fixture.starts[0].request, 'toolFilter'), false)
+})
+
+test('validates bounded role fallback chains only for explicit provider/model pins', () => {
+  const valid = makeContext()
+  apply(valid.ctx, {
+    ...baseConfig,
+    roleRoutes: [{
+      role: 'explore', provider: 'primary', model: 'primary-model',
+      fallbackModels: [{ provider: 'backup', model: 'backup-model', reasoningEffort: 'low' }],
+    }],
+  })
+  assert.ok(valid.tools.has('dsh_omo_task'))
+
+  for (const roleRoute of [
+    { role: 'explore', fallbackModels: [{ provider: 'backup', model: 'backup-model' }] },
+    { role: 'explore', reasoningEffort: 'high', fallbackModels: [{ provider: 'backup', model: 'backup-model' }] },
+    { role: 'explore', fallbackModels: [] },
+  ]) {
+    const fixture = makeContext()
+    assert.throws(() => apply(fixture.ctx, { ...baseConfig, roleRoutes: [roleRoute] }), /fallbackModels require an explicit provider\/model pin/u)
+    assert.equal(fixture.tools.size, 0)
+  }
+
+  const duplicatePrimary = makeContext()
+  assert.throws(() => apply(duplicatePrimary.ctx, {
+    ...baseConfig,
+    roleRoutes: [{
+      role: 'explore', provider: 'primary', model: 'primary-model',
+      fallbackModels: [{ provider: 'primary', model: 'primary-model' }],
+    }],
+  }), /must not contain duplicate provider\/model candidates/u)
+  assert.equal(duplicatePrimary.tools.size, 0)
+
+  const unsupportedTuning = makeContext()
+  assert.throws(() => apply(unsupportedTuning.ctx, {
+    ...baseConfig,
+    roleRoutes: [{
+      role: 'explore', provider: 'primary', model: 'primary-model',
+      fallbackModels: [{ provider: 'backup', model: 'backup-model', maxTokens: 128 }],
+    }],
+  }), /contains unsupported field "maxTokens"/u)
+  assert.equal(unsupportedTuning.tools.size, 0)
+
+  const tooMany = makeContext()
+  assert.throws(() => apply(tooMany.ctx, {
+    ...baseConfig,
+    roleRoutes: [{
+      role: 'explore', provider: 'primary', model: 'primary-model',
+      fallbackModels: [1, 2, 3, 4].map(index => ({ provider: `backup-${index}`, model: `model-${index}` })),
+    }],
+  }), /may contain at most 3 candidates/u)
+  assert.equal(tooMany.tools.size, 0)
 })
 
 test('rejects unknown role routes and incomplete model routes', async () => {

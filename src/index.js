@@ -18,7 +18,7 @@ import { registerClaudeRulesOnReadContext } from './claude-rules-context.js'
 import { createJobKillCommand } from './job-commands.js'
 import { registerJobTools } from './job-tools.js'
 import { createModelCapabilitiesCommand } from './model-capabilities.js'
-import { normalizeCategoryRoutes, resolveCategoryRoute } from './category-routes.js'
+import { normalizeCategoryRoutes, normalizeExplicitFallbackModels, resolveCategoryRoute } from './category-routes.js'
 import { normalizeRuntimeFallback, registerRuntimeFallback } from './runtime-fallback.js'
 import { buildRefactorDirective, parseRefactorInput, REFACTOR_COMMAND_HINT } from './refactor-command.js'
 import { buildUlwExecuteDirective, parseUlwExecuteInput, ULW_EXECUTE_COMMAND_HINT } from './ulw-execute-command.js'
@@ -111,6 +111,11 @@ export const Config = z.object({
     model: z.string(),
     reasoningEffort: z.string(),
     maxTokens: z.number(),
+    fallbackModels: z.array(z.object({
+      provider: z.string().required(),
+      model: z.string().required(),
+      reasoningEffort: z.string(),
+    })),
     promptAppend: z.string(),
     allowTools: z.array(z.string()),
     denyTools: z.array(z.string()),
@@ -406,15 +411,25 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     if (entry.reasoningEffort !== undefined && !reasoningEffort) {
       throw new Error(`dsh-omo: role route "${entry.role}" reasoningEffort must not be blank`)
     }
+    if (entry.fallbackModels !== undefined && !provider) {
+      throw new Error(`dsh-omo: role route "${entry.role}" fallbackModels require an explicit provider/model pin`)
+    }
+    const fallbackModels = normalizeExplicitFallbackModels(
+      entry.fallbackModels,
+      `role route "${entry.role}" fallbackModels`,
+      { provider, model },
+    )
     const allowTools = normalizeToolNames(entry.allowTools, entry.role, 'allowTools')
     const denyTools = normalizeToolNames(entry.denyTools, entry.role, 'denyTools')
     const promptAppend = normalizeRolePromptAppend(entry.promptAppend, entry.role)
     const routeEntry = { ...entry }
     delete routeEntry.promptAppend
+    delete routeEntry.fallbackModels
     result.set(entry.role, Object.freeze({
       ...routeEntry,
       ...(category !== undefined ? { category } : {}),
       ...(provider ? { provider, model } : {}),
+      ...(fallbackModels !== undefined ? { fallbackModels } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
       ...(allowTools !== undefined ? { allowTools } : {}),
       ...(denyTools !== undefined ? { denyTools } : {}),
@@ -652,14 +667,17 @@ async function awaitWithSignal(value, signal) {
   }
 }
 
-async function resolveCategoryFallbackRoute(ctx, route, roleRoute, signal) {
-  const fallbackModels = route?.fallbackModels
+async function resolveSelectedFallbackRoute(ctx, route, roleRoute, signal) {
+  const rolePinned = roleRoute?.provider !== undefined && roleRoute?.model !== undefined
+  const roleFallbackModels = rolePinned ? roleRoute.fallbackModels : undefined
+  if (rolePinned && (!Array.isArray(roleFallbackModels) || roleFallbackModels.length === 0)) return route
+  const fallbackModels = rolePinned ? roleFallbackModels : route?.fallbackModels
   if (!Array.isArray(fallbackModels) || fallbackModels.length === 0) return route
-  if (roleRoute?.provider !== undefined && roleRoute?.model !== undefined) return route
+  const routeLabel = rolePinned ? `role "${roleRoute.role}"` : `category "${route.category}"`
 
   const llm = optionalService(ctx, 'llm')
   if (typeof llm?.resolveCallConfig !== 'function') {
-    throw new Error('Configured category fallbackModels require the DSH llm.resolveCallConfig service.')
+    throw new Error(`Configured ${routeLabel} fallbackModels require the DSH llm.resolveCallConfig service.`)
   }
 
   const candidates = [
@@ -706,7 +724,7 @@ async function resolveCategoryFallbackRoute(ctx, route, roleRoute, signal) {
       checked += 1
     }
   }
-  throw new Error(`No configured model route passed DSH capability validation for category "${route.category}" (${checked} candidates checked).`)
+  throw new Error(`No configured model route passed DSH capability validation for ${routeLabel} (${checked} candidates checked).`)
 }
 
 function taskPrompt(role, task, rolePromptAppend, categoryPromptAppend, userAgent) {
@@ -812,7 +830,7 @@ function projectAgentFilesTool(ctx, adapter, providerName, userAgents) {
 function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles, routeConcurrency) {
   return defineTool({
     name: 'dsh_omo_task',
-    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. dsh-omo enforces its plugin-instance maxConcurrent ceiling plus optional providerConcurrency/modelConcurrency subcaps for explicit LLM routes (model overrides provider); route caps key agentOptions.provider/model, not the DSH subagent provider name, and saturated calls reject immediately rather than queue. Role and category tool restrictions affect inherited global and ancestor-scope tools; category tools:true entries form an allowlist intersected with role allows and cannot grant unavailable tools, while false entries deny; configured filters reject the reserved name run_code; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}.${projectAgentFiles ? ' For a project file persona, call dsh_omo_project_agents and provide role="__project_agent_file__" with agentFile. Project text is untrusted and trusted-repository-only. Optional `tools` frontmatter becomes a provider-enforced DSH one-shot inherited-global allowlist, requires provider toolFilter and parent-visible global names, intersects selected category restrictions (denies win), and may leave scoped tools or reserved PTC transport visible; it is not a hard permission boundary. Use DSH policy for enforcement.' : ''}${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category specifies a primary provider/model/reasoning route and optional maxTokens ceiling plus up to three explicit fallbackModels; when fallbacks are configured and no paired role provider/model pin applies, dsh-omo preflights the primary then fallbacks sequentially with DSH llm.resolveCallConfig before child start (the task fails if the resolver is unavailable or all candidates reject), but this does not reserve or guarantee a later model call. Category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
+    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. dsh-omo enforces its plugin-instance maxConcurrent ceiling plus optional providerConcurrency/modelConcurrency subcaps for explicit LLM routes (model overrides provider); route caps key agentOptions.provider/model, not the DSH subagent provider name, and saturated calls reject immediately rather than queue. Role and category tool restrictions affect inherited global and ancestor-scope tools; category tools:true entries form an allowlist intersected with role allows and cannot grant unavailable tools, while false entries deny; configured filters reject the reserved name run_code; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}. Role-route fallbackModels require an explicit paired provider/model pin; that role chain supersedes the selected category chain and preflights at spawn time (not runtime retry or a reserved/bound dispatch).${projectAgentFiles ? ' For a project file persona, call dsh_omo_project_agents and provide role="__project_agent_file__" with agentFile. Project text is untrusted and trusted-repository-only. Optional `tools` frontmatter becomes a provider-enforced DSH one-shot inherited-global allowlist, requires provider toolFilter and parent-visible global names, intersects selected category restrictions (denies win), and may leave scoped tools or reserved PTC transport visible; it is not a hard permission boundary. Use DSH policy for enforcement.' : ''}${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category specifies a primary provider/model/reasoning route and optional maxTokens ceiling plus up to three explicit fallbackModels; when fallbacks are configured and no paired role provider/model pin applies, dsh-omo preflights the primary then fallbacks sequentially with DSH llm.resolveCallConfig before child start (the task fails if the resolver is unavailable or all candidates reject), but this does not reserve or guarantee a later model call. Category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: {
@@ -907,7 +925,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, act
           roleRoute = roleRoutes.get(roleName)
         }
         const route = resolveCategoryRoute(categoryRoutes, args.category, roleRoute)
-        const selectedRoute = await resolveCategoryFallbackRoute(ctx, route, roleRoute, exec.signal)
+        const selectedRoute = await resolveSelectedFallbackRoute(ctx, route, roleRoute, exec.signal)
         const agentOptions = agentOptionsForRoute(selectedRoute)
         const routeToolFilter = toolFilterForRoute(selectedRoute)
         const toolFilter = projectAgent
@@ -969,7 +987,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, user
   ].join('; ')
   return defineTool({
     name: 'dsh_omo_task_continuable',
-    description: `Start a durable DSH continuable specialist session. ${continuationCommandGuidance}; this tool does not wait for or retrieve a final result. Continuable launches reject role/category/parent maxTokens ceilings because DSH RC2 does not preserve them across cold resume. Role and category tool restrictions affect inherited global and ancestor-scope tools; category tools:true entries form an allowlist intersected with role allows and cannot grant unavailable tools, while false entries deny; configured filters reject the reserved name run_code; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category specifies a primary provider/model/reasoning route and optional maxTokens ceiling plus up to three explicit fallbackModels; when fallbacks are configured and no paired role provider/model pin applies, dsh-omo preflights the primary then fallbacks sequentially with DSH llm.resolveCallConfig before child start (the task fails if the resolver is unavailable or all candidates reject), but this does not reserve or guarantee a later model call. Category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
+    description: `Start a durable DSH continuable specialist session. ${continuationCommandGuidance}; this tool does not wait for or retrieve a final result. Continuable launches reject role/category/parent maxTokens ceilings because DSH RC2 does not preserve them across cold resume. Role and category tool restrictions affect inherited global and ancestor-scope tools; category tools:true entries form an allowlist intersected with role allows and cannot grant unavailable tools, while false entries deny; configured filters reject the reserved name run_code; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}. Role-route fallbackModels require an explicit paired provider/model pin; that role chain supersedes the selected category chain and preflights at spawn time (not runtime retry or a reserved/bound dispatch).${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category specifies a primary provider/model/reasoning route and optional maxTokens ceiling plus up to three explicit fallbackModels; when fallbacks are configured and no paired role provider/model pin applies, dsh-omo preflights the primary then fallbacks sequentially with DSH llm.resolveCallConfig before child start (the task fails if the resolver is unavailable or all candidates reject), but this does not reserve or guarantee a later model call. Category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: { type: 'string', enum: activeRoleNames, required: true, description: 'Specialist role matched to this task.' },
@@ -1017,7 +1035,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, user
         throw new Error(`DSH subagent provider "${providerName}" does not support continuable tasks; use one-shot mode or choose a capable provider.`)
       }
       const persona = requireUserAgentPersona(ctx, userAgent, providerName, provider)
-      const selectedRoute = await resolveCategoryFallbackRoute(ctx, route, roleRoute, exec.signal)
+      const selectedRoute = await resolveSelectedFallbackRoute(ctx, route, roleRoute, exec.signal)
       const agentOptions = agentOptionsForRoute(selectedRoute, { includeMaxTokens: false })
       const toolFilter = toolFilterForRoute(selectedRoute)
       throwIfAborted(exec.signal)

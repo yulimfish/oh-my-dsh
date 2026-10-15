@@ -8,7 +8,7 @@ const MAX_CATEGORY_TOOL_NAME_BYTES = 128
 const MAX_PROVIDER_CHARS = 128
 const MAX_MODEL_CHARS = 256
 const MAX_REASONING_EFFORT_CHARS = 64
-const MAX_CATEGORY_FALLBACK_MODELS = 3
+const MAX_EXPLICIT_FALLBACK_MODELS = 3
 const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'fallbackModels', 'disable', 'promptAppend', 'description', 'tools'])
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u
 const CATEGORY_TOOL_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u
@@ -87,14 +87,13 @@ function normalizeCategoryTools(value, categoryName) {
   })
 }
 
-function normalizeCategoryFallbackModels(value, categoryName, primary) {
+export function normalizeExplicitFallbackModels(value, label, primary) {
   if (value === undefined) return undefined
-  const label = `category route "${categoryName}" fallbackModels`
   if (!Array.isArray(value)) {
-    throw new TypeError(`${label} must be an array with at most ${MAX_CATEGORY_FALLBACK_MODELS} explicit provider/model candidates`)
+    throw new TypeError(`${label} must be an array with at most ${MAX_EXPLICIT_FALLBACK_MODELS} explicit provider/model candidates`)
   }
-  if (value.length > MAX_CATEGORY_FALLBACK_MODELS) {
-    throw new TypeError(`${label} may contain at most ${MAX_CATEGORY_FALLBACK_MODELS} candidates`)
+  if (value.length > MAX_EXPLICIT_FALLBACK_MODELS) {
+    throw new TypeError(`${label} may contain at most ${MAX_EXPLICIT_FALLBACK_MODELS} candidates`)
   }
   if (value.length === 0) return undefined
 
@@ -217,7 +216,7 @@ export function normalizeCategoryRoutes(entries) {
     const promptAppend = normalizeCategoryPromptAppend(entry.promptAppend, name)
     const description = normalizeCategoryDescription(entry.description, name)
     const categoryToolFilters = normalizeCategoryTools(entry.tools, name)
-    const fallbackModels = normalizeCategoryFallbackModels(entry.fallbackModels, name, { provider, model })
+    const fallbackModels = normalizeExplicitFallbackModels(entry.fallbackModels, `category route "${name}" fallbackModels`, { provider, model })
 
     routes.set(name, Object.freeze({
       name,
@@ -252,13 +251,17 @@ function normalizeRolePin(roleRoute) {
 
 /**
  * Resolve explicit category over the role's default category. A role's explicit
- * provider/model pin, reasoning effort, and maxTokens override the category;
- * paired provider/model pins bypass category fallback preflight. Category
- * promptAppend is carried separately from role promptAppend and filters.
+ * provider/model pin, reasoning effort, maxTokens, and fallback chain override
+ * the category; paired pins bypass category fallback preflight unless the role
+ * defines its own explicit fallback chain. Category promptAppend is carried
+ * separately from role promptAppend and filters.
  */
 export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute) {
   if (roleRoute !== undefined && !isRecord(roleRoute)) {
     throw new TypeError('roleRoute must be an object when provided')
+  }
+  if (roleRoute?.fallbackModels !== undefined && !normalizeRolePin(roleRoute)) {
+    throw new TypeError('role route fallbackModels require an explicit provider/model pin')
   }
 
   const hasExplicitCategory = explicitCategory !== undefined
@@ -312,8 +315,11 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
   const maxTokens = roleMaxTokens ?? categoryRoute.maxTokens
   if (maxTokens === undefined) delete resolved.maxTokens
   else resolved.maxTokens = maxTokens
-  if (categoryRoute.fallbackModels === undefined) delete resolved.fallbackModels
-  else resolved.fallbackModels = categoryRoute.fallbackModels
+  const fallbackModels = rolePin !== undefined && roleRoute?.fallbackModels !== undefined
+    ? roleRoute.fallbackModels
+    : categoryRoute.fallbackModels
+  if (fallbackModels === undefined) delete resolved.fallbackModels
+  else resolved.fallbackModels = fallbackModels
   if (categoryRoute.promptAppend === undefined) delete resolved.categoryPromptAppend
   else resolved.categoryPromptAppend = categoryRoute.promptAppend
   if (categoryRoute.categoryAllowTools === undefined) delete resolved.categoryAllowTools
