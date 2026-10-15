@@ -1657,7 +1657,7 @@ test('passes project-agent tools as a one-shot allowlist intersected with catego
   apply(fixture.ctx, {
     ...baseConfig,
     enableProjectAgentFiles: true,
-    categoryRoutes: [{ name: 'safe', provider: 'route-provider', model: 'route-model', tools: { bash: false } }],
+    categoryRoutes: [{ name: 'safe', provider: 'route-provider', model: 'route-model', tools: { bash: false, grep: true } }],
   })
   const roster = await fixture.tools.get('dsh_omo_project_agents').execute({}, {
     agent: parent, signal: new AbortController().signal,
@@ -1669,7 +1669,7 @@ test('passes project-agent tools as a one-shot allowlist intersected with catego
   await fixture.tools.get('dsh_omo_task').execute({
     role: '__project_agent_file__', agentFile: 'repo-auditor', category: 'safe', task: 'Review safely.',
   }, { agent: parent, signal: new AbortController().signal })
-  assert.deepEqual(fixture.starts[0].request.toolFilter, { allow: ['read', 'grep'], deny: ['bash'] })
+  assert.deepEqual(fixture.starts[0].request.toolFilter, { allow: ['grep'], deny: ['bash'] })
 })
 
 test('fails closed when project-agent tool allowlists cannot be enforced', async t => {
@@ -1894,7 +1894,7 @@ test('requires live filesystem and session services when project agent files are
   assert.equal(fixture.tools.size, 0)
 })
 
-test('composes category tools false entries as monotonic inherited-tool denies', async () => {
+test('composes category tool allow/deny entries as monotonic inherited-tool filters', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
     ...baseConfig,
@@ -1903,6 +1903,7 @@ test('composes category tools false entries as monotonic inherited-tool denies',
       { name: 'restricted', provider: 'p', model: 'm', tools: { read: false, bash: false, grep: true } },
       { name: 'true-only', provider: 'p2', model: 'm2', tools: { read: true } },
       { name: 'deny-only', provider: 'p3', model: 'm3', tools: { terminal: false } },
+      { name: 'disjoint', provider: 'p4', model: 'm4', tools: { terminal: true } },
     ],
     roleRoutes: [{ role: 'explore', category: 'restricted', allowTools: ['read', 'grep', 'web_search'], denyTools: ['bash'] }],
   })
@@ -1916,15 +1917,17 @@ test('composes category tools false entries as monotonic inherited-tool denies',
   await continuable.execute({ role: 'explore', category: 'restricted', task: 'Apply category denies durably' }, { agent: parent, signal })
   await continuable.execute({ role: 'explore', task: 'Apply role-default category denies durably' }, { agent: parent, signal })
   await oneShot.execute({ role: 'quick', category: 'deny-only', task: 'Apply category denies without role filters' }, { agent: parent, signal })
-  await oneShot.execute({ role: 'quick', category: 'true-only', task: 'Do not turn category true into a grant' }, { agent: parent, signal })
+  await oneShot.execute({ role: 'quick', category: 'true-only', task: 'Apply the category inherited-tool allowlist' }, { agent: parent, signal })
+  await oneShot.execute({ role: 'explore', category: 'disjoint', task: 'Intersect category and role allowlists' }, { agent: parent, signal })
 
-  const expectedFilter = { allow: ['grep', 'web_search'], deny: ['bash', 'read'] }
+  const expectedFilter = { allow: ['grep'], deny: ['bash', 'read'] }
   assert.deepEqual(fixture.starts[0].request.toolFilter, expectedFilter)
   assert.deepEqual(fixture.starts[1].request.toolFilter, expectedFilter)
   assert.deepEqual(fixture.continuableStarts[0].request.toolFilter, expectedFilter)
   assert.deepEqual(fixture.continuableStarts[1].request.toolFilter, expectedFilter)
   assert.deepEqual(fixture.starts[2].request.toolFilter, { deny: ['terminal'] })
-  assert.equal(Object.hasOwn(fixture.starts[3].request, 'toolFilter'), false)
+  assert.deepEqual(fixture.starts[3].request.toolFilter, { allow: ['read'] })
+  assert.deepEqual(fixture.starts[4].request.toolFilter, { allow: [], deny: ['bash'] })
 })
 
 test('applies per-role token and reasoning overrides without replacing the parent model route', async () => {

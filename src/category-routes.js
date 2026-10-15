@@ -60,7 +60,8 @@ function normalizeCategoryTools(value, categoryName) {
   if (keys.length > MAX_CATEGORY_TOOL_RULES) {
     throw new TypeError(`${label} must contain at most ${MAX_CATEGORY_TOOL_RULES} tool rules`)
   }
-  const disabledTools = []
+  const allowTools = []
+  const denyTools = []
   for (const key of keys) {
     if (typeof key !== 'string' || !key || key.trim() !== key
       || key.length > MAX_CATEGORY_TOOL_NAME_BYTES
@@ -72,9 +73,14 @@ function normalizeCategoryTools(value, categoryName) {
     if (typeof enabled !== 'boolean') {
       throw new TypeError(`${label} values must be booleans`)
     }
-    if (!enabled) disabledTools.push(key)
+    if (enabled) allowTools.push(key)
+    else denyTools.push(key)
   }
-  return disabledTools.length > 0 ? Object.freeze(disabledTools) : undefined
+  if (allowTools.length === 0 && denyTools.length === 0) return undefined
+  return Object.freeze({
+    ...(allowTools.length > 0 ? { allowTools: Object.freeze(allowTools) } : {}),
+    ...(denyTools.length > 0 ? { denyTools: Object.freeze(denyTools) } : {}),
+  })
 }
 
 function normalizeMaxTokens(value, label) {
@@ -117,7 +123,8 @@ function createReadonlyRegistry(routes) {
  * Validate one provider/model route per category plus optional reasoning,
  * positive safe-integer token ceiling, task-delegation disable flag, bounded
  * literal prompt guidance, bounded single-line tool-prompt descriptions, and
- * a bounded boolean tool map whose false entries become inherited-tool denies.
+ * a bounded boolean tool map whose true/false entries become inherited-tool
+ * allow/deny filters.
  * Routes cannot declare chains or fallback.
  */
 export function normalizeCategoryRoutes(entries) {
@@ -162,7 +169,7 @@ export function normalizeCategoryRoutes(entries) {
     }
     const promptAppend = normalizeCategoryPromptAppend(entry.promptAppend, name)
     const description = normalizeCategoryDescription(entry.description, name)
-    const categoryDenyTools = normalizeCategoryTools(entry.tools, name)
+    const categoryToolFilters = normalizeCategoryTools(entry.tools, name)
 
     routes.set(name, Object.freeze({
       name,
@@ -173,7 +180,8 @@ export function normalizeCategoryRoutes(entries) {
       disable,
       ...(promptAppend !== undefined ? { promptAppend } : {}),
       ...(description !== undefined ? { description } : {}),
-      ...(categoryDenyTools !== undefined ? { categoryDenyTools } : {}),
+      ...(categoryToolFilters?.allowTools !== undefined ? { categoryAllowTools: categoryToolFilters.allowTools } : {}),
+      ...(categoryToolFilters?.denyTools !== undefined ? { categoryDenyTools: categoryToolFilters.denyTools } : {}),
     }))
   }
 
@@ -256,6 +264,8 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
   else resolved.maxTokens = maxTokens
   if (categoryRoute.promptAppend === undefined) delete resolved.categoryPromptAppend
   else resolved.categoryPromptAppend = categoryRoute.promptAppend
+  if (categoryRoute.categoryAllowTools === undefined) delete resolved.categoryAllowTools
+  else resolved.categoryAllowTools = categoryRoute.categoryAllowTools
   if (categoryRoute.categoryDenyTools === undefined) delete resolved.categoryDenyTools
   else resolved.categoryDenyTools = categoryRoute.categoryDenyTools
   return Object.freeze(resolved)

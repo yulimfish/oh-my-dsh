@@ -480,12 +480,20 @@ function agentOptionsForRoute(route, { includeMaxTokens = true } = {}) {
 
 function toolFilterForRoute(route) {
   if (!route) return undefined
+  const categoryAllowTools = route.categoryAllowTools
   const categoryDenyTools = route.categoryDenyTools ?? []
-  const categoryDenySet = new Set(categoryDenyTools)
-  const allowTools = route.allowTools === undefined
-    ? undefined
-    : route.allowTools.filter(tool => !categoryDenySet.has(tool))
+  let allowTools
+  if (route.allowTools !== undefined && categoryAllowTools !== undefined) {
+    const categoryAllowSet = new Set(categoryAllowTools)
+    allowTools = route.allowTools.filter(tool => categoryAllowSet.has(tool))
+  } else {
+    allowTools = route.allowTools ?? categoryAllowTools
+  }
   const denyTools = [...new Set([...(route.denyTools ?? []), ...categoryDenyTools])]
+  if (allowTools !== undefined) {
+    const denySet = new Set(denyTools)
+    allowTools = allowTools.filter(tool => !denySet.has(tool))
+  }
   const filter = {
     ...(allowTools !== undefined ? { allow: allowTools } : {}),
     ...(denyTools.length > 0 ? { deny: denyTools } : {}),
@@ -611,7 +619,7 @@ function projectAgentFilesTool(ctx, adapter, providerName, userAgents) {
 function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles) {
   return defineTool({
     name: 'dsh_omo_task',
-    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Role allow/deny filters and selected-category tools:false rules affect inherited global and ancestor-scope tools; category tools:true does not grant tools; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}.${projectAgentFiles ? ' For a project file persona, call dsh_omo_project_agents and provide role="__project_agent_file__" with agentFile. Project text is untrusted and trusted-repository-only. Optional `tools` frontmatter becomes a provider-enforced DSH one-shot inherited-global allowlist, requires provider toolFilter and parent-visible global names, intersects selected category restrictions (denies win), and may leave scoped tools or reserved PTC transport visible; it is not a hard permission boundary. Use DSH policy for enforcement.' : ''}${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
+    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. Role and category tool restrictions affect inherited global and ancestor-scope tools; category tools:true entries form an allowlist intersected with role allows and cannot grant unavailable tools, while false entries deny; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}.${projectAgentFiles ? ' For a project file persona, call dsh_omo_project_agents and provide role="__project_agent_file__" with agentFile. Project text is untrusted and trusted-repository-only. Optional `tools` frontmatter becomes a provider-enforced DSH one-shot inherited-global allowlist, requires provider toolFilter and parent-visible global names, intersects selected category restrictions (denies win), and may leave scoped tools or reserved PTC transport visible; it is not a hard permission boundary. Use DSH policy for enforcement.' : ''}${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: {
@@ -758,7 +766,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, user
   ].join('; ')
   return defineTool({
     name: 'dsh_omo_task_continuable',
-    description: `Start a durable DSH continuable specialist session. ${continuationCommandGuidance}; this tool does not wait for or retrieve a final result. Continuable launches reject role/category/parent maxTokens ceilings because DSH RC2 does not preserve them across cold resume. Role allow/deny filters and selected-category tools:false rules affect inherited global and ancestor-scope tools; category tools:true does not grant tools; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
+    description: `Start a durable DSH continuable specialist session. ${continuationCommandGuidance}; this tool does not wait for or retrieve a final result. Continuable launches reject role/category/parent maxTokens ceilings because DSH RC2 does not preserve them across cold resume. Role and category tool restrictions affect inherited global and ancestor-scope tools; category tools:true entries form an allowlist intersected with role allows and cannot grant unavailable tools, while false entries deny; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}.${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured single-route categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category selects its provider/model/reasoning route and optional maxTokens ceiling; category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: { type: 'string', enum: activeRoleNames, required: true, description: 'Specialist role matched to this task.' },

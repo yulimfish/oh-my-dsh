@@ -202,18 +202,24 @@ test('normalizes bounded single-line category descriptions for chooser prompts',
   }
 })
 
-test('normalizes category tool maps to bounded false-only deny rules', () => {
+test('normalizes category tool maps to bounded inherited-tool allow/deny rules', () => {
   const categoryRoutes = normalizeCategoryRoutes([
     { name: 'restricted', provider: 'p', model: 'm', tools: { read: false, grep: true } },
     { name: 'grants-none', provider: 'p2', model: 'm2', tools: { read: true } },
   ])
+  assert.deepEqual(categoryRoutes.get('restricted').categoryAllowTools, ['grep'])
   assert.deepEqual(categoryRoutes.get('restricted').categoryDenyTools, ['read'])
+  assert.equal(Object.isFrozen(categoryRoutes.get('restricted').categoryAllowTools), true)
   assert.equal(Object.isFrozen(categoryRoutes.get('restricted').categoryDenyTools), true)
+  assert.deepEqual(categoryRoutes.get('grants-none').categoryAllowTools, ['read'])
   assert.equal(categoryRoutes.get('grants-none').categoryDenyTools, undefined)
   const exactByteLimitName = 'é'.repeat(64)
   assert.deepEqual(normalizeCategoryRoutes([
     { name: 'byte-limit', provider: 'p3', model: 'm3', tools: { [exactByteLimitName]: false } },
   ]).get('byte-limit').categoryDenyTools, [exactByteLimitName])
+  assert.deepEqual(normalizeCategoryRoutes([
+    { name: 'byte-allow', provider: 'p3', model: 'm3', tools: { [exactByteLimitName]: true } },
+  ]).get('byte-allow').categoryAllowTools, [exactByteLimitName])
   assert.throws(() => normalizeCategoryRoutes([
     { name: 'byte-over-limit', provider: 'p3', model: 'm3', tools: { ['é'.repeat(65)]: false } },
   ]), /invalid tool name/u)
@@ -225,6 +231,7 @@ test('normalizes category tool maps to bounded false-only deny rules', () => {
   const resolved = resolveCategoryRoute(categoryRoutes, 'restricted', {
     allowTools: Object.freeze(['read', 'grep']), denyTools: Object.freeze(['bash']),
   })
+  assert.deepEqual(resolved.categoryAllowTools, ['grep'])
   assert.deepEqual(resolved.categoryDenyTools, ['read'])
   assert.deepEqual(resolved.allowTools, ['read', 'grep'])
   assert.deepEqual(resolved.denyTools, ['bash'])
