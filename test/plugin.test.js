@@ -19,11 +19,15 @@ function makeContext(options = {}) {
   const disposals = []
   const effects = []
   const events = new Map()
+  const guards = new Set()
   const skillProviders = new Map()
   const skillInvalidations = []
   const ctx = {
     get: key => options.services?.[key],
-    tools: { register: definition => { tools.set(definition.name, definition); return () => tools.delete(definition.name) } },
+    tools: {
+      register: definition => { tools.set(definition.name, definition); return () => tools.delete(definition.name) },
+      guard: guard => { guards.add(guard); return () => guards.delete(guard) },
+    },
     subagents: {
       start: async (provider, request) => {
         starts.push({ provider, request })
@@ -75,7 +79,7 @@ function makeContext(options = {}) {
     on: (event, listener) => { events.set(event, listener); return ctx },
     logger: { warn: () => {} },
   }
-  return { ctx, tools, sections, commands, skills, skillProviders, skillInvalidations, starts, continuableStarts, continuableChildren, descendantCalls, interrupts, followups, disposals, effects, events }
+  return { ctx, tools, sections, commands, skills, skillProviders, skillInvalidations, starts, continuableStarts, continuableChildren, descendantCalls, interrupts, followups, disposals, effects, events, guards }
 }
 
 const baseConfig = {
@@ -96,6 +100,7 @@ const baseConfig = {
   enableRootReadmeContext: false,
   enableReadmeOnRead: false,
   enableClaudeRulesOnRead: false,
+  enableWriteExistingFileGuard: false,
   projectSkillDirs: ['.opencode/skills', '.claude/skills'],
   disabledSkills: [],
   disabledOmoCommands: [],
@@ -115,6 +120,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).disabledOmoRoles, [])
   assert.deepEqual(Config({ disabledOmoRoles: ['architect', 'reviewer'] }).disabledOmoRoles, ['architect', 'reviewer'])
   assert.deepEqual(Config({}).userAgents, [])
+  assert.equal(Config({}).enableWriteExistingFileGuard, false)
+  assert.equal(Config({ enableWriteExistingFileGuard: true }).enableWriteExistingFileGuard, true)
   assert.deepEqual(Config({ userAgents: [{ name: 'docs-auditor', description: 'Review docs.', prompt: 'Check for gaps.', mode: 'subagent' }] }).userAgents, [
     { name: 'docs-auditor', description: 'Review docs.', prompt: 'Check for gaps.', mode: 'subagent' },
   ])
@@ -180,7 +187,7 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
-  assert.match(status.text, /teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; lsp=present; sessionQuery=present; sessions=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -861,12 +868,12 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
   const readmeOnReadOnly = makeContext(prerequisites())
   apply(readmeOnReadOnly.ctx, { ...baseConfig, enableReadmeOnRead: true })
   assert.equal(typeof readmeOnReadOnly.events.get('tools/post-execute'), 'function')
-  assert.match(readmeOnReadOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /readmeOnRead=enabled; claudeRulesOnRead=disabled/u)
+  assert.match(readmeOnReadOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /readmeOnRead=enabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
 
   const rootSnapshotsOnly = makeContext(prerequisites())
   apply(rootSnapshotsOnly.ctx, { ...baseConfig, enableRootReadmeContext: true, enableRootAgentsContext: true })
   assert.equal(rootSnapshotsOnly.events.has('tools/post-execute'), false)
-  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled/u)
+  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
 
   const combined = makeContext(prerequisites())
   apply(combined.ctx, {
@@ -877,8 +884,57 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
     enableRootAgentsContext: true,
   })
   assert.equal(typeof combined.events.get('tools/post-execute'), 'function', 'independent on-read and root-context flags can be combined')
-  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled/u)
+  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; writeExistingFileGuard=disabled/u)
   assert.deepEqual(calls, [], 'combined registration/status remain free of runtime filesystem and Service calls')
+})
+
+test('mounts the opt-in existing-file guard only with full DSH contracts and disposes its Tool guard', async () => {
+  const services = { agents: { get: () => undefined }, sessions: { get: () => undefined } }
+  const fs = { resolve: async () => ({}), contains: () => true, lstat: async () => undefined, stat: async () => undefined }
+  const disabled = makeContext({ services, fs })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.guards.size, 0)
+  assert.equal(disabled.events.has('tools/pre-execute'), false)
+  assert.equal(disabled.events.has('tools/result'), false)
+
+  const missingCases = [
+    ['agents service', deps => { deps.services.agents = undefined }],
+    ['sessions.get', deps => { deps.services.sessions = {} }],
+    ['fs.resolve', deps => { delete deps.fs.resolve }],
+    ['fs.contains', deps => { delete deps.fs.contains }],
+    ['fs.lstat', deps => { delete deps.fs.lstat }],
+    ['fs.stat', deps => { delete deps.fs.stat }],
+    ['tools.guard', (_deps, fixture) => { fixture.ctx.tools.guard = undefined }],
+    ['ctx.on', (_deps, fixture) => { fixture.ctx.on = undefined }],
+    ['ctx.effect', (_deps, fixture) => { fixture.ctx.effect = undefined }],
+  ]
+  for (const [missingName, remove] of missingCases) {
+    const deps = { services: { ...services }, fs: { ...fs } }
+    const fixture = makeContext(deps)
+    remove(deps, fixture)
+    assert.throws(
+      () => apply(fixture.ctx, { ...baseConfig, enableWriteExistingFileGuard: true }),
+      /enableWriteExistingFileGuard requires DSH/u,
+      missingName,
+    )
+    assert.equal(fixture.events.size, 0, `${missingName} failure must not register hooks`)
+    assert.equal(fixture.tools.size, 0, `${missingName} failure must not register tools`)
+    assert.equal(fixture.guards.size, 0, `${missingName} failure must not register Tool guards`)
+  }
+
+  const enabled = makeContext({ services, fs })
+  apply(enabled.ctx, { ...baseConfig, enableWriteExistingFileGuard: true })
+  assert.equal(enabled.guards.size, 1)
+  for (const event of ['tools/pre-execute', 'tools/result', 'agent/created', 'agent/disposed']) {
+    assert.equal(typeof enabled.events.get(event), 'function', `${event} listener must be registered`)
+  }
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /writeExistingFileGuard=enabled/u)
+  assert.match(enabled.commands.get('omo').handler().text, /Write-existing-file guard: enabled/u)
+  assert.match(enabled.sections.find(section => section.name === 'dsh-omo:specialist-orchestration').text, /preflight classified an in-cwd regular file/u)
+  const guardEffect = enabled.effects.find(effect => effect.label === 'dsh-omo write-existing-file guard')
+  assert.ok(guardEffect)
+  await guardEffect.dispose()
+  assert.equal(enabled.guards.size, 0, 'unloading the integration removes the global monotonic Tool guard')
 })
 
 test('mounts the native Goal command only with Goals and opt-in Agent Teams tools only with the Host service', async () => {

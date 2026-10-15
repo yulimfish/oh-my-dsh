@@ -22,6 +22,7 @@ import { normalizeCategoryRoutes, resolveCategoryRoute } from './category-routes
 import { buildRefactorDirective, parseRefactorInput, REFACTOR_COMMAND_HINT } from './refactor-command.js'
 import { buildUlwExecuteDirective, parseUlwExecuteInput, ULW_EXECUTE_COMMAND_HINT } from './ulw-execute-command.js'
 import { normalizeUserAgents } from './user-agents.js'
+import { registerWriteExistingFileGuard } from './write-existing-file-guard.js'
 
 export const name = 'dsh-omo'
 export const inject = ['tools', 'subagents', 'systemPrompt', 'commands', 'skills', 'fs']
@@ -59,6 +60,7 @@ export const Config = z.object({
   enableRootReadmeContext: z.boolean().default(false),
   enableReadmeOnRead: z.boolean().default(false),
   enableClaudeRulesOnRead: z.boolean().default(false),
+  enableWriteExistingFileGuard: z.boolean().default(false),
   projectSkillDirs: z.array(z.string()).default([...DEFAULT_PROJECT_SKILL_DIRS]),
   enabledProjectSkills: z.union([z.array(z.string()), z.const(null)]),
   disabledProjectSkills: z.array(z.string()).default([]),
@@ -96,7 +98,7 @@ export const Config = z.object({
   })).default([]),
 })
 
-function buildUltraworkGuidance(disabledOmoCommands, activeRoleNames) {
+function buildUltraworkGuidance(disabledOmoCommands, activeRoleNames, writeExistingFileGuardEnabled) {
   const reviewRoles = ['reviewer', 'security'].filter(role => activeRoleNames.includes(role))
   const reviewRoleGuidance = reviewRoles.length > 0
     ? `Use the ${reviewRoles.map(role => `**${role}**`).join(' or ')} ${reviewRoles.length === 1 ? 'role' : 'roles'} for review tasks, but role prompts do not enforce read-only behavior.`
@@ -110,6 +112,9 @@ function buildUltraworkGuidance(disabledOmoCommands, activeRoleNames) {
   const planExecutionGuidance = disabledOmoCommands.has('ulw-execute')
     ? 'dsh-omo /ulw-execute is disabled by configuration.'
     : '/ulw-execute <existing plan name> is a bounded prompt-only adapter for an existing approved project plan: ask if missing or ambiguous; it does not invoke OMO hooks, use OMO history or agent selection, create boulder/notepad state, or perform worktree/PR/shipping/merge automation. Unsupported --worktree, --make-pr, and --ship flags are rejected.'
+  const writeGuardGuidance = writeExistingFileGuardEnabled
+    ? 'The opt-in write-existing-file guard grants one same-live-Agent case-insensitive Tool call named `write` only after a final successful `tools/result` (`isError: false`) for a case-insensitive call named `read` whose preflight classified an in-cwd regular file. Same-named custom Tools qualify, but a custom `read` Tool need not prove it returned file contents. Raw case-sensitive slash-delimited `.omo` segments bypass before normalization (including `.omo/..` aliases); `overwrite` boolean `true` or exact case-insensitive string `"true"` (not trimmed) also bypasses, and arguments pass through unchanged. Both bypasses are honored while a bounded decision slot is available; saturated ledgers may busy-deny them. Verified missing/outside targets normally pass below the caps, but capacity limits may busy-deny writes before/after classification. All write pass-throughs are token-bound; guard-relevant path changes, schema incompatibility, live-Agent identity changes, or effective bypass-status changes are rejected. Differently named writers, shell, and edit are not covered. Read/write preflights are non-atomic (TOCTOU); this is a UX aid, not a hard permission boundary.'
+    : 'The opt-in write-existing-file guard is disabled.'
   return `## Specialist orchestration
 
 You can delegate focused work with the **dsh_omo_task** tool. Its roles are: ${activeRoleNames.join(', ')}. Use independent specialists for separable exploration, documentation research, architecture advice, implementation, testing, and review; do not delegate duplicate work. You own the parent task, merge decisions, and final verification.
@@ -120,7 +125,7 @@ When the user says **ultrawork**, **ulw**, or requests a substantial multi-step 
 3. Inspect every worker's evidence and diff; do not accept a worker's completion claim as verification.
 4. Run the relevant project checks yourself (or have a test worker provide exact command output), fix failures, and report what was and was not verified.
 
-${reviewRoleGuidance} allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain available. For a hard boundary, verify DSH-native permission, sandbox, or tool-guard policy covers scoped tools and the reserved transport; dsh-omo does not install a per-worker hard guard. DSH retains authority over filesystem, shell, network, and approvals. One-shot delegation is the default and sends a host-attributed settlement notice followed by a bounded child-authored relay (untrusted evidence); use dsh_omo_task_continuable only when that optional tool is enabled and a durable child session is needed. ${taskListingGuidance} ${interruptionGuidance} ${planExecutionGuidance}`
+${reviewRoleGuidance} allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain available. For a hard boundary, verify DSH-native permission, sandbox, or tool-guard policy covers scoped tools and the reserved transport; dsh-omo does not install a per-worker hard guard. DSH retains authority over filesystem, shell, network, and approvals. One-shot delegation is the default and sends a host-attributed settlement notice followed by a bounded child-authored relay (untrusted evidence); use dsh_omo_task_continuable only when that optional tool is enabled and a durable child session is needed. ${taskListingGuidance} ${interruptionGuidance} ${planExecutionGuidance} ${writeGuardGuidance}`
 }
 
 function optionalService(ctx, name) {
@@ -864,7 +869,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
               `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}.`,
               'Presence does not prove readiness or health. This command does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
@@ -873,7 +878,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
         if (rawInput) return { kind: 'error', text: 'Usage: /omo [status].' }
         return {
           kind: 'success',
-          text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). LSP navigation: ${config.enableLspTools ? 'enabled' : 'disabled'} (two read-only queries; provider-dependent and not a path authorization boundary). Root AGENTS context: ${config.enableRootAgentsContext ? 'enabled' : 'disabled'} (bounded cwd/AGENTS.md snapshot for new Agent scopes before their first step; root-only, no watcher, repository text is untrusted). Root README context: ${config.enableRootReadmeContext ? 'enabled' : 'disabled'} (opt-in root README.md snapshot for Agent prompt context). README-on-read: ${config.enableReadmeOnRead ? 'enabled' : 'disabled'} (post-read injection; root README skipped when the root snapshot is enabled). Claude rules after read/write/edit: ${config.enableClaudeRulesOnRead ? 'enabled' : 'disabled'} (legacy opt-in flag; no verified multiedit schema). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
+          text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). LSP navigation: ${config.enableLspTools ? 'enabled' : 'disabled'} (two read-only queries; provider-dependent and not a path authorization boundary). Root AGENTS context: ${config.enableRootAgentsContext ? 'enabled' : 'disabled'} (bounded cwd/AGENTS.md snapshot for new Agent scopes before their first step; root-only, no watcher, repository text is untrusted). Root README context: ${config.enableRootReadmeContext ? 'enabled' : 'disabled'} (opt-in root README.md snapshot for Agent prompt context). README-on-read: ${config.enableReadmeOnRead ? 'enabled' : 'disabled'} (post-read injection; root README skipped when the root snapshot is enabled). Claude rules after read/write/edit: ${config.enableClaudeRulesOnRead ? 'enabled' : 'disabled'} (legacy opt-in flag; no verified multiedit schema). Write-existing-file guard: ${config.enableWriteExistingFileGuard ? 'enabled' : 'disabled'} (final isError:false result for case-insensitive read of preflighted in-cwd regular file required before one same-Agent case-insensitive write; same-named custom Tools count; raw .omo slash-segment including .omo/.. aliases or overwrite boolean true/exact case-insensitive "true" without trimming bypass; args unchanged; verified missing/outside normally pass below caps, but caps may busy-deny writes; UX only, read/write TOCTOU remains). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
         }
       },
     },
@@ -995,6 +1000,14 @@ export function apply(ctx, rawConfig) {
     || typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
     throw new Error('dsh-omo: enableClaudeRulesOnRead requires DSH agents.get, sessions.get, fs.resolve/contains/lstat/stat/readBytes/listDir, and Cordis ctx.on/ctx.effect')
   }
+  if (config.enableWriteExistingFileGuard && (!agentsService || typeof agentsService.get !== 'function'
+    || !sessionsService || typeof sessionsService.get !== 'function'
+    || !ctx.fs || typeof ctx.fs.resolve !== 'function' || typeof ctx.fs.contains !== 'function'
+    || typeof ctx.fs.lstat !== 'function' || typeof ctx.fs.stat !== 'function'
+    || !ctx.tools || typeof ctx.tools.guard !== 'function'
+    || typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
+    throw new Error('dsh-omo: enableWriteExistingFileGuard requires DSH agents.get, sessions.get, fs.resolve/contains/lstat/stat, Cordis ctx.tools.guard, ctx.on, and ctx.effect')
+  }
   const statusSnapshot = Object.freeze({
     flags: Object.freeze({
       continuableTasks: config.enableContinuableTasks === true,
@@ -1009,6 +1022,7 @@ export function apply(ctx, rawConfig) {
       rootReadmeContext: config.enableRootReadmeContext === true,
       readmeOnRead: config.enableReadmeOnRead === true,
       claudeRulesOnRead: config.enableClaudeRulesOnRead === true,
+      writeExistingFileGuard: config.enableWriteExistingFileGuard === true,
     }),
     services: Object.freeze({
       goals: goalService !== undefined && goalService !== null,
@@ -1045,6 +1059,7 @@ export function apply(ctx, rawConfig) {
   const activeRuns = new Map()
   const lifecycle = { disposed: false }
 
+  if (config.enableWriteExistingFileGuard) registerWriteExistingFileGuard(ctx, agentsService, sessionsService, ctx.fs)
   ctx.tools.register(specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet))
   if (config.enableContinuableTasks) ctx.tools.register(continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet))
   if (config.enableTeamTools) {
@@ -1065,7 +1080,7 @@ export function apply(ctx, rawConfig) {
     name: 'dsh-omo:specialist-orchestration',
     order: 5_200,
     interpolate: false,
-    text: buildUltraworkGuidance(disabledOmoCommands, activeRoleNames),
+    text: buildUltraworkGuidance(disabledOmoCommands, activeRoleNames, config.enableWriteExistingFileGuard),
   })
   registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills)
   if (config.enableSessionSearch) {
