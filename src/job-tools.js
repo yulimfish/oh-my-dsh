@@ -1,4 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { createToolResultPruningFinalizer } from './tool-output-pruning.js'
 
 const MAX_ID_CHARS = 256
 const MAX_KIND_CHARS = 128
@@ -423,10 +424,11 @@ export function createJobListTool(jobController) {
   })
 }
 
-export function createJobFollowTool(jobController) {
+export function createJobFollowTool(jobController, toolResultPruner) {
   if (!jobController || typeof jobController.follow !== 'function') {
     throw new TypeError('dsh_omo_job_follow requires the DSH jobController.follow method')
   }
+  const finalizeContent = createToolResultPruningFinalizer(toolResultPruner)
   return defineTool({
     name: 'dsh_omo_job_follow',
     label: 'Follow bounded DSH job output',
@@ -439,6 +441,7 @@ export function createJobFollowTool(jobController) {
       schema: FOLLOW_SCHEMA,
       render: createJobFollowRender,
     },
+    ...(finalizeContent ? { finalizeContent } : {}),
     timeoutMs: MAX_FOLLOW_MS + 5_000,
     async execute(args, exec) {
       const jobId = boundedId(args?.jobId, 'jobId')
@@ -616,7 +619,7 @@ export function createJobFollowTool(jobController) {
   })
 }
 
-export function registerJobTools(ctx, jobController) {
+export function registerJobTools(ctx, jobController, { toolResultPruner } = {}) {
   if (jobController === undefined || jobController === null) return () => {}
   if (!ctx?.tools || typeof ctx.tools.register !== 'function') {
     throw new TypeError('registerJobTools requires ctx.tools.register')
@@ -624,7 +627,7 @@ export function registerJobTools(ctx, jobController) {
   const disposers = []
   try {
     disposers.push(ctx.tools.register(createJobListTool(jobController)))
-    disposers.push(ctx.tools.register(createJobFollowTool(jobController)))
+    disposers.push(ctx.tools.register(createJobFollowTool(jobController, toolResultPruner)))
   } catch (error) {
     for (const dispose of [...disposers].reverse()) {
       try {

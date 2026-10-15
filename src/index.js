@@ -67,6 +67,7 @@ export const Config = z.object({
   enableSessionList: z.boolean().default(false),
   enableSessionInfo: z.boolean().default(false),
   enableJobTools: z.boolean().default(false),
+  enableToolResultPruning: z.boolean().default(false),
   enableLspTools: z.boolean().default(false),
   enableRootAgentsContext: z.boolean().default(false),
   enableAgentsOnRead: z.boolean().default(false),
@@ -1358,8 +1359,8 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
-              `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; toolResultPruner=${presence('toolResultPruner')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
               'Presence does not prove readiness or health. This command does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
           }
@@ -1427,6 +1428,14 @@ export function apply(ctx, rawConfig) {
     || typeof jobController.list !== 'function' || typeof jobController.follow !== 'function')) {
     throw new Error('dsh-omo: enableJobTools requires the optional DSH jobController.list and jobController.follow methods')
   }
+  if (config.enableToolResultPruning && !config.enableJobTools) {
+    throw new Error('dsh-omo: enableToolResultPruning requires enableJobTools')
+  }
+  const toolResultPruner = optionalService(ctx, 'toolResultPruner')
+  const activeToolResultPruner = config.enableToolResultPruning
+    && toolResultPruner && typeof toolResultPruner.pruneContent === 'function'
+    ? toolResultPruner
+    : undefined
   const sessionQueryService = optionalService(ctx, 'sessionQuery')
   const lspService = optionalService(ctx, 'lsp')
   const sessionsService = optionalService(ctx, 'sessions')
@@ -1521,6 +1530,7 @@ export function apply(ctx, rawConfig) {
       runtimeFallback: runtimeFallbackPolicy.enabled,
       teamTools: config.enableTeamTools === true,
       jobTools: config.enableJobTools === true,
+      toolResultPruning: activeToolResultPruner !== undefined,
       sessionSearch: config.enableSessionSearch === true,
       sessionRead: config.enableSessionRead === true,
       sessionList: config.enableSessionList === true,
@@ -1539,6 +1549,7 @@ export function apply(ctx, rawConfig) {
       llm: llmService !== undefined && llmService !== null,
       agentTeams: teamService !== undefined && teamService !== null,
       jobController: jobController !== undefined && jobController !== null,
+      toolResultPruner: toolResultPruner !== undefined && toolResultPruner !== null,
       lsp: lspService !== undefined && lspService !== null,
       sessionQuery: sessionQueryService !== undefined && sessionQueryService !== null,
       sessions: sessionsService !== undefined && sessionsService !== null,
@@ -1628,7 +1639,7 @@ export function apply(ctx, rawConfig) {
     ctx.effect(() => disposeSessionInfo, 'dsh-omo session info tool')
   }
   if (config.enableJobTools) {
-    const disposeJobTools = registerJobTools(ctx, jobController)
+    const disposeJobTools = registerJobTools(ctx, jobController, { toolResultPruner: activeToolResultPruner })
     ctx.effect(() => disposeJobTools, 'dsh-omo Host job tools')
   }
   if (config.enableLspTools) {

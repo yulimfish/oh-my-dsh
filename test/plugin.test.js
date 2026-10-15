@@ -140,6 +140,7 @@ const baseConfig = {
   enableSessionList: false,
   enableSessionInfo: false,
   enableJobTools: false,
+  enableToolResultPruning: false,
   enableLspTools: false,
   enableRootAgentsContext: false,
   enableAgentsOnRead: false,
@@ -219,6 +220,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableSessionInfo: true }).enableSessionInfo, true)
   assert.equal(Config({}).enableJobTools, false)
   assert.equal(Config({ enableJobTools: true }).enableJobTools, true)
+  assert.equal(Config({}).enableToolResultPruning, false)
+  assert.equal(Config({ enableToolResultPruning: true }).enableToolResultPruning, true)
   assert.equal(Config({}).enableLspTools, false)
   assert.equal(Config({ enableLspTools: true }).enableLspTools, true)
   assert.equal(Config({}).enableRootAgentsContext, false)
@@ -318,8 +321,8 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
-  assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; toolResultPruning=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; toolResultPruner=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
   assert.equal(command.handler({ rawInput: 'status extra' }).kind, 'error')
@@ -327,7 +330,7 @@ test('/omo status reports feature flags and service presence without calling bus
 
   const absent = makeContext()
   apply(absent.ctx, baseConfig)
-  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; agentTeams=absent; jobController=absent; lsp=absent; sessionQuery=absent; sessions=absent; mcpResources=absent/u)
+  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; agentTeams=absent; jobController=absent; toolResultPruner=absent; lsp=absent; sessionQuery=absent; sessions=absent; mcpResources=absent/u)
 })
 
 test('/omo status capabilities explicitly queries bounded live provider registries', () => {
@@ -1444,6 +1447,7 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   apply(enabledJobToolsFixture.ctx, { ...baseConfig, enableJobTools: true })
   assert.ok(enabledJobToolsFixture.tools.has('dsh_omo_job_list'))
   assert.ok(enabledJobToolsFixture.tools.has('dsh_omo_job_follow'))
+  assert.equal(enabledJobToolsFixture.tools.get('dsh_omo_job_follow').finalizeContent, undefined, 'output pruning is default-off')
   assert.equal(enabledJobToolsFixture.tools.has('job_kill'), false, 'the plugin does not register a model-facing kill tool')
   assert.equal(enabledJobToolsFixture.tools.has('dsh_omo_job_kill'), false, 'kill remains a human command, not a Tool')
   assert.equal(enabledJobToolsFixture.commands.has('omo-job-kill'), false, 'the Host kill method is optional')
@@ -1453,6 +1457,47 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   await jobToolsEffect.dispose()
   assert.equal(enabledJobToolsFixture.tools.has('dsh_omo_job_list'), false)
   assert.equal(enabledJobToolsFixture.tools.has('dsh_omo_job_follow'), false)
+
+  const unavailablePruningFixture = makeContext({ services: { jobController } })
+  apply(unavailablePruningFixture.ctx, { ...baseConfig, enableJobTools: true, enableToolResultPruning: true })
+  assert.equal(unavailablePruningFixture.tools.get('dsh_omo_job_follow').finalizeContent, undefined)
+  const unavailablePruningStatus = unavailablePruningFixture.commands.get('omo').handler({ rawInput: 'status' }).text
+  assert.match(unavailablePruningStatus, /toolResultPruning=disabled/u)
+  assert.match(unavailablePruningStatus, /toolResultPruner=absent/u)
+
+  const disabledPruningFixture = makeContext({ services: {
+    jobController,
+    toolResultPruner: { pruneContent: blocks => blocks },
+  } })
+  apply(disabledPruningFixture.ctx, { ...baseConfig, enableJobTools: true })
+  assert.equal(disabledPruningFixture.tools.get('dsh_omo_job_follow').finalizeContent, undefined)
+
+  const prunedContent = [{ type: 'text', text: '[pruned by Host]' }]
+  const activePruningFixture = makeContext({ services: {
+    jobController,
+    toolResultPruner: { pruneContent: () => prunedContent },
+  } })
+  apply(activePruningFixture.ctx, { ...baseConfig, enableJobTools: true, enableToolResultPruning: true })
+  const jobFollowTool = activePruningFixture.tools.get('dsh_omo_job_follow')
+  assert.equal(typeof jobFollowTool.finalizeContent, 'function')
+  const structuredValue = Object.freeze({ chunks: ['untrusted job output'], nextOffset: 12 })
+  const originalContent = [{ type: 'text', text: 'untrusted job output' }]
+  const finalContent = jobFollowTool.finalizeContent({}, Object.freeze({ isError: false, value: structuredValue, content: originalContent }))
+  assert.equal(finalContent, prunedContent)
+  assert.equal(structuredValue.nextOffset, 12)
+  const activePruningStatus = activePruningFixture.commands.get('omo').handler({ rawInput: 'status' }).text
+  assert.match(activePruningStatus, /toolResultPruning=enabled/u)
+  assert.match(activePruningStatus, /toolResultPruner=present/u)
+  const pruningEffect = activePruningFixture.effects.find(effect => effect.label === 'dsh-omo Host job tools')
+  await pruningEffect.dispose()
+  assert.equal(activePruningFixture.tools.has('dsh_omo_job_follow'), false, 'disposing job tools removes the finalizer registration')
+
+  const invalidPruningConfigFixture = makeContext()
+  assert.throws(
+    () => apply(invalidPruningConfigFixture.ctx, { ...baseConfig, enableToolResultPruning: true }),
+    /enableToolResultPruning requires enableJobTools/u,
+  )
+  assert.equal(invalidPruningConfigFixture.tools.size, 0)
 
   const killRequests = []
   const killEnabledController = {
