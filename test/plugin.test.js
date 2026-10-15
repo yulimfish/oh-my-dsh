@@ -27,6 +27,7 @@ function makeContext(options = {}) {
     get: key => options.services?.[key],
     tools: {
       register: definition => { tools.set(definition.name, definition); return () => tools.delete(definition.name) },
+      get: options.getTool ?? (() => undefined),
       guard: guard => { guards.add(guard); return () => guards.delete(guard) },
     },
     subagents: {
@@ -1636,6 +1637,106 @@ test('uses opt-in current-cwd project agent files as one-shot prompt-only person
   await oneShot.execute({ role: 'explore', task: 'Keep the static role path working.' }, exec)
   assert.equal(fixture.starts[1].request.persona, undefined)
   assert.equal(fixture.starts[1].request.label.startsWith('explore:'), true)
+})
+
+test('passes project-agent tools as a one-shot allowlist intersected with category denials', async () => {
+  const parent = { id: 'parent-agent', followup() {} }
+  const state = makeProjectAgentFs({
+    source: '---\nname: repo-auditor\ndescription: Review the selected task\ntools: READ, bash, grep\n---\nReview the selected task.',
+  })
+  const session = { header: { id: parent.id, cwd: state.cwd } }
+  const knownTools = new Set(['read', 'bash', 'grep'])
+  const fixture = makeContext({
+    fs: state.fs,
+    getTool: name => knownTools.has(name) ? { name } : undefined,
+    services: {
+      agents: { get: id => id === parent.id ? parent : undefined },
+      sessions: { get: id => id === parent.id ? session : undefined },
+    },
+  })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableProjectAgentFiles: true,
+    categoryRoutes: [{ name: 'safe', provider: 'route-provider', model: 'route-model', tools: { bash: false } }],
+  })
+  const roster = await fixture.tools.get('dsh_omo_project_agents').execute({}, {
+    agent: parent, signal: new AbortController().signal,
+  })
+  assert.deepEqual(roster.agents, [{
+    agentFile: 'repo-auditor', name: 'repo-auditor', description: 'Review the selected task',
+  }])
+  assert.equal(JSON.stringify(roster).includes('tools'), false)
+  await fixture.tools.get('dsh_omo_task').execute({
+    role: '__project_agent_file__', agentFile: 'repo-auditor', category: 'safe', task: 'Review safely.',
+  }, { agent: parent, signal: new AbortController().signal })
+  assert.deepEqual(fixture.starts[0].request.toolFilter, { allow: ['read', 'grep'], deny: ['bash'] })
+})
+
+test('fails closed when project-agent tool allowlists cannot be enforced', async t => {
+  const runCase = async ({ tools, capability = true, knownTools = ['read'], parentVisible = true }) => {
+    const parent = { id: 'parent-agent', followup() {} }
+    const state = makeProjectAgentFs({ source: `---\nname: repo-auditor\ntools: ${tools}\n---\nBody.` })
+    const session = { header: { id: parent.id, cwd: state.cwd } }
+    const available = new Set(knownTools)
+    const fixture = makeContext({
+      fs: state.fs,
+      getTool: (name, scope) => available.has(name) && (parentVisible || scope === undefined) ? { name } : undefined,
+      getProvider: provider => provider === 'spawn' ? {
+        name: 'spawn', capabilities: { persona: true, toolFilter: capability },
+      } : undefined,
+      services: {
+        agents: { get: id => id === parent.id ? parent : undefined },
+        sessions: { get: id => id === parent.id ? session : undefined },
+      },
+    })
+    apply(fixture.ctx, { ...baseConfig, enableProjectAgentFiles: true })
+    const result = fixture.tools.get('dsh_omo_task').execute({
+      role: '__project_agent_file__', agentFile: 'repo-auditor', task: 'Use the project tool list.',
+    }, { agent: parent, signal: new AbortController().signal })
+    return { fixture, result }
+  }
+  await t.test('provider lacks toolFilter', async () => {
+    const { fixture, result } = await runCase({ tools: 'read', capability: false })
+    await assert.rejects(result, /support toolFilter/u)
+    assert.equal(fixture.starts.length, 0)
+  })
+  await t.test('tool name is unknown to the DSH global registry', async () => {
+    const { fixture, result } = await runCase({ tools: 'unknown-tool' })
+    await assert.rejects(result, /not a parent-visible DSH global tool/u)
+    assert.equal(fixture.starts.length, 0)
+  })
+  await t.test('tool exists globally but is not visible in the parent scope', async () => {
+    const { fixture, result } = await runCase({ tools: 'read', parentVisible: false })
+    await assert.rejects(result, /not a parent-visible DSH global tool/u)
+    assert.equal(fixture.starts.length, 0)
+  })
+  await t.test('empty tools preserve legacy behavior without toolFilter capability', async () => {
+    const { fixture, result } = await runCase({ tools: '', capability: false })
+    assert.deepEqual(await result, { childId: 'child-1', role: 'project-agent:repo-auditor', status: 'started' })
+    assert.equal(fixture.starts[0].request.toolFilter, undefined)
+  })
+  await t.test('category restrictions deny every listed tool', async () => {
+    const parent = { id: 'parent-agent', followup() {} }
+    const state = makeProjectAgentFs({ source: '---\nname: repo-auditor\ntools: read\n---\nBody.' })
+    const session = { header: { id: parent.id, cwd: state.cwd } }
+    const fixture = makeContext({
+      fs: state.fs,
+      getTool: name => name === 'read' ? { name } : undefined,
+      services: {
+        agents: { get: id => id === parent.id ? parent : undefined },
+        sessions: { get: id => id === parent.id ? session : undefined },
+      },
+    })
+    apply(fixture.ctx, {
+      ...baseConfig,
+      enableProjectAgentFiles: true,
+      categoryRoutes: [{ name: 'deny-read', provider: 'p', model: 'm', tools: { read: false } }],
+    })
+    await assert.rejects(fixture.tools.get('dsh_omo_task').execute({
+      role: '__project_agent_file__', agentFile: 'repo-auditor', category: 'deny-read', task: 'Do not start.',
+    }, { agent: parent, signal: new AbortController().signal }), /no names remaining/u)
+    assert.equal(fixture.starts.length, 0)
+  })
 })
 
 test('skips configured-role collisions before the project-agent roster cap', async () => {

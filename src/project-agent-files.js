@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path'
-import { isMap, isScalar, parseDocument } from 'yaml'
+import { isMap, isScalar, isSeq, parseDocument } from 'yaml'
 
 export const PROJECT_AGENT_FILE_NAME = /^[a-z][a-z0-9-]{0,63}$/u
 
@@ -9,11 +9,13 @@ const MAX_AGENT_FILE_BYTES = 16_384
 const MAX_LIST_SOURCE_BYTES = 131_072
 const MAX_LIST_DIRECTORY_ENTRIES = 256
 const MAX_PROJECT_AGENTS = 32
+const MAX_AGENT_TOOLS = 64
+const MAX_AGENT_TOOL_NAME_BYTES = 128
 const PROJECT_AGENT_READ_TIMEOUT_MS = 5_000
 const CONTROL_OR_BIDI = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\p{Bidi_Control}]/u
 const CONTROL_OR_BIDI_GLOBAL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\p{Bidi_Control}]/gu
 const ABORTED = Symbol('project agent file operation cancelled')
-const ALLOWED_FRONTMATTER_FIELDS = new Set(['name', 'description'])
+const ALLOWED_FRONTMATTER_FIELDS = new Set(['name', 'description', 'tools'])
 const ALLOWED_SCALAR_STYLES = new Set(['PLAIN', 'QUOTE_SINGLE', 'QUOTE_DOUBLE'])
 
 class ProjectAgentFileError extends Error {
@@ -145,6 +147,46 @@ function safeAgentDescription(value) {
   return description || undefined
 }
 
+function safeAgentTools(value) {
+  if (value === undefined) return undefined
+  let items
+  if (typeof value === 'string') {
+    items = value.split(',').map(tool => tool.trim()).filter(Boolean)
+  } else if (Array.isArray(value)) {
+    items = []
+    for (const tool of value) {
+      if (typeof tool !== 'string') {
+        throw new ProjectAgentFileError('Project agent tools must be comma-separated or an array of strings.')
+      }
+      const name = tool.trim()
+      if (name) items.push(name)
+    }
+  } else {
+    throw new ProjectAgentFileError('Project agent tools must be comma-separated or an array of strings.')
+  }
+  if (items.length === 0) return undefined
+  if (items.length > MAX_AGENT_TOOLS) {
+    throw new ProjectAgentFileError(`Project agent tools may list at most ${MAX_AGENT_TOOLS} names.`)
+  }
+
+  const tools = []
+  const seen = new Set()
+  for (const item of items) {
+    const normalized = item.toLowerCase()
+    if (item.length > MAX_AGENT_TOOL_NAME_BYTES
+      || new TextEncoder().encode(item).byteLength > MAX_AGENT_TOOL_NAME_BYTES
+      || new TextEncoder().encode(normalized).byteLength > MAX_AGENT_TOOL_NAME_BYTES
+      || CONTROL_OR_BIDI.test(item) || !normalized) {
+      throw new ProjectAgentFileError(`Project agent tool names must be non-empty, safe, and at most ${MAX_AGENT_TOOL_NAME_BYTES} UTF-8 bytes.`)
+    }
+    if (!seen.has(normalized)) {
+      seen.add(normalized)
+      tools.push(normalized)
+    }
+  }
+  return Object.freeze(tools)
+}
+
 function parseAgentDocument(bytes, fileName) {
   let source
   try { source = new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch {
@@ -179,6 +221,24 @@ function parseAgentDocument(bytes, fileName) {
       throw new ProjectAgentFileError('Unsupported project agent frontmatter field.')
     }
     if (Object.hasOwn(frontmatter, key)) throw new ProjectAgentFileError('Project agent YAML frontmatter contains duplicate fields.')
+    if (key === 'tools' && isSeq(valueNode)) {
+      if (valueNode.tag !== undefined || valueNode.anchor !== undefined) {
+        throw new ProjectAgentFileError('Project agent tools arrays must not use YAML tags or anchors.')
+      }
+      frontmatter.tools = valueNode.items.map(item => {
+        if (!isScalar(item) || !ALLOWED_SCALAR_STYLES.has(item.type)
+          || typeof item.value !== 'string' || item.tag !== undefined || item.anchor !== undefined) {
+          throw new ProjectAgentFileError('Project agent tools arrays must contain plain single-line strings.')
+        }
+        return item.value
+      })
+      continue
+    }
+    if (key === 'tools' && isScalar(valueNode) && valueNode.type === 'PLAIN' && valueNode.value === null
+      && valueNode.tag === undefined && valueNode.anchor === undefined) {
+      frontmatter.tools = undefined
+      continue
+    }
     if (!isScalar(valueNode) || !ALLOWED_SCALAR_STYLES.has(valueNode.type)
       || typeof valueNode.value !== 'string' || valueNode.tag !== undefined || valueNode.anchor !== undefined) {
       throw new ProjectAgentFileError('Project agent frontmatter values must be single-line scalar strings.')
@@ -194,6 +254,7 @@ function parseAgentDocument(bytes, fileName) {
   if (frontmatter.description !== undefined && description === undefined) {
     throw new ProjectAgentFileError('Project agent description must be a safe single-line string of at most 512 UTF-8 bytes.')
   }
+  const tools = safeAgentTools(frontmatter.tools)
 
   const body = lines.slice(closing + 1).join('\n').replace(/^\n/u, '')
   if (!body.trim() || CONTROL_OR_BIDI.test(body) || new TextEncoder().encode(body).byteLength > MAX_AGENT_FILE_BYTES) {
@@ -203,6 +264,7 @@ function parseAgentDocument(bytes, fileName) {
     agentFile: fileName,
     name,
     ...(description !== undefined ? { description } : {}),
+    ...(tools !== undefined ? { tools } : {}),
     prompt: escapePromptVariableSyntax(body),
   })
 }

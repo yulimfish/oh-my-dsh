@@ -89,6 +89,39 @@ test('lists safe project-agent metadata only and reloads the selected prompt on 
   })
 })
 
+test('parses bounded project-agent tool allowlists without exposing them in the roster', async t => {
+  await t.test('comma-separated strings are lowercased and deduplicated', async () => {
+    const state = fixture({ files: [['reviewer.md', '---\nname: reviewer\ntools: READ, read, Bash\n---\nBody.']] })
+    assert.deepEqual(await state.adapter.load(state.exec, 'reviewer'), {
+      agentFile: 'reviewer', name: 'reviewer', tools: ['read', 'bash'], prompt: 'Body.',
+    })
+    assert.deepEqual((await state.adapter.list(state.exec)).agents, [{ agentFile: 'reviewer', name: 'reviewer' }])
+  })
+  await t.test('YAML string arrays and empty values', async () => {
+    const arrayState = fixture({ files: [['reviewer.md', '---\nname: reviewer\ntools:\n  - Bash\n  - read\n  - bash\n---\nBody.']] })
+    assert.deepEqual((await arrayState.adapter.load(arrayState.exec, 'reviewer')).tools, ['bash', 'read'])
+    for (const toolsField of ['tools: []', 'tools:']) {
+      const emptyState = fixture({ files: [['reviewer.md', `---\nname: reviewer\n${toolsField}\n---\nBody.`]] })
+      assert.equal(Object.hasOwn(await emptyState.adapter.load(emptyState.exec, 'reviewer'), 'tools'), false)
+    }
+  })
+  const invalid = [
+    ['too many tools', `tools: ${Array.from({ length: 65 }, (_value, index) => `tool-${index}`).join(',')}`],
+    ['oversized tool name', `tools: ${'x'.repeat(129)}`],
+    ['oversized UTF-8 name', `tools: ${'é'.repeat(65)}`],
+    ['bidi tool name', `tools: safe\u202ename`],
+    ['nested map', 'tools: {read: true}'],
+    ['non-string array item', 'tools: [read, 7]'],
+    ['nested array item', 'tools: [read, [bash]]'],
+  ]
+  for (const [name, field] of invalid) {
+    await t.test(name, async () => {
+      const state = fixture({ files: [['reviewer.md', `---\nname: reviewer\n${field}\n---\nBody.`]] })
+      await assert.rejects(state.adapter.load(state.exec, 'reviewer'), /tool|frontmatter/u)
+    })
+  }
+})
+
 test('scans only exact direct basenames under the live session cwd', async () => {
   const state = fixture({
     files: [['local.md', '---\nname: local\n---\nLocal prompt.']],
@@ -105,7 +138,7 @@ test('scans only exact direct basenames under the live session cwd', async () =>
 
 test('rejects unsupported, duplicate, aliased, tagged, nested, and multiline frontmatter', async t => {
   const invalid = [
-    ['tools', '---\nname: reviewer\ntools: [read]\n---\nBody.'],
+    ['mcp', '---\nname: reviewer\nmcp: [read]\n---\nBody.'],
     ['model', '---\nname: reviewer\nmodel: expensive\n---\nBody.'],
     ['permissions', '---\nname: reviewer\npermissionMode: bypass\n---\nBody.'],
     ['duplicate', '---\nname: reviewer\nname: reviewer\n---\nBody.'],
