@@ -185,11 +185,11 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   const categoryConfig = Config({ categoryRoutes: [{
     name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true,
     promptAppend: 'Use a bounded budget.', description: 'A short chooser description.', tools: { read: false, bash: true },
-    fallbackModels: [{ provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'high' }],
+    fallbackModels: [{ provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'high', maxTokens: 1024 }],
   }] })
   assert.equal(categoryConfig.categoryRoutes[0].maxTokens, 128)
   assert.deepEqual(categoryConfig.categoryRoutes[0].fallbackModels, [
-    { provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'high' },
+    { provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'high', maxTokens: 1024 },
   ])
   assert.equal(categoryConfig.categoryRoutes[0].disable, true)
   assert.equal(categoryConfig.categoryRoutes[0].promptAppend, 'Use a bounded budget.')
@@ -198,9 +198,9 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({ roleRoutes: [{ role: 'reviewer', denyTools: ['bash'] }] }).roleRoutes[0].denyTools, ['bash'])
   assert.deepEqual(Config({ roleRoutes: [{
     role: 'reviewer', provider: 'primary', model: 'primary-model',
-    fallbackModels: [{ provider: 'backup', model: 'backup-model', reasoningEffort: 'low' }],
+    fallbackModels: [{ provider: 'backup', model: 'backup-model', reasoningEffort: 'low', maxTokens: 2048 }],
   }] }).roleRoutes[0].fallbackModels, [
-    { provider: 'backup', model: 'backup-model', reasoningEffort: 'low' },
+    { provider: 'backup', model: 'backup-model', reasoningEffort: 'low', maxTokens: 2048 },
   ])
   assert.deepEqual(Config({}).providerConcurrency, {})
   assert.deepEqual(Config({}).modelConcurrency, {})
@@ -2316,6 +2316,41 @@ test('selects the first valid category fallback for one-shot and continuable chi
   assert.strictEqual(fixture.starts[1].request.signal, signal)
 })
 
+test('applies category fallback-only maxTokens only when that candidate is selected', async () => {
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: {
+      resolveCallConfig: async config => {
+        calls.push(config)
+        if (config.provider === 'token-primary' || config.provider === 'token-first') throw new Error('route unavailable')
+        return config
+      },
+    },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{
+      name: 'token-chain', provider: 'token-primary', model: 'primary-model', maxTokens: 1024,
+      fallbackModels: [
+        { provider: 'token-first', model: 'first-model' },
+        { provider: 'token-last', model: 'last-model', maxTokens: 3072 },
+      ],
+    }],
+  })
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'quick', category: 'token-chain', task: 'Use candidate-local token settings.' },
+    { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal },
+  )
+  assert.deepEqual(calls, [
+    { provider: 'token-primary', model: 'primary-model', maxTokens: 1024 },
+    { provider: 'token-first', model: 'first-model', maxTokens: 1024 },
+    { provider: 'token-last', model: 'last-model', maxTokens: 3072 },
+  ])
+  assert.deepEqual(fixture.starts[0].request.agentOptions, {
+    provider: 'token-last', model: 'last-model', maxTokens: 3072,
+  })
+})
+
 test('role provider/model pins bypass category fallback resolution', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
@@ -2355,7 +2390,7 @@ test('preflights no-category role fallback chains with role settings over candid
       reasoningEffort: 'medium', maxTokens: 1024,
       fallbackModels: [
         { provider: 'role-first', model: 'first-model', reasoningEffort: 'low' },
-        { provider: 'role-last', model: 'last-model', reasoningEffort: 'high' },
+        { provider: 'role-last', model: 'last-model', reasoningEffort: 'high', maxTokens: 512 },
       ],
     }],
   })
@@ -2367,11 +2402,11 @@ test('preflights no-category role fallback chains with role settings over candid
   assert.deepEqual(calls.map(({ config }) => config), [
     { provider: 'role-primary', model: 'primary-model', reasoningEffort: 'medium', maxTokens: 1024 },
     { provider: 'role-first', model: 'first-model', reasoningEffort: 'medium', maxTokens: 1024 },
-    { provider: 'role-last', model: 'last-model', reasoningEffort: 'medium', maxTokens: 1024 },
+    { provider: 'role-last', model: 'last-model', reasoningEffort: 'medium', maxTokens: 512 }
   ])
   assert.ok(calls.every(call => call.signal === signal))
   assert.deepEqual(fixture.starts[0].request.agentOptions, {
-    provider: 'role-last', model: 'last-model', reasoningEffort: 'medium', maxTokens: 1024,
+    provider: 'role-last', model: 'last-model', reasoningEffort: 'medium', maxTokens: 512,
   })
 })
 
@@ -2395,7 +2430,7 @@ test('role fallback chains override category fallback chains and preserve candid
     }],
     roleRoutes: [{
       role: 'explore', category: 'research', provider: 'role-primary', model: 'role-model', maxTokens: 1024,
-      fallbackModels: [{ provider: 'role-backup', model: 'role-backup-model', reasoningEffort: 'low' }],
+      fallbackModels: [{ provider: 'role-backup', model: 'role-backup-model', reasoningEffort: 'low', maxTokens: 3072 }],
     }],
   })
   await fixture.tools.get('dsh_omo_task').execute(
@@ -2404,14 +2439,14 @@ test('role fallback chains override category fallback chains and preserve candid
   )
   assert.deepEqual(calls, [
     { provider: 'role-primary', model: 'role-model', reasoningEffort: 'high', maxTokens: 1024 },
-    { provider: 'role-backup', model: 'role-backup-model', reasoningEffort: 'low', maxTokens: 1024 },
+    { provider: 'role-backup', model: 'role-backup-model', reasoningEffort: 'low', maxTokens: 3072 },
   ])
   assert.deepEqual(fixture.starts[0].request.agentOptions, {
-    provider: 'role-backup', model: 'role-backup-model', reasoningEffort: 'low', maxTokens: 1024,
+    provider: 'role-backup', model: 'role-backup-model', reasoningEffort: 'low', maxTokens: 3072,
   })
 })
 
-test('a valid role primary avoids querying its fallback chain', async () => {
+test('a valid role primary avoids fallback-only maxTokens settings', async () => {
   const calls = []
   const fixture = makeContext({ services: {
     llm: { resolveCallConfig: async config => { calls.push(config); return config } },
@@ -2419,16 +2454,18 @@ test('a valid role primary avoids querying its fallback chain', async () => {
   apply(fixture.ctx, {
     ...baseConfig,
     roleRoutes: [{
-      role: 'explore', provider: 'role-primary', model: 'primary-model',
-      fallbackModels: [{ provider: 'role-backup', model: 'backup-model' }],
+      role: 'explore', provider: 'role-primary', model: 'primary-model', maxTokens: 1024,
+      fallbackModels: [{ provider: 'role-backup', model: 'backup-model', maxTokens: 2048 }],
     }],
   })
   await fixture.tools.get('dsh_omo_task').execute(
     { role: 'explore', task: 'Primary route is capability-valid.' },
     { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal },
   )
-  assert.deepEqual(calls, [{ provider: 'role-primary', model: 'primary-model' }])
-  assert.deepEqual(fixture.starts[0].request.agentOptions, { provider: 'role-primary', model: 'primary-model' })
+  assert.deepEqual(calls, [{ provider: 'role-primary', model: 'primary-model', maxTokens: 1024 }])
+  assert.deepEqual(fixture.starts[0].request.agentOptions, {
+    provider: 'role-primary', model: 'primary-model', maxTokens: 1024,
+  })
 })
 
 test('role fallback chains support continuable children but preserve the maxTokens rejection', async () => {
@@ -2481,6 +2518,66 @@ test('role fallback chains support continuable children but preserve the maxToke
   ), /maxTokens/u)
   assert.equal(cappedCalls.length, 0)
   assert.equal(capped.continuableStarts.length, 0)
+
+  const fallbackCappedCalls = []
+  const fallbackCapped = makeContext({ services: {
+    llm: { resolveCallConfig: async config => { fallbackCappedCalls.push(config); return config } },
+  } })
+  apply(fallbackCapped.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    roleRoutes: [{
+      role: 'explore', provider: 'role-primary', model: 'primary-model',
+      fallbackModels: [{ provider: 'role-backup', model: 'backup-model', maxTokens: 512 }],
+    }],
+  })
+  await assert.rejects(fallbackCapped.tools.get('dsh_omo_task_continuable').execute(
+    { role: 'explore', task: 'Reject fallback-only token limits before preflight.' },
+    { agent: { id: 'parent-agent', followup() {} }, signal },
+  ), /fallback maxTokens/u)
+  assert.equal(fallbackCappedCalls.length, 0)
+  assert.equal(fallbackCapped.continuableStarts.length, 0)
+
+  const categoryFallbackCappedCalls = []
+  const categoryFallbackCapped = makeContext({ services: {
+    llm: { resolveCallConfig: async config => { categoryFallbackCappedCalls.push(config); return config } },
+  } })
+  apply(categoryFallbackCapped.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    categoryRoutes: [{
+      name: 'research', provider: 'category-primary', model: 'category-model',
+      fallbackModels: [{ provider: 'category-backup', model: 'backup-model', maxTokens: 512 }],
+    }],
+  })
+  await assert.rejects(categoryFallbackCapped.tools.get('dsh_omo_task_continuable').execute(
+    { role: 'quick', category: 'research', task: 'Reject category fallback token limits before preflight.' },
+    { agent: { id: 'parent-agent', followup() {} }, signal },
+  ), /fallback maxTokens/u)
+  assert.equal(categoryFallbackCappedCalls.length, 0)
+  assert.equal(categoryFallbackCapped.continuableStarts.length, 0)
+
+  const bypassCalls = []
+  const pinnedBypass = makeContext({ services: {
+    llm: { resolveCallConfig: async config => { bypassCalls.push(config); return config } },
+  } })
+  apply(pinnedBypass.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    categoryRoutes: [{
+      name: 'research', provider: 'category-primary', model: 'category-model',
+      fallbackModels: [{ provider: 'category-backup', model: 'backup-model', maxTokens: 512 }],
+    }],
+    roleRoutes: [{
+      role: 'explore', category: 'research', provider: 'role-primary', model: 'role-model',
+    }],
+  })
+  await pinnedBypass.tools.get('dsh_omo_task_continuable').execute(
+    { role: 'explore', category: 'research', task: 'An explicit role pin bypasses category fallback tokens.' },
+    { agent: { id: 'parent-agent', followup() {} }, signal },
+  )
+  assert.equal(bypassCalls.length, 0)
+  assert.equal(pinnedBypass.continuableStarts.length, 1)
 })
 
 test('role fallback chains fail closed on missing, rejected, and cancelled preflight', async t => {
@@ -2825,7 +2922,7 @@ test('validates bounded role fallback chains only for explicit provider/model pi
     ...baseConfig,
     roleRoutes: [{
       role: 'explore', provider: 'primary', model: 'primary-model',
-      fallbackModels: [{ provider: 'backup', model: 'backup-model', reasoningEffort: 'low' }],
+      fallbackModels: [{ provider: 'backup', model: 'backup-model', reasoningEffort: 'low', maxTokens: 2048 }],
     }],
   })
   assert.ok(valid.tools.has('dsh_omo_task'))
@@ -2855,10 +2952,22 @@ test('validates bounded role fallback chains only for explicit provider/model pi
     ...baseConfig,
     roleRoutes: [{
       role: 'explore', provider: 'primary', model: 'primary-model',
-      fallbackModels: [{ provider: 'backup', model: 'backup-model', maxTokens: 128 }],
+      fallbackModels: [{ provider: 'backup', model: 'backup-model', temperature: 0.2 }],
     }],
-  }), /contains unsupported field "maxTokens"/u)
+  }), /contains unsupported field "temperature"/u)
   assert.equal(unsupportedTuning.tools.size, 0)
+
+  for (const maxTokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const invalidTokens = makeContext()
+    assert.throws(() => apply(invalidTokens.ctx, {
+      ...baseConfig,
+      roleRoutes: [{
+        role: 'explore', provider: 'primary', model: 'primary-model',
+        fallbackModels: [{ provider: 'backup', model: 'backup-model', maxTokens }],
+      }],
+    }), /fallbackModels\[0\] maxTokens must be a positive safe integer/u)
+    assert.equal(invalidTokens.tools.size, 0)
+  }
 
   const tooMany = makeContext()
   assert.throws(() => apply(tooMany.ctx, {
@@ -3055,7 +3164,7 @@ test('uses the DSH continuation seam only when enabled and rejects unpersisted t
   await assert.rejects(tokenBound.tools.get('dsh_omo_task_continuable').execute(
     { role: 'explore', task: 'Persist this task' },
     { agent: { id: 'parent-agent' }, signal: new AbortController().signal },
-  ), /does not preserve this ceiling/)
+  ), /does not preserve these ceilings/)
   assert.equal(tokenBound.continuableStarts.length, 0)
 })
 

@@ -103,7 +103,7 @@ export function normalizeExplicitFallbackModels(value, label, primary) {
     const entry = value[index]
     if (!isRecord(entry)) throw new TypeError(`${label}[${index}] must be an object`)
     for (const key of Reflect.ownKeys(entry)) {
-      if (typeof key !== 'string' || !['provider', 'model', 'reasoningEffort'].includes(key)) {
+      if (typeof key !== 'string' || !['provider', 'model', 'reasoningEffort', 'maxTokens'].includes(key)) {
         throw new TypeError(`${label}[${index}] contains unsupported field "${String(key)}"`)
       }
     }
@@ -118,6 +118,10 @@ export function normalizeExplicitFallbackModels(value, label, primary) {
     const reasoningEffort = rawReasoningEffort === undefined
       ? undefined
       : normalizeString(rawReasoningEffort, `${label}[${index}] reasoningEffort`, MAX_REASONING_EFFORT_CHARS)
+    const rawMaxTokens = Object.hasOwn(entry, 'maxTokens') ? entry.maxTokens : undefined
+    const maxTokens = rawMaxTokens === undefined
+      ? undefined
+      : normalizeMaxTokens(rawMaxTokens, `${label}[${index}] maxTokens`)
     const key = JSON.stringify([provider, model])
     if (seen.has(key)) throw new TypeError(`${label} must not contain duplicate provider/model candidates`)
     seen.add(key)
@@ -125,6 +129,7 @@ export function normalizeExplicitFallbackModels(value, label, primary) {
       provider,
       model,
       ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
     }))
   }
   return Object.freeze(candidates)

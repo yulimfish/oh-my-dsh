@@ -38,13 +38,13 @@ test('normalizes bounded explicit category fallback model chains immutably', () 
   const categoryRoutes = normalizeCategoryRoutes([{
     name: 'chain', provider: 'primary-provider', model: 'primary-model',
     fallbackModels: [
-      { provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'high' },
+      { provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'high', maxTokens: 4096 },
       { provider: 'second-provider', model: 'second-model' },
     ],
   }])
   const route = categoryRoutes.get('chain')
   assert.deepEqual(route.fallbackModels, [
-    { provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'high' },
+    { provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'high', maxTokens: 4096 },
     { provider: 'second-provider', model: 'second-model' },
   ])
   assert.equal(Object.isFrozen(route.fallbackModels), true)
@@ -64,6 +64,8 @@ test('normalizes bounded explicit category fallback model chains immutably', () 
     ['blank provider', [{ provider: ' ', model: 'backup-model' }]],
     ['blank model', [{ provider: 'backup-provider', model: ' ' }]],
     ['blank reasoning', [{ provider: 'backup-provider', model: 'backup-model', reasoningEffort: ' ' }]],
+    ['zero fallback maxTokens', [{ provider: 'backup-provider', model: 'backup-model', maxTokens: 0 }]],
+    ['fractional fallback maxTokens', [{ provider: 'backup-provider', model: 'backup-model', maxTokens: 1.5 }]],
     ['unsupported field', [{ provider: 'backup-provider', model: 'backup-model', temperature: 0 }]],
     ['duplicate primary', [{ provider: 'primary-provider', model: 'primary-model' }]],
     ['duplicate candidate', [
