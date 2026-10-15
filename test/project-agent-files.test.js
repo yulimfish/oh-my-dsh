@@ -110,6 +110,7 @@ test('parses bounded project-agent tool allowlists without exposing them in the 
     ['oversized tool name', `tools: ${'x'.repeat(129)}`],
     ['oversized UTF-8 name', `tools: ${'é'.repeat(65)}`],
     ['bidi tool name', `tools: safe\u202ename`],
+    ['reserved DSH transport', 'tools: run_code'],
     ['nested map', 'tools: {read: true}'],
     ['non-string array item', 'tools: [read, 7]'],
     ['nested array item', 'tools: [read, [bash]]'],

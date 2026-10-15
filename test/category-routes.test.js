@@ -248,6 +248,11 @@ test('normalizes category tool maps to bounded inherited-tool allow/deny rules',
   assert.throws(() => normalizeCategoryRoutes([
     { name: 'bad', provider: 'p', model: 'm', tools: { 'read\n': false } },
   ]), /invalid tool name/u)
+  for (const enabled of [true, false]) {
+    assert.throws(() => normalizeCategoryRoutes([
+      { name: 'reserved', provider: 'p', model: 'm', tools: { run_code: enabled } },
+    ]), /reserved tool "run_code"/u)
+  }
   assert.throws(() => normalizeCategoryRoutes([
     { name: 'bad', provider: 'p', model: 'm', tools: Object.fromEntries(Array.from({ length: 65 }, (_, index) => [`tool-${index}`, true])) },
   ]), /at most 64 tool rules/u)

@@ -179,6 +179,9 @@ function safeAgentTools(value) {
       || CONTROL_OR_BIDI.test(item) || !normalized) {
       throw new ProjectAgentFileError(`Project agent tool names must be non-empty, safe, and at most ${MAX_AGENT_TOOL_NAME_BYTES} UTF-8 bytes.`)
     }
+    if (normalized === 'run_code') {
+      throw new ProjectAgentFileError('Project agent tools must not name DSH reserved tool "run_code".')
+    }
     if (!seen.has(normalized)) {
       seen.add(normalized)
       tools.push(normalized)

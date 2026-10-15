@@ -1894,6 +1894,23 @@ test('requires live filesystem and session services when project agent files are
   assert.equal(fixture.tools.size, 0)
 })
 
+test('rejects reserved run_code in category and role filters before registering tools', () => {
+  const invalidConfigs = [
+    { categoryRoutes: [{ name: 'allow-run-code', provider: 'p', model: 'm', tools: { run_code: true } }] },
+    {
+      enableContinuableTasks: true,
+      categoryRoutes: [{ name: 'deny-run-code', provider: 'p', model: 'm', tools: { run_code: false } }],
+    },
+    { roleRoutes: [{ role: 'quick', allowTools: ['run_code'] }] },
+    { roleRoutes: [{ role: 'quick', denyTools: ['run_code'] }] },
+  ]
+  for (const invalidConfig of invalidConfigs) {
+    const fixture = makeContext()
+    assert.throws(() => apply(fixture.ctx, { ...baseConfig, ...invalidConfig }), /reserved tool "run_code"/u)
+    assert.equal(fixture.tools.size, 0)
+  }
+})
+
 test('composes category tool allow/deny entries as monotonic inherited-tool filters', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {

@@ -69,6 +69,9 @@ function normalizeCategoryTools(value, categoryName) {
       || CATEGORY_TOOL_NAME_CONTROL_CHARACTERS.test(key)) {
       throw new TypeError(`${label} contains an invalid tool name`)
     }
+    if (key === 'run_code') {
+      throw new TypeError(`${label} must not name DSH's reserved tool "run_code"`)
+    }
     const enabled = value[key]
     if (typeof enabled !== 'boolean') {
       throw new TypeError(`${label} values must be booleans`)
