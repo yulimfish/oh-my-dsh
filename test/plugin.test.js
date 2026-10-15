@@ -196,6 +196,11 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(categoryConfig.categoryRoutes[0].description, 'A short chooser description.')
   assert.deepEqual(categoryConfig.categoryRoutes[0].tools, { read: false, bash: true })
   assert.deepEqual(Config({ roleRoutes: [{ role: 'reviewer', denyTools: ['bash'] }] }).roleRoutes[0].denyTools, ['bash'])
+  assert.deepEqual(Config({}).providerConcurrency, {})
+  assert.deepEqual(Config({}).modelConcurrency, {})
+  const concurrencyConfig = Config({ providerConcurrency: { 'deepseek-official': 2 }, modelConcurrency: { 'deepseek-official/deepseek-flash': 1 } })
+  assert.deepEqual(concurrencyConfig.providerConcurrency, { 'deepseek-official': 2 })
+  assert.deepEqual(concurrencyConfig.modelConcurrency, { 'deepseek-official/deepseek-flash': 1 })
   assert.equal(Config({}).enableTeamTools, false)
   assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
   assert.equal(Config({}).enableSessionSearch, false)
@@ -233,6 +238,33 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
     enabled: true,
     chains: [{ provider: 'primary', model: 'main' }],
   } }), /fallbacks/u)
+})
+
+test('validates bounded provider/model concurrency maps before plugin registration', () => {
+  const accepted = makeContext()
+  apply(accepted.ctx, {
+    ...baseConfig,
+    providerConcurrency: { 'deepseek-official': 0 },
+    modelConcurrency: { 'deepseek-official/deepseek-flash': 0 },
+  })
+  assert.ok(accepted.tools.has('dsh_omo_task'), 'zero is an accepted unlimited route cap')
+
+  const tooManyProviders = Object.fromEntries(Array.from({ length: 65 }, (_value, index) => [`provider-${index}`, 1]))
+  const tooManyModels = Object.fromEntries(Array.from({ length: 129 }, (_value, index) => [`provider/model-${index}`, 1]))
+  const invalid = [
+    [{ providerConcurrency: { provider: -1 } }, /non-negative safe integer/u],
+    [{ providerConcurrency: { ' provider': 1 } }, /invalid route key/u],
+    [{ modelConcurrency: { 'provider-only': 1 } }, /exact non-empty provider\/model/u],
+    [{ modelConcurrency: { 'provider/model': 1.5 } }, /non-negative safe integer/u],
+    [{ providerConcurrency: tooManyProviders }, /at most 64 entries/u],
+    [{ modelConcurrency: tooManyModels }, /at most 128 entries/u],
+    [{ modelConcurrency: { [`provider/model\u202e`]: 1 } }, /invalid route key/u],
+  ]
+  for (const [partial, message] of invalid) {
+    const fixture = makeContext()
+    assert.throws(() => apply(fixture.ctx, { ...baseConfig, ...partial }), message)
+    assert.equal(fixture.tools.has('dsh_omo_task'), false, 'invalid caps fail before tool registration')
+  }
 })
 
 test('runtime fallback registers DSH request events only with explicit opt-in', async () => {
@@ -2875,6 +2907,181 @@ test('reserves worker capacity before asynchronous child startup', async () => {
   await assert.rejects(second, /worker limit reached/)
   acceptStart({ id: 'child-one', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose: async () => {} })
   assert.deepEqual(await first, { childId: 'child-one', role: 'explore', status: 'started' })
+})
+
+test('provider concurrency caps explicit LLM routes across models and releases on startup failure and settlement', async () => {
+  const fixture = makeContext()
+  const pendingResults = []
+  const starts = []
+  fixture.ctx.subagents.start = async (provider, request) => {
+    starts.push({ provider, request })
+    if (starts.length === 1) throw new Error('transient start failure')
+    let resolveResult
+    const result = new Promise(resolve => { resolveResult = resolve })
+    pendingResults.push(resolveResult)
+    return { id: `child-route-${starts.length}`, result, dispose: async () => {} }
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 4,
+    providerConcurrency: { 'llm-provider': 1 },
+    roleRoutes: [
+      { role: 'explore', provider: 'llm-provider', model: 'model-a' },
+      { role: 'quick', provider: 'llm-provider', model: 'model-b' },
+    ],
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal }
+  await assert.rejects(tool.execute({ role: 'explore', task: 'startup failure releases its route slot' }, exec), /transient start failure/u)
+  await tool.execute({ role: 'explore', task: 'hold model-a slot' }, exec)
+  assert.equal(starts[1].request.agentOptions.provider, 'llm-provider')
+  assert.equal(starts[1].request.agentOptions.model, 'model-a')
+  await assert.rejects(tool.execute({ role: 'quick', task: 'different model shares provider cap' }, exec), /provider concurrency limit reached/u)
+  assert.equal(starts.length, 2)
+
+  pendingResults[0]({ stopReason: 'completed', output: [] })
+  await new Promise(resolve => setImmediate(resolve))
+  await tool.execute({ role: 'quick', task: 'provider slot released after settlement' }, exec)
+  assert.equal(starts.length, 3)
+  pendingResults[1]({ stopReason: 'completed', output: [] })
+  await new Promise(resolve => setImmediate(resolve))
+})
+
+test('model concurrency overrides provider caps for exact routes and leaves other models isolated', async () => {
+  const fixture = makeContext()
+  const pendingResults = []
+  const starts = []
+  fixture.ctx.subagents.start = async (provider, request) => {
+    starts.push({ provider, request })
+    let resolveResult
+    const result = new Promise(resolve => { resolveResult = resolve })
+    pendingResults.push(resolveResult)
+    return { id: `child-model-${starts.length}`, result, dispose: async () => {} }
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 4,
+    providerConcurrency: { 'llm-provider': 1 },
+    modelConcurrency: { 'llm-provider/model-a': 2 },
+    roleRoutes: [
+      { role: 'explore', provider: 'llm-provider', model: 'model-a' },
+      { role: 'quick', provider: 'llm-provider', model: 'model-b' },
+    ],
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal }
+  await tool.execute({ role: 'explore', task: 'model-a slot one' }, exec)
+  await tool.execute({ role: 'explore', task: 'model-a slot two' }, exec)
+  await assert.rejects(tool.execute({ role: 'explore', task: 'model-a slot three' }, exec), /model concurrency limit reached/u)
+  await tool.execute({ role: 'quick', task: 'model-b uses provider default' }, exec)
+  await assert.rejects(tool.execute({ role: 'quick', task: 'model-b provider limit reached' }, exec), /provider concurrency limit reached/u)
+  assert.equal(starts.length, 3)
+  assert.deepEqual(starts.map(({ request }) => request.agentOptions.model), ['model-a', 'model-a', 'model-b'])
+
+  for (const resolve of pendingResults) resolve({ stopReason: 'completed', output: [] })
+  await new Promise(resolve => setImmediate(resolve))
+})
+
+test('zero model concurrency overrides provider cap but cannot exceed the global ceiling', async () => {
+  const fixture = makeContext()
+  const pendingResults = []
+  fixture.ctx.subagents.start = async (_provider, _request) => {
+    let resolveResult
+    const result = new Promise(resolve => { resolveResult = resolve })
+    pendingResults.push(resolveResult)
+    return { id: `child-unlimited-model-${pendingResults.length}`, result, dispose: async () => {} }
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 2,
+    providerConcurrency: { 'llm-provider': 1 },
+    modelConcurrency: { 'llm-provider/model-a': 0 },
+    roleRoutes: [{ role: 'explore', provider: 'llm-provider', model: 'model-a' }],
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal }
+  await tool.execute({ role: 'explore', task: 'unlimited model slot one' }, exec)
+  await tool.execute({ role: 'explore', task: 'unlimited model slot two' }, exec)
+  await assert.rejects(tool.execute({ role: 'explore', task: 'global ceiling still applies' }, exec), /worker limit reached/u)
+  assert.equal(pendingResults.length, 2)
+  for (const resolve of pendingResults) resolve({ stopReason: 'completed', output: [] })
+  await new Promise(resolve => setImmediate(resolve))
+})
+
+test('concurrency admission keys the selected fallback route and prevents races after async preflight', async () => {
+  const pendingPreflights = []
+  const pendingResults = []
+  const starts = []
+  const fixture = makeContext({
+    services: {
+      llm: {
+        resolveCallConfig: config => {
+          if (config.provider === 'primary-provider') return Promise.reject(new Error('primary unsupported'))
+          return new Promise(resolve => pendingPreflights.push({ config, resolve }))
+        },
+      },
+    },
+  })
+  fixture.ctx.subagents.start = async (provider, request) => {
+    starts.push({ provider, request })
+    let resolveResult
+    const result = new Promise(resolve => { resolveResult = resolve })
+    pendingResults.push(resolveResult)
+    return { id: `child-fallback-${starts.length}`, result, dispose: async () => {} }
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 4,
+    modelConcurrency: {
+      'primary-provider/primary-model': 0,
+      'backup-provider/backup-model': 1,
+    },
+    categoryRoutes: [{
+      name: 'research', provider: 'primary-provider', model: 'primary-model',
+      fallbackModels: [{ provider: 'backup-provider', model: 'backup-model' }],
+    }],
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal }
+  const first = tool.execute({ role: 'explore', category: 'research', task: 'first fallback admission' }, exec)
+  const second = tool.execute({ role: 'explore', category: 'research', task: 'second fallback admission' }, exec)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(pendingPreflights.length, 2)
+  for (const pending of pendingPreflights) pending.resolve(pending.config)
+  const outcomes = await Promise.allSettled([first, second])
+  assert.equal(outcomes.filter(outcome => outcome.status === 'fulfilled').length, 1)
+  assert.ok(outcomes.some(outcome => outcome.status === 'rejected' && /model concurrency limit reached/u.test(outcome.reason.message)))
+  assert.equal(starts.length, 1)
+  assert.deepEqual(starts[0].request.agentOptions, { provider: 'backup-provider', model: 'backup-model' })
+
+  pendingResults[0]({ stopReason: 'completed', output: [] })
+  await new Promise(resolve => setImmediate(resolve))
+})
+
+test('route caps do not infer the inherited model or conflate the DSH subagent provider', async () => {
+  const fixture = makeContext()
+  const pendingResults = []
+  fixture.ctx.subagents.start = async (provider, request) => {
+    let resolveResult
+    const result = new Promise(resolve => { resolveResult = resolve })
+    pendingResults.push(resolveResult)
+    fixture.starts.push({ provider, request })
+    return { id: `child-inherited-${fixture.starts.length}`, result, dispose: async () => {} }
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 2,
+    providerConcurrency: { spawn: 1 },
+    modelConcurrency: { 'spawn/unknown-parent-model': 1 },
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal }
+  await tool.execute({ role: 'explore', task: 'inherit model one' }, exec)
+  await tool.execute({ role: 'explore', task: 'inherit model two' }, exec)
+  assert.equal(fixture.starts.length, 2)
+  assert.ok(fixture.starts.every(start => start.provider === 'spawn' && start.request.agentOptions === undefined))
+  for (const resolve of pendingResults) resolve({ stopReason: 'completed', output: [] })
+  await new Promise(resolve => setImmediate(resolve))
 })
 
 test('plugin disposal cancels active workers without queuing stale results', async () => {
