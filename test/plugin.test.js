@@ -2947,6 +2947,44 @@ test('provider concurrency caps explicit LLM routes across models and releases o
   await new Promise(resolve => setImmediate(resolve))
 })
 
+test('releases route admission on child settlement even if disposal is still pending', async () => {
+  const fixture = makeContext()
+  const pendingRuns = []
+  const starts = []
+  let releaseFirstDispose
+  fixture.ctx.subagents.start = async () => {
+    const sequence = starts.length + 1
+    starts.push(sequence)
+    let resolveResult
+    const result = new Promise(resolve => { resolveResult = resolve })
+    pendingRuns.push(resolveResult)
+    return {
+      id: `child-slow-dispose-${sequence}`,
+      result,
+      dispose: async () => {
+        if (sequence === 1) await new Promise(resolve => { releaseFirstDispose = resolve })
+      },
+    }
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 2,
+    providerConcurrency: { 'llm-provider': 1 },
+    roleRoutes: [{ role: 'explore', provider: 'llm-provider', model: 'model-a' }],
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal }
+  await tool.execute({ role: 'explore', task: 'first settled child' }, exec)
+  pendingRuns[0]({ stopReason: 'completed', output: [] })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(typeof releaseFirstDispose, 'function')
+  await tool.execute({ role: 'explore', task: 'new route slot while dispose is pending' }, exec)
+  assert.equal(starts.length, 2)
+  releaseFirstDispose()
+  pendingRuns[1]({ stopReason: 'completed', output: [] })
+  await new Promise(resolve => setImmediate(resolve))
+})
+
 test('model concurrency overrides provider caps for exact routes and leaves other models isolated', async () => {
   const fixture = makeContext()
   const pendingResults = []
@@ -3096,7 +3134,11 @@ test('plugin disposal cancels active workers without queuing stale results', asy
       resolveResult({ stopReason: 'aborted', output: [] })
     },
   })
-  apply(fixture.ctx, baseConfig)
+  apply(fixture.ctx, {
+    ...baseConfig,
+    providerConcurrency: { 'llm-provider': 1 },
+    roleRoutes: [{ role: 'explore', provider: 'llm-provider', model: 'model-a' }],
+  })
   await fixture.tools.get('dsh_omo_task').execute(
     { role: 'explore', task: 'Inspect one path' },
     { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal },
@@ -3106,6 +3148,35 @@ test('plugin disposal cancels active workers without queuing stale results', asy
   await workerEffect.dispose()
   await new Promise(resolve => setImmediate(resolve))
   assert.ok(disposeCalls >= 1)
+  assert.equal(fixture.followups.length, 0)
+})
+
+test('plugin disposal releases a route lease while subagent startup is still pending', async () => {
+  const fixture = makeContext()
+  let acceptStart
+  let disposeCalls = 0
+  fixture.ctx.subagents.start = () => new Promise(resolve => { acceptStart = resolve })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    providerConcurrency: { 'llm-provider': 1 },
+    roleRoutes: [{ role: 'explore', provider: 'llm-provider', model: 'model-a' }],
+  })
+  const pendingStart = fixture.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'startup remains pending during unload' },
+    { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal },
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(typeof acceptStart, 'function')
+  const workerEffect = fixture.effects.find(effect => effect.label === 'dsh-omo background workers')
+  assert.ok(workerEffect)
+  await workerEffect.dispose()
+  acceptStart({
+    id: 'child-started-after-unload',
+    result: Promise.resolve({ stopReason: 'completed', output: [] }),
+    dispose: async () => { disposeCalls += 1 },
+  })
+  await assert.rejects(pendingStart, /unloaded while starting/u)
+  assert.equal(disposeCalls, 1)
   assert.equal(fixture.followups.length, 0)
 })
 
