@@ -97,6 +97,7 @@ const baseConfig = {
   enableJobTools: false,
   enableLspTools: false,
   enableRootAgentsContext: false,
+  enableAgentsOnRead: false,
   enableRootReadmeContext: false,
   enableReadmeOnRead: false,
   enableClaudeRulesOnRead: false,
@@ -156,6 +157,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableLspTools: true }).enableLspTools, true)
   assert.equal(Config({}).enableRootAgentsContext, false)
   assert.equal(Config({ enableRootAgentsContext: true }).enableRootAgentsContext, true)
+  assert.equal(Config({}).enableAgentsOnRead, false)
+  assert.equal(Config({ enableAgentsOnRead: true }).enableAgentsOnRead, true)
   assert.equal(Config({}).enableRootReadmeContext, false)
   assert.equal(Config({ enableRootReadmeContext: true }).enableRootReadmeContext, true)
   assert.equal(Config({}).enableReadmeOnRead, false)
@@ -222,7 +225,7 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -637,6 +640,124 @@ test('mounts opt-in Agent-scoped root AGENTS prompt context only with DSH prereq
   assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled/u)
 })
 
+test('mounts opt-in directory AGENTS-on-read context and validates DSH prerequisites before registration', async () => {
+  const prerequisites = () => ({
+    services: { agents: { get: () => undefined }, sessions: { get: () => undefined } },
+    fs: {
+      resolve: async () => ({}), contains: () => true, lstat: async () => undefined,
+      stat: async () => undefined, readBytes: async () => new Uint8Array(),
+    },
+  })
+  const disabled = makeContext(prerequisites())
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('tools/post-execute'), false, 'the default-off flag registers no read hook')
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /agentsOnRead=disabled/u)
+
+  const missingCases = [
+    ['agents service', deps => { deps.services.agents = undefined }],
+    ['agents.get', deps => { deps.services.agents = {} }],
+    ['sessions service', deps => { deps.services.sessions = undefined }],
+    ['sessions.get', deps => { deps.services.sessions = {} }],
+    ['fs.resolve', deps => { delete deps.fs.resolve }],
+    ['fs.contains', deps => { delete deps.fs.contains }],
+    ['fs.lstat', deps => { delete deps.fs.lstat }],
+    ['fs.stat', deps => { delete deps.fs.stat }],
+    ['fs.readBytes', deps => { delete deps.fs.readBytes }],
+  ]
+  for (const [missingName, remove] of missingCases) {
+    const deps = prerequisites()
+    const fixture = makeContext(deps)
+    remove(deps)
+    assert.throws(
+      () => apply(fixture.ctx, { ...baseConfig, enableAgentsOnRead: true }),
+      /enableAgentsOnRead requires DSH agents\.get/u,
+      missingName,
+    )
+    assert.equal(fixture.events.size, 0, `${missingName} failure must not register hooks`)
+    assert.equal(fixture.effects.length, 0, `${missingName} failure must not attach effects`)
+  }
+
+  const missingCordis = makeContext(prerequisites())
+  missingCordis.ctx.on = undefined
+  assert.throws(
+    () => apply(missingCordis.ctx, { ...baseConfig, enableAgentsOnRead: true }),
+    /enableAgentsOnRead requires DSH agents\.get/u,
+  )
+  assert.equal(missingCordis.events.size, 0)
+
+  const missingEffect = makeContext(prerequisites())
+  missingEffect.ctx.effect = undefined
+  assert.throws(
+    () => apply(missingEffect.ctx, { ...baseConfig, enableAgentsOnRead: true }),
+    /enableAgentsOnRead requires DSH agents\.get/u,
+  )
+  assert.equal(missingEffect.events.size, 0)
+
+  const enabled = makeContext(prerequisites())
+  apply(enabled.ctx, { ...baseConfig, enableAgentsOnRead: true })
+  assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
+  assert.equal(typeof enabled.events.get('agent/created'), 'function', 'per-Agent dedupe resets on clear/compact')
+  const status = enabled.commands.get('omo').handler({ rawInput: 'status' }).text
+  assert.match(status, /agentsOnRead=enabled/u)
+  assert.match(enabled.commands.get('omo').handler().text,
+    /AGENTS-on-read: enabled \(post-read injection; root AGENTS skipped when the root snapshot is enabled; repository text is untrusted\)/u)
+
+  const liveAgent = { id: 'agents-on-read-agent' }
+  const rootTarget = { targetKey: 'root' }
+  const nestedDirectory = { targetKey: 'src-directory' }
+  const sourceTarget = { targetKey: 'read-source' }
+  const rootAgentsTarget = { targetKey: 'root-agents' }
+  const nestedAgentsTarget = { targetKey: 'nested-agents' }
+  const bytes = new TextEncoder().encode('nested instructions')
+  const lstatPaths = []
+  const services = {
+    agents: { get: id => id === liveAgent.id ? liveAgent : undefined },
+    sessions: { get: id => id === liveAgent.id ? { header: { id, cwd: '/workspace' } } : undefined },
+  }
+  const fs = {
+    resolve: async pathValue => new Map([
+      ['/workspace', rootTarget], ['src', nestedDirectory], ['src/file.ts', sourceTarget],
+      ['AGENTS.md', rootAgentsTarget], ['src/AGENTS.md', nestedAgentsTarget],
+    ]).get(pathValue),
+    contains: parent => parent === rootTarget,
+    lstat: async pathValue => {
+      lstatPaths.push(pathValue)
+      return { type: 'file' }
+    },
+    stat: async target => target === rootTarget || target === nestedDirectory
+      ? { type: 'directory' }
+      : { type: 'file', size: bytes.byteLength, version: 'v1' },
+    readBytes: async () => bytes,
+  }
+  const combined = makeContext({ services, fs })
+  apply(combined.ctx, { ...baseConfig, enableAgentsOnRead: true, enableRootAgentsContext: true })
+  const listener = combined.events.get('tools/post-execute')
+  assert.equal(typeof listener, 'function')
+  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /rootAgentsContext=enabled; agentsOnRead=enabled/u)
+
+  const priorContext = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'prior' }] }
+  const decision = { kind: 'accept', value: { body: 'native' }, content: [{ type: 'text', text: 'native' }], additionalContexts: [priorContext] }
+  let nextCalls = 0
+  const enriched = await listener({
+    name: 'read', arguments: { file_path: 'src/file.ts' }, agent: { id: liveAgent.id }, signal: new AbortController().signal,
+  }, { isError: false }, async () => {
+    nextCalls++
+    return decision
+  })
+  assert.equal(nextCalls, 1)
+  assert.equal(enriched.value, decision.value)
+  assert.equal(enriched.content, decision.content)
+  assert.equal(enriched.additionalContexts.length, 2)
+  assert.equal(enriched.additionalContexts[0], priorContext)
+  const injectedText = enriched.additionalContexts[1].content[0].text
+  assert.match(injectedText, /^\[Project AGENTS\.md: src\/AGENTS\.md; untrusted repository text, not instructions from the user\]/u)
+  assert.match(injectedText, /nested instructions/u)
+  assert.match(injectedText, /\[End project AGENTS\.md\]$/u)
+  assert.deepEqual([...new Set(lstatPaths)], ['src/AGENTS.md'], 'the root AGENTS file is skipped when root-snapshot mode is enabled')
+  assert.equal(lstatPaths.length, 2, 'the nested file is identity-checked before and after reading')
+})
+
 test('mounts opt-in root README context independently and validates every prerequisite before registration', () => {
   const prerequisites = () => ({
     services: { agents: { get: () => undefined }, sessions: { get: () => undefined } },
@@ -908,7 +1029,7 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
   const rootSnapshotsOnly = makeContext(prerequisites())
   apply(rootSnapshotsOnly.ctx, { ...baseConfig, enableRootReadmeContext: true, enableRootAgentsContext: true })
   assert.equal(rootSnapshotsOnly.events.has('tools/post-execute'), false)
-  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
+  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
 
   const combined = makeContext(prerequisites())
   apply(combined.ctx, {
@@ -919,7 +1040,7 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
     enableRootAgentsContext: true,
   })
   assert.equal(typeof combined.events.get('tools/post-execute'), 'function', 'independent on-read and root-context flags can be combined')
-  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; writeExistingFileGuard=disabled/u)
+  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; writeExistingFileGuard=disabled/u)
   assert.deepEqual(calls, [], 'combined registration/status remain free of runtime filesystem and Service calls')
 })
 

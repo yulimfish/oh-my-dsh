@@ -13,7 +13,7 @@ import { registerSessionInfoTool } from './session-info.js'
 import { registerLspNavigationTools } from './lsp-tools.js'
 import { registerRootAgentsContext } from './agents-context.js'
 import { registerRootReadmeContext } from './readme-context.js'
-import { registerReadmeOnReadContext } from './readme-on-read.js'
+import { registerAgentsOnReadContext, registerReadmeOnReadContext } from './readme-on-read.js'
 import { registerClaudeRulesOnReadContext } from './claude-rules-context.js'
 import { createJobKillCommand } from './job-commands.js'
 import { registerJobTools } from './job-tools.js'
@@ -58,6 +58,7 @@ export const Config = z.object({
   enableJobTools: z.boolean().default(false),
   enableLspTools: z.boolean().default(false),
   enableRootAgentsContext: z.boolean().default(false),
+  enableAgentsOnRead: z.boolean().default(false),
   enableRootReadmeContext: z.boolean().default(false),
   enableReadmeOnRead: z.boolean().default(false),
   enableClaudeRulesOnRead: z.boolean().default(false),
@@ -884,7 +885,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
               `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
               'Presence does not prove readiness or health. This command does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
@@ -893,7 +894,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
         if (rawInput) return { kind: 'error', text: 'Usage: /omo [status].' }
         return {
           kind: 'success',
-          text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). LSP navigation: ${config.enableLspTools ? 'enabled' : 'disabled'} (two read-only queries; provider-dependent and not a path authorization boundary). Root AGENTS context: ${config.enableRootAgentsContext ? 'enabled' : 'disabled'} (bounded cwd/AGENTS.md snapshot for new Agent scopes before their first step; root-only, no watcher, repository text is untrusted). Root README context: ${config.enableRootReadmeContext ? 'enabled' : 'disabled'} (opt-in root README.md snapshot for Agent prompt context). README-on-read: ${config.enableReadmeOnRead ? 'enabled' : 'disabled'} (post-read injection; root README skipped when the root snapshot is enabled). Claude rules after read/write/edit: ${config.enableClaudeRulesOnRead ? 'enabled' : 'disabled'} (legacy opt-in flag; no verified multiedit schema). Write-existing-file guard: ${config.enableWriteExistingFileGuard ? 'enabled' : 'disabled'} (final isError:false result for case-insensitive read of preflighted in-cwd regular file required before one same-Agent case-insensitive write; same-named custom Tools count; raw .omo slash-segment including .omo/.. aliases or overwrite boolean true/exact case-insensitive "true" without trimming bypass; args unchanged; verified missing/outside normally pass below caps, but caps may busy-deny writes; UX only, read/write TOCTOU remains). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
+          text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). LSP navigation: ${config.enableLspTools ? 'enabled' : 'disabled'} (two read-only queries; provider-dependent and not a path authorization boundary). Root AGENTS context: ${config.enableRootAgentsContext ? 'enabled' : 'disabled'} (bounded cwd/AGENTS.md snapshot for new Agent scopes before their first step; root-only, no watcher, repository text is untrusted). AGENTS-on-read: ${config.enableAgentsOnRead ? 'enabled' : 'disabled'} (post-read injection; root AGENTS skipped when the root snapshot is enabled; repository text is untrusted). Root README context: ${config.enableRootReadmeContext ? 'enabled' : 'disabled'} (opt-in root README.md snapshot for Agent prompt context). README-on-read: ${config.enableReadmeOnRead ? 'enabled' : 'disabled'} (post-read injection; root README skipped when the root snapshot is enabled). Claude rules after read/write/edit: ${config.enableClaudeRulesOnRead ? 'enabled' : 'disabled'} (legacy opt-in flag; no verified multiedit schema). Write-existing-file guard: ${config.enableWriteExistingFileGuard ? 'enabled' : 'disabled'} (final isError:false result for case-insensitive read of preflighted in-cwd regular file required before one same-Agent case-insensitive write; same-named custom Tools count; raw .omo slash-segment including .omo/.. aliases or overwrite boolean true/exact case-insensitive "true" without trimming bypass; args unchanged; verified missing/outside normally pass below caps, but caps may busy-deny writes; UX only, read/write TOCTOU remains). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
         }
       },
     },
@@ -1009,6 +1010,13 @@ export function apply(ctx, rawConfig) {
     || typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
     throw new Error('dsh-omo: enableReadmeOnRead requires DSH agents.get, sessions.get, fs.resolve/contains/lstat/stat/readBytes, and Cordis ctx.on/ctx.effect')
   }
+  if (config.enableAgentsOnRead && (!agentsService || typeof agentsService.get !== 'function'
+    || !sessionsService || typeof sessionsService.get !== 'function'
+    || !ctx.fs || typeof ctx.fs.resolve !== 'function' || typeof ctx.fs.contains !== 'function'
+    || typeof ctx.fs.lstat !== 'function' || typeof ctx.fs.stat !== 'function' || typeof ctx.fs.readBytes !== 'function'
+    || typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
+    throw new Error('dsh-omo: enableAgentsOnRead requires DSH agents.get, sessions.get, fs.resolve/contains/lstat/stat/readBytes, and Cordis ctx.on/ctx.effect')
+  }
   if (config.enableClaudeRulesOnRead && (!agentsService || typeof agentsService.get !== 'function'
     || !sessionsService || typeof sessionsService.get !== 'function'
     || !ctx.fs || typeof ctx.fs.resolve !== 'function' || typeof ctx.fs.contains !== 'function'
@@ -1037,6 +1045,7 @@ export function apply(ctx, rawConfig) {
       sessionInfo: config.enableSessionInfo === true,
       lspTools: config.enableLspTools === true,
       rootAgentsContext: config.enableRootAgentsContext === true,
+      agentsOnRead: config.enableAgentsOnRead === true,
       rootReadmeContext: config.enableRootReadmeContext === true,
       readmeOnRead: config.enableReadmeOnRead === true,
       claudeRulesOnRead: config.enableClaudeRulesOnRead === true,
@@ -1133,6 +1142,7 @@ export function apply(ctx, rawConfig) {
     ctx.effect(() => disposeLspTools, 'dsh-omo read-only LSP navigation tools')
   }
   if (config.enableRootAgentsContext) registerRootAgentsContext(ctx, agentsService, sessionsService, ctx.fs)
+  if (config.enableAgentsOnRead) registerAgentsOnReadContext(ctx, agentsService, sessionsService, ctx.fs, { skipRoot: config.enableRootAgentsContext })
   if (config.enableRootReadmeContext) registerRootReadmeContext(ctx, agentsService, sessionsService, ctx.fs)
   if (config.enableReadmeOnRead) registerReadmeOnReadContext(ctx, agentsService, sessionsService, ctx.fs, { skipRoot: config.enableRootReadmeContext })
   if (config.enableClaudeRulesOnRead) registerClaudeRulesOnReadContext(ctx, agentsService, sessionsService, ctx.fs)

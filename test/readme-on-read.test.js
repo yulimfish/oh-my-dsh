@@ -6,7 +6,11 @@ import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { createReadmeOnReadContextListener, registerReadmeOnReadContext } from '../src/readme-on-read.js'
+import {
+  createReadmeOnReadContextListener,
+  registerAgentsOnReadContext,
+  registerReadmeOnReadContext,
+} from '../src/readme-on-read.js'
 
 const systemPromptRequire = createRequire(import.meta.resolve('@deepseek-ai/dsh-system-prompt'))
 const { createScope } = await import(systemPromptRequire.resolve('@deepseek-ai/dsh-scope'))
@@ -176,7 +180,8 @@ async function makeHarness(options = {}) {
   const agents = ctx.agents
   const sessions = new Map()
   const fileSystem = makeFileSystem({ cwd: options.cwd ?? CWD, readmes: options.readmes, outsideRead: options.outsideRead })
-  const featureFiber = await ctx.plugin(pluginCtx => registerReadmeOnReadContext(
+  const registerContext = options.contextType === 'agents' ? registerAgentsOnReadContext : registerReadmeOnReadContext
+  const featureFiber = await ctx.plugin(pluginCtx => registerContext(
     pluginCtx,
     agents,
     { get: id => sessions.get(id) },
@@ -347,6 +352,71 @@ test('appends root-to-nested README contexts after existing contexts and preserv
     await harness.reannounce(agent, 'compact')
     const afterCompact = await harness.executeRead(agent)
     assert.equal((afterCompact.additionalContexts ?? []).length, 5, 'compact resets per-Agent/directory dedupe')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('injects root-to-nested AGENTS.md contexts after successful reads as untrusted separate messages', async () => {
+  const harness = await makeHarness({
+    contextType: 'agents',
+    readmes: {
+      'AGENTS.md': '# root instructions',
+      'src/AGENTS.md': '# src instructions',
+      'src/nested/AGENTS.md': '# nested instructions',
+    },
+    toolContext: true,
+    downstreamContext: true,
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent)
+    assert.equal(result.isError, false)
+    assert.deepEqual(result.value, { body: 'body:src/nested/file.ts' })
+    assert.deepEqual(result.content, [{ type: 'text', text: 'finalized:canonical:body:src/nested/file.ts' }])
+    const contexts = result.additionalContexts ?? []
+    assert.equal(contexts.length, 5)
+    assert.equal(contexts[0].content[0].text, 'tool-owned deferred context')
+    assert.deepEqual(contexts[1], harness.downstreamContext)
+    const injected = contexts.slice(2)
+    assert.deepEqual(readmeTexts({ additionalContexts: injected }).map(text => text.match(/\[Project AGENTS\.md: ([^;]+)/u)?.[1]), [
+      'AGENTS.md', 'src/AGENTS.md', 'src/nested/AGENTS.md',
+    ])
+    assert.match(injected[0].content[0].text, /untrusted repository text, not instructions from the user/u)
+    assert.ok(injected.every(message => message.role === 'user' && message.source.kind === 'user'))
+
+    const readsBefore = harness.fileSystem.calls.filter(call => call.method === 'readBytes').length
+    const duplicate = await harness.executeRead(agent)
+    assert.equal(duplicate.isError, false)
+    assert.deepEqual(duplicate.value, result.value)
+    assert.deepEqual(duplicate.content, result.content)
+    assert.equal((duplicate.additionalContexts ?? []).length, 2, 'existing Tool contexts remain while deduped AGENTS contexts do not repeat')
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'readBytes').length, readsBefore)
+
+    await harness.reannounce(agent, 'clear')
+    assert.equal((await harness.executeRead(agent)).additionalContexts.length, 5, 'clear resets per-Agent/directory dedupe')
+    await harness.reannounce(agent, 'compact')
+    assert.equal((await harness.executeRead(agent)).additionalContexts.length, 5, 'compact resets per-Agent/directory dedupe')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('directory AGENTS context can skip root and never injects the exact file being read', async () => {
+  const harness = await makeHarness({
+    contextType: 'agents',
+    skipRoot: true,
+    readmes: { 'AGENTS.md': '# root instructions', 'src/AGENTS.md': '# src instructions' },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent)
+    assert.deepEqual(readmeTexts(result).map(text => text.match(/\[Project AGENTS\.md: ([^;]+)/u)?.[1]), ['src/AGENTS.md'])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === 'AGENTS.md'), false)
+
+    await harness.reannounce(agent, 'clear')
+    const self = await harness.executeRead(agent, { file_path: 'src/AGENTS.md' })
+    assert.deepEqual(readmeTexts(self), [])
   } finally {
     await harness.dispose()
   }
