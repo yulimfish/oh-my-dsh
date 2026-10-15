@@ -19,6 +19,7 @@ import { createJobKillCommand } from './job-commands.js'
 import { registerJobTools } from './job-tools.js'
 import { createModelCapabilitiesCommand } from './model-capabilities.js'
 import { normalizeCategoryRoutes, resolveCategoryRoute } from './category-routes.js'
+import { normalizeRuntimeFallback, registerRuntimeFallback } from './runtime-fallback.js'
 import { buildRefactorDirective, parseRefactorInput, REFACTOR_COMMAND_HINT } from './refactor-command.js'
 import { buildUlwExecuteDirective, parseUlwExecuteInput, ULW_EXECUTE_COMMAND_HINT } from './ulw-execute-command.js'
 import { normalizeUserAgents } from './user-agents.js'
@@ -96,6 +97,20 @@ export const Config = z.object({
     allowTools: z.array(z.string()),
     denyTools: z.array(z.string()),
   })).default([]),
+  runtimeFallback: z.object({
+    enabled: z.boolean().default(false),
+    retryOnStatuses: z.array(z.number()).default([429, 500, 502, 503, 504]),
+    chains: z.array(z.object({
+      provider: z.string().required(),
+      model: z.string().required(),
+      fallbacks: z.array(z.object({
+        provider: z.string().required(),
+        model: z.string().required(),
+        reasoningEffort: z.string(),
+        maxTokens: z.number(),
+      })).required(),
+    })).default([]),
+  }).default({}),
 })
 
 function buildUltraworkGuidance(disabledOmoCommands, activeRoleNames, writeExistingFileGuardEnabled) {
@@ -869,7 +884,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
               `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
               'Presence does not prove readiness or health. This command does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
@@ -926,6 +941,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
 
 export function apply(ctx, rawConfig) {
   const config = rawConfig
+  const runtimeFallbackPolicy = normalizeRuntimeFallback(config.runtimeFallback)
   const goalService = optionalService(ctx, 'goals')
   const llmService = optionalService(ctx, 'llm')
   const teamService = optionalService(ctx, 'agentTeams')
@@ -1012,6 +1028,7 @@ export function apply(ctx, rawConfig) {
   const statusSnapshot = Object.freeze({
     flags: Object.freeze({
       continuableTasks: config.enableContinuableTasks === true,
+      runtimeFallback: runtimeFallbackPolicy.enabled,
       teamTools: config.enableTeamTools === true,
       jobTools: config.enableJobTools === true,
       sessionSearch: config.enableSessionSearch === true,
@@ -1061,6 +1078,12 @@ export function apply(ctx, rawConfig) {
   const activeRuns = new Map()
   const lifecycle = { disposed: false }
 
+  registerRuntimeFallback(ctx, config.runtimeFallback, {
+    onFallback: ({ status, from, to }) => {
+      if (typeof ctx?.logger?.warn !== 'function') return
+      ctx.logger.warn(`[dsh-omo] runtime fallback after HTTP ${status}: ${from.provider}/${from.model} -> ${to.provider}/${to.model}`)
+    },
+  })
   if (config.enableWriteExistingFileGuard) registerWriteExistingFileGuard(ctx, agentsService, sessionsService, ctx.fs)
   ctx.tools.register(specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet))
   if (config.enableContinuableTasks) ctx.tools.register(continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet))

@@ -162,6 +162,40 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableReadmeOnRead: true }).enableReadmeOnRead, true)
   assert.equal(Config({}).enableClaudeRulesOnRead, false)
   assert.equal(Config({ enableClaudeRulesOnRead: true }).enableClaudeRulesOnRead, true)
+  assert.equal(Config({}).runtimeFallback.enabled, false)
+  assert.deepEqual(Config({}).runtimeFallback.retryOnStatuses, [429, 500, 502, 503, 504])
+  assert.deepEqual(Config({}).runtimeFallback.chains, [])
+  const fallbackConfig = Config({ runtimeFallback: {
+    enabled: true,
+    chains: [{ provider: 'primary', model: 'main', fallbacks: [{ provider: 'backup', model: 'alternate' }] }],
+  } })
+  assert.equal(fallbackConfig.runtimeFallback.enabled, true)
+  assert.equal(fallbackConfig.runtimeFallback.chains[0].fallbacks[0].provider, 'backup')
+  assert.throws(() => Config({ runtimeFallback: {
+    enabled: true,
+    chains: [{ provider: 'primary', model: 'main' }],
+  } }), /fallbacks/u)
+})
+
+test('runtime fallback registers DSH request events only with explicit opt-in', async () => {
+  const disabled = makeContext()
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('agent/request'), false)
+  assert.equal(disabled.events.has('agent/request-error'), false)
+
+  const enabled = makeContext()
+  apply(enabled.ctx, {
+    ...baseConfig,
+    runtimeFallback: {
+      enabled: true,
+      chains: [{ provider: 'primary', model: 'main', fallbacks: [{ provider: 'backup', model: 'alternate' }] }],
+    },
+  })
+  assert.deepEqual([...enabled.events.keys()].sort(), ['agent/disposed', 'agent/request', 'agent/request-error'])
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /runtimeFallback=enabled/u)
+  const lifecycle = enabled.effects.find(effect => effect.label === 'dsh-omo runtime model fallback')
+  assert.equal(typeof lifecycle?.dispose, 'function')
+  await lifecycle.dispose()
 })
 
 test('/omo status reports feature flags and service presence without calling business methods', () => {
@@ -188,7 +222,7 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
-  assert.match(status.text, /teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
