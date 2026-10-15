@@ -870,7 +870,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
               `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
-              `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}.`,
+              `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
               'Presence does not prove readiness or health. This command does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
           }
@@ -941,6 +941,7 @@ export function apply(ctx, rawConfig) {
   const lspService = optionalService(ctx, 'lsp')
   const sessionsService = optionalService(ctx, 'sessions')
   const agentsService = optionalService(ctx, 'agents')
+  const mcpResourcesService = optionalService(ctx, 'mcpResources')
   if (config.enableSessionSearch && (!sessionQueryService
     || typeof sessionQueryService.searchSessions !== 'function'
     || typeof sessionQueryService.observeSession !== 'function')) {
@@ -1032,6 +1033,7 @@ export function apply(ctx, rawConfig) {
       lsp: lspService !== undefined && lspService !== null,
       sessionQuery: sessionQueryService !== undefined && sessionQueryService !== null,
       sessions: sessionsService !== undefined && sessionsService !== null,
+      mcpResources: mcpResourcesService !== undefined && mcpResourcesService !== null,
     }),
   })
   assertPositiveInteger('maxConcurrent', config.maxConcurrent)

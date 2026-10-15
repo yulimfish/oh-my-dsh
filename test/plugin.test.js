@@ -174,6 +174,7 @@ test('/omo status reports feature flags and service presence without calling bus
     lsp: { query: () => calls.push('lsp.query') },
     sessionQuery: { searchSessions: () => calls.push('sessionQuery.searchSessions'), observeSession: () => calls.push('sessionQuery.observeSession') },
     sessions: { get: () => calls.push('sessions.get') },
+    mcpResources: { register: () => calls.push('mcpResources.register') },
   }
   const fixture = makeContext({ services })
   const mutableConfig = { ...baseConfig, enableJobTools: true, enableSessionSearch: true }
@@ -188,7 +189,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
   assert.match(status.text, /teamTools=disabled; jobTools=enabled; lspTools=disabled; rootAgentsContext=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
-  assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; lsp=present; sessionQuery=present; sessions=present/u)
+  assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
   assert.equal(command.handler({ rawInput: 'status extra' }).kind, 'error')
@@ -196,7 +197,7 @@ test('/omo status reports feature flags and service presence without calling bus
 
   const absent = makeContext()
   apply(absent.ctx, baseConfig)
-  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; agentTeams=absent; jobController=absent; lsp=absent; sessionQuery=absent; sessions=absent/u)
+  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; agentTeams=absent; jobController=absent; lsp=absent; sessionQuery=absent; sessions=absent; mcpResources=absent/u)
 })
 
 test('project-skill filters configure only the project provider and preserve bundled registrations', () => {
