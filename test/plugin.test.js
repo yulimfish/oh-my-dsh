@@ -344,6 +344,7 @@ test('Agent terminal tools are opt-in and require a registered Agent-owned PTY b
     spawn() {},
     read() {},
     startSend() {},
+    signal() { return Promise.resolve({ delivered: true, targetPgid: 1234 }) },
     kill() {},
   }
   const disabled = makeContext({ services: { terminals: terminalService } })
@@ -375,12 +376,21 @@ test('Agent terminal tools are opt-in and require a registered Agent-owned PTY b
   )
   assert.equal(noBackend.tools.size, 0)
 
+  const coreOnlyTerminalService = { ...terminalService }
+  delete coreOnlyTerminalService.signal
+  const coreOnly = makeContext({ services: { terminals: coreOnlyTerminalService } })
+  apply(coreOnly.ctx, { ...baseConfig, enableAgentTerminalTools: true })
+  assert.equal(coreOnly.tools.has('dsh_omo_terminal_interrupt'), false)
+  assert.equal(coreOnly.tools.has('dsh_omo_terminal_close'), true)
+  await coreOnly.effects.find(item => item.label === 'dsh-omo Agent terminal tools').dispose()
+
+  const backendReadsBeforeEnabled = backendReads
   const enabled = makeContext({ services: { terminals: terminalService } })
   apply(enabled.ctx, { ...baseConfig, enableAgentTerminalTools: true })
-  assert.equal(backendReads, 1, 'enabled setup reads the available backend names once')
+  assert.equal(backendReads, backendReadsBeforeEnabled + 1, 'each enabled setup reads the available backend names once')
   assert.deepEqual(
     [...enabled.tools.keys()].filter(name => name.startsWith('dsh_omo_terminal_')),
-    ['dsh_omo_terminal_list', 'dsh_omo_terminal_spawn', 'dsh_omo_terminal_read', 'dsh_omo_terminal_send', 'dsh_omo_terminal_close'],
+    ['dsh_omo_terminal_list', 'dsh_omo_terminal_spawn', 'dsh_omo_terminal_read', 'dsh_omo_terminal_send', 'dsh_omo_terminal_interrupt', 'dsh_omo_terminal_close'],
   )
   assert.deepEqual(enabled.tools.get('dsh_omo_terminal_spawn').parameters.properties.type.enum, ['pty-default'])
   assert.equal(enabled.tools.get('dsh_omo_terminal_read').finalizeContent, undefined)
@@ -391,6 +401,7 @@ test('Agent terminal tools are opt-in and require a registered Agent-owned PTY b
   await effect.dispose()
   assert.equal(enabled.tools.has('dsh_omo_terminal_spawn'), false)
   assert.equal(enabled.tools.has('dsh_omo_terminal_send'), false)
+  assert.equal(enabled.tools.has('dsh_omo_terminal_interrupt'), false)
 
   const prunedInputs = []
   const prunedBlocks = [{ type: 'text', text: 'pruned terminal output' }]
@@ -409,6 +420,7 @@ test('Agent terminal tools are opt-in and require a registered Agent-owned PTY b
   assert.equal(typeof sendTool.finalizeContent, 'function')
   assert.equal(enabledPruning.tools.get('dsh_omo_terminal_list').finalizeContent, undefined)
   assert.equal(enabledPruning.tools.get('dsh_omo_terminal_spawn').finalizeContent, undefined)
+  assert.equal(enabledPruning.tools.get('dsh_omo_terminal_interrupt').finalizeContent, undefined)
   assert.equal(enabledPruning.tools.get('dsh_omo_terminal_close').finalizeContent, undefined)
   const readContent = [{ type: 'text', text: 'full read output' }]
   const sendContent = [{ type: 'text', text: 'full send output' }]

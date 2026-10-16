@@ -24,7 +24,7 @@ function session(sessionId, owner, overrides = {}) {
 
 function makeTerminals(overrides = {}) {
   const sessions = new Map()
-  const calls = { listBackends: 0, list: [], spawn: [], read: [], send: [], kill: [] }
+  const calls = { listBackends: 0, list: [], spawn: [], read: [], send: [], signal: [], kill: [] }
   const service = {
     listBackends() { calls.listBackends += 1; return ['pty-default'] },
     list(owner) {
@@ -59,6 +59,12 @@ function makeTerminals(overrides = {}) {
         cancel: () => true,
       }
     },
+    async signal(owner, sessionId, signal) {
+      calls.signal.push({ owner, sessionId, signal })
+      const value = sessions.get(sessionId)
+      if (!value || value.owner !== owner) throw new Error('not owned')
+      return { delivered: true, targetPgid: value.pid }
+    },
     async kill(owner, sessionId, reason) {
       calls.kill.push({ owner, sessionId, reason })
       const value = sessions.get(sessionId)
@@ -88,10 +94,12 @@ test('fails closed without a current Agent before calling Host terminal methods'
   const fixture = makeTerminals()
   const tools = toolsFor(fixture.service)
   await assert.rejects(tools.get('dsh_omo_terminal_list').execute({}, {}), /live DSH Agent/u)
+  await assert.rejects(tools.get('dsh_omo_terminal_interrupt').execute({ sessionId: 'pty-1' }, {}), /live DSH Agent/u)
   assert.deepEqual(fixture.calls.list, [])
+  assert.deepEqual(fixture.calls.signal, [])
 })
 
-test('registers five profile-visible owner-fenced tools and disposes without killing sessions', () => {
+test('registers five core tools plus optional profile-visible SIGINT and disposes without killing sessions', () => {
   const fixture = makeTerminals()
   const registered = new Map()
   const ctx = { tools: { register(definition) { registered.set(definition.name, definition); return () => registered.delete(definition.name) } } }
@@ -101,6 +109,7 @@ test('registers five profile-visible owner-fenced tools and disposes without kil
     'dsh_omo_terminal_spawn',
     'dsh_omo_terminal_read',
     'dsh_omo_terminal_send',
+    'dsh_omo_terminal_interrupt',
     'dsh_omo_terminal_close',
   ])
   assert.equal(typeof registered.get('dsh_omo_terminal_spawn').execute, 'function')
@@ -108,6 +117,14 @@ test('registers five profile-visible owner-fenced tools and disposes without kil
   dispose()
   assert.equal(registered.size, 0)
   assert.deepEqual(fixture.calls.kill, [], 'plugin disposal does not close live Agent terminals')
+})
+
+test('keeps five core tools when the optional Host signal method is absent', () => {
+  const fixture = makeTerminals()
+  delete fixture.service.signal
+  const tools = toolsFor(fixture.service)
+  assert.equal(tools.has('dsh_omo_terminal_interrupt'), false)
+  assert.equal(tools.has('dsh_omo_terminal_close'), true)
 })
 
 test('spawn uses the exact Agent, registered backend, and no model cwd/owner input', async () => {
@@ -131,7 +148,7 @@ test('spawn uses the exact Agent, registered backend, and no model cwd/owner inp
   assert.equal(fixture.calls.spawn.length, 2)
 })
 
-test('list, read, send, and close always use exact exec.agent ownership', async () => {
+test('list, read, send, interrupt, and close always use exact exec.agent ownership', async () => {
   const fixture = makeTerminals()
   const tools = toolsFor(fixture.service)
   const spawn = await tools.get('dsh_omo_terminal_spawn').execute({ type: 'pty-default' }, { agent: ownerOne })
@@ -149,6 +166,11 @@ test('list, read, send, and close always use exact exec.agent ownership', async 
   assert.equal(fixture.calls.send.at(-1).owner, ownerOne)
   assert.equal(fixture.calls.send.at(-1).request.submit, true)
   assert.equal(fixture.calls.send.at(-1).request.signal.aborted, false)
+
+  const interrupted = await tools.get('dsh_omo_terminal_interrupt').execute({ sessionId: spawn.sessionId }, { agent: ownerOne })
+  assert.deepEqual(interrupted, { sessionId: spawn.sessionId, signal: 'SIGINT', delivered: true })
+  assert.deepEqual(fixture.calls.signal.at(-1), { owner: ownerOne, sessionId: spawn.sessionId, signal: 'SIGINT' })
+  assert.deepEqual(Object.keys(tools.get('dsh_omo_terminal_interrupt').parameters.properties), ['sessionId'])
 
   const closed = await tools.get('dsh_omo_terminal_close').execute({ sessionId: spawn.sessionId }, { agent: ownerOne })
   assert.equal(closed.closed, true)
@@ -172,7 +194,7 @@ test('fails closed when the Host send result has a malformed truncation flag', a
   )
 })
 
-test('a foreign Agent cannot list, read, send, or close another Agent terminal', async () => {
+test('a foreign Agent cannot list, read, send, interrupt, or close another Agent terminal', async () => {
   const fixture = makeTerminals()
   const tools = toolsFor(fixture.service)
   const spawned = await tools.get('dsh_omo_terminal_spawn').execute({ type: 'pty-default' }, { agent: ownerOne })
@@ -181,6 +203,7 @@ test('a foreign Agent cannot list, read, send, or close another Agent terminal',
   assert.deepEqual(foreignList.sessions, [])
   await assert.rejects(tools.get('dsh_omo_terminal_read').execute({ sessionId: spawned.sessionId }, { agent: ownerTwo }), /Could not read/u)
   await assert.rejects(tools.get('dsh_omo_terminal_send').execute({ sessionId: spawned.sessionId, text: 'echo forbidden' }, { agent: ownerTwo }), /Could not start a send/u)
+  await assert.rejects(tools.get('dsh_omo_terminal_interrupt').execute({ sessionId: spawned.sessionId }, { agent: ownerTwo }), /Could not interrupt/u)
   await assert.rejects(tools.get('dsh_omo_terminal_close').execute({ sessionId: spawned.sessionId }, { agent: ownerTwo }), /Could not close/u)
 
   assert.deepEqual(fixture.calls.list, [ownerTwo])
@@ -188,6 +211,80 @@ test('a foreign Agent cannot list, read, send, or close another Agent terminal',
   assert.equal(fixture.calls.send.at(-1).owner, ownerTwo)
   assert.equal(fixture.calls.kill.at(-1).owner, ownerTwo)
   assert.equal(fixture.sessions.has(spawned.sessionId), true, 'foreign operations leave the original PTY open')
+})
+
+test('fails closed on malformed Host SIGINT responses', async () => {
+  const fixture = makeTerminals()
+  const tools = toolsFor(fixture.service)
+  const spawned = await tools.get('dsh_omo_terminal_spawn').execute({ type: 'pty-default' }, { agent: ownerOne })
+  fixture.service.signal = async () => ({ delivered: true, targetPgid: Number.NaN })
+  await assert.rejects(
+    tools.get('dsh_omo_terminal_interrupt').execute({ sessionId: spawned.sessionId }, { agent: ownerOne }),
+    /invalid terminal result/u,
+  )
+})
+
+test('does not invoke Host SIGINT when cancelled before the tool starts', async () => {
+  const fixture = makeTerminals()
+  const tools = toolsFor(fixture.service)
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(
+    tools.get('dsh_omo_terminal_interrupt').execute({ sessionId: 'pty-1' }, { agent: ownerOne, signal: controller.signal }),
+    /was cancelled/u,
+  )
+  assert.deepEqual(fixture.calls.signal, [])
+})
+
+test('reports uncertain delivery when cancellation races a pending Host SIGINT', async () => {
+  const fixture = makeTerminals()
+  const tools = toolsFor(fixture.service)
+  const spawned = await tools.get('dsh_omo_terminal_spawn').execute({ type: 'pty-default' }, { agent: ownerOne })
+  const controller = new AbortController()
+  let resolveSignal
+  fixture.service.signal = (owner, sessionId, signal) => {
+    fixture.calls.signal.push({ owner, sessionId, signal })
+    return new Promise(resolve => { resolveSignal = resolve })
+  }
+
+  const execution = tools.get('dsh_omo_terminal_interrupt').execute(
+    { sessionId: spawned.sessionId },
+    { agent: ownerOne, signal: controller.signal },
+  )
+  controller.abort()
+  await assert.rejects(execution, /Host signal may already have been delivered/u)
+  resolveSignal({ delivered: true, targetPgid: 4321 })
+  assert.equal(fixture.calls.signal.length, 1)
+})
+
+test('reports uncertain delivery when the Host SIGINT call exceeds its deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const fixture = makeTerminals()
+  const tools = toolsFor(fixture.service)
+  const spawned = await tools.get('dsh_omo_terminal_spawn').execute({ type: 'pty-default' }, { agent: ownerOne })
+  let resolveSignal
+  fixture.service.signal = () => new Promise(resolve => { resolveSignal = resolve })
+  const execution = tools.get('dsh_omo_terminal_interrupt').execute({ sessionId: spawned.sessionId }, { agent: ownerOne })
+  t.mock.timers.tick(10_000)
+  await assert.rejects(execution, /Host signal may still be delivered/u)
+  resolveSignal({ delivered: true, targetPgid: 4321 })
+})
+
+test('reports uncertain delivery when cancellation races Host SIGINT resolution', async () => {
+  const fixture = makeTerminals()
+  const tools = toolsFor(fixture.service)
+  const spawned = await tools.get('dsh_omo_terminal_spawn').execute({ type: 'pty-default' }, { agent: ownerOne })
+  const controller = new AbortController()
+  let resolveSignal
+  fixture.service.signal = () => new Promise(resolve => { resolveSignal = resolve })
+  const execution = tools.get('dsh_omo_terminal_interrupt').execute(
+    { sessionId: spawned.sessionId },
+    { agent: ownerOne, signal: controller.signal },
+  )
+  resolveSignal({ delivered: true, targetPgid: 4321 })
+  await Promise.resolve()
+  controller.abort()
+  await assert.rejects(execution, /Host signal may already have been delivered/u)
 })
 
 test('caps and sanitizes terminal output while preserving Host truncation flags', async () => {

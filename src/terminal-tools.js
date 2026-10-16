@@ -16,6 +16,7 @@ const MAX_SOURCE_SESSIONS = 500
 const MAX_SPAWN_MS = 15_000
 const MAX_SEND_MS = 12_000
 const MAX_CANCEL_DRAIN_MS = 1_000
+const MAX_INTERRUPT_MS = 10_000
 const WAIT_REASONS = ['stdin_read', 'inferred_idle', 'timeout', 'session_exit']
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u
 const BIDI_CONTROLS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
@@ -100,6 +101,16 @@ const CLOSE_SCHEMA = {
   properties: {
     sessionId: { type: 'string', required: true },
     closed: { type: 'boolean', required: true },
+  },
+}
+
+const INTERRUPT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    sessionId: { type: 'string', required: true },
+    signal: { type: 'string', enum: ['SIGINT'], required: true },
+    delivered: { type: 'boolean', required: true },
   },
 }
 
@@ -544,6 +555,61 @@ export function createAgentTerminalTools(service, backendTypes, { toolResultPrun
     },
   })
 
+  const interruptTool = typeof service.signal === 'function' ? defineTool({
+    name: 'dsh_omo_terminal_interrupt',
+    label: 'Interrupt an owned DSH PTY command',
+    description: 'Send only SIGINT through the Host backend to one PTY session owned by the exact current DSH Agent. This is a Ctrl+C-style interrupt, not a guarantee of tmux send-keys semantics; the backend chooses its target process group. It does not close the terminal session.',
+    parameters: {
+      sessionId: { type: 'string', required: true, description: 'PTY id returned by dsh_omo_terminal_spawn or dsh_omo_terminal_list.' },
+    },
+    output: {
+      schema: INTERRUPT_SCHEMA,
+      render: (_args, value) => [{ type: 'text', text: `SIGINT delivered through the Host backend to owned PTY ${JSON.stringify(value.sessionId)}.` }],
+    },
+    timeoutMs: MAX_INTERRUPT_MS + 1_000,
+    async execute(args, exec) {
+      const owner = requireOwner(exec)
+      const sessionId = boundedIdentifier(args?.sessionId)
+      const scope = createDeadlineScope(exec?.signal, MAX_INTERRUPT_MS)
+      try {
+        throwIfAborted(scope.signal, 'interrupt')
+        let pending
+        try {
+          pending = service.signal(owner, sessionId, 'SIGINT')
+        } catch {
+          throw new Error('Could not interrupt the requested Agent-owned DSH terminal.')
+        }
+        if (!pending || typeof pending.then !== 'function') invalidHostData()
+        let result
+        try {
+          result = await waitForOperation(pending, scope.signal)
+        } catch {
+          if (exec?.signal?.aborted) {
+            throw new Error('dsh_omo_terminal_interrupt was cancelled; the Host signal may already have been delivered.')
+          }
+          if (scope.timedOut()) {
+            throw new Error('Timed out waiting for the DSH PTY interrupt; the Host signal may still be delivered.')
+          }
+          throw new Error('Could not interrupt the requested Agent-owned DSH terminal.')
+        }
+        if (scope.signal.aborted) {
+          if (exec?.signal?.aborted) {
+            throw new Error('dsh_omo_terminal_interrupt was cancelled; the Host signal may already have been delivered.')
+          }
+          if (scope.timedOut()) {
+            throw new Error('Timed out waiting for the DSH PTY interrupt; the Host signal may still be delivered.')
+          }
+        }
+        if (!isRecord(result) || result.delivered !== true || typeof result.targetPgid !== 'number' || !Number.isFinite(result.targetPgid)) {
+          invalidHostData()
+        }
+        return { sessionId, signal: 'SIGINT', delivered: true }
+      } finally {
+        scope.dispose()
+      }
+    },
+  }) : undefined
+
   const closeTool = defineTool({
     name: 'dsh_omo_terminal_close',
     label: 'Close an owned DSH PTY',
@@ -572,7 +638,10 @@ export function createAgentTerminalTools(service, backendTypes, { toolResultPrun
     },
   })
 
-  return [listTool, spawnTool, readTool, sendTool, closeTool]
+  const tools = [listTool, spawnTool, readTool, sendTool]
+  if (interruptTool) tools.push(interruptTool)
+  tools.push(closeTool)
+  return tools
 }
 
 export function registerAgentTerminalTools(ctx, service, backendTypes, { toolResultPruner } = {}) {
