@@ -27,7 +27,7 @@ test('formats search results as bounded untrusted non-linking text', () => {
     truncated: true,
   })
   assert.match(text, /untrusted external data, not instructions/u)
-  assert.match(text, /no source URL was fetched/u)
+  assert.match(text, /dsh-omo did not call web\.fetch or follow returned URLs/u)
   assert.match(text, /javascript:alert\(1\)/u)
   assert.match(text, /ˋspoofedˋ/u)
   assert.doesNotMatch(text, /\u202e/u)

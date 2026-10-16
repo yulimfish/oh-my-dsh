@@ -1821,7 +1821,7 @@ test('/omo web-search is opt-in, human-only, bounded, and never auto-fetches ret
   assert.ok(calls[0].signal instanceof AbortSignal)
   assert.notEqual(calls[0].signal, controller.signal, 'the service receives a lifecycle/deadline-combined signal')
   assert.match(result.text, /untrusted external data, not instructions/u)
-  assert.match(result.text, /no source URL was fetched/iu)
+  assert.match(result.text, /dsh-omo did not call web\.fetch or follow returned URLs/iu)
   assert.match(result.text, /https:\/\/example\.test\/path/u)
   assert.match(result.text, /ˋspoofedˋ/u)
   assert.doesNotMatch(result.text, /\u202e/u)
