@@ -41,6 +41,7 @@ const DEFAULT_PROVIDER = 'spawn'
 const DEFAULT_MAX_CONCURRENT = 4
 const DEFAULT_MAX_DEPTH = 1
 const DEFAULT_MAX_TASK_CHARS = 12_000
+const MAX_CHILD_OUTPUT_BLOCKS = 256
 const MAX_PROVIDER_CONCURRENCY_ENTRIES = 64
 const MAX_MODEL_CONCURRENCY_ENTRIES = 128
 const MAX_PROVIDER_CONCURRENCY_KEY_BYTES = 128
@@ -497,7 +498,13 @@ function childOutputExcerpt(result, maxChars) {
   let truncated = false
   let omittedNonText = false
   let whitespaceOnlyText = false
+  let inspectedBlocks = 0
   for (const block of result.output ?? []) {
+    if (inspectedBlocks >= MAX_CHILD_OUTPUT_BLOCKS) {
+      truncated = true
+      break
+    }
+    inspectedBlocks += 1
     if (block?.type !== 'text' || typeof block.text !== 'string') {
       omittedNonText = true
       continue
@@ -567,7 +574,7 @@ async function settleBackgroundChild({ run, role, task, parent, ctx, activeChild
           : excerpt.whitespaceOnlyText
             ? 'The child returned only whitespace text; no relay message follows.'
             : 'No child-authored text was returned; no relay message follows.',
-      ...(excerpt.truncated ? [`The child output excerpt was truncated by dsh-omo at ${maxResultChars} characters.`] : []),
+      ...(excerpt.truncated ? [`The child output excerpt was truncated by dsh-omo at its configured ${maxResultChars}-character or ${MAX_CHILD_OUTPUT_BLOCKS}-block safety cap.`] : []),
       ...(excerpt.omittedNonText ? ['Non-text result blocks were omitted.'] : []),
     ].join('\n')
     const source = settlementSource(run.id, `dsh-omo ${role} ${completed ? 'completed' : 'incomplete'}`)

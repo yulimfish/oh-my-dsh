@@ -85,6 +85,7 @@ test('skips success, unrelated/oversized errors, duplicate markers, malformed na
   const listener = createJsonErrorRecoveryListener()
   const cases = [
     [makeExec(), { isError: false, value: {}, content: [] }],
+    [makeExec(), { isError: false, error: { message: 'Invalid JSON' }, content: [] }],
     [makeExec(), makeFailure('Template error: expected a closing brace')],
     [makeExec(), makeFailure(`Invalid JSON${'x'.repeat(4_100)}`)],
     [makeExec(), makeFailure(`Invalid JSON\n${JSON_ERROR_REMINDER}`)],
@@ -103,6 +104,23 @@ test('skips success, unrelated/oversized errors, duplicate markers, malformed na
     assert.equal(nextCalls, 1)
     assert.strictEqual(decision, downstreamDecision)
     assert.equal(decision.additionalContexts, undefined)
+  }
+})
+
+test('honors exact tool-name and error-message caps', async () => {
+  const listener = createJsonErrorRecoveryListener()
+  const prefix = 'Invalid JSON'
+  const cases = [
+    { exec: makeExec({ name: 'x'.repeat(128) }), message: `${prefix}${'x'.repeat(4_096 - prefix.length)}`, expected: true },
+    { exec: makeExec({ name: 'x'.repeat(129) }), message: prefix, expected: false },
+    { exec: makeExec(), message: `${prefix}${'x'.repeat(4_097 - prefix.length)}`, expected: false },
+  ]
+
+  for (const { exec, message, expected } of cases) {
+    const downstreamDecision = { kind: 'accept', value: { unchanged: true } }
+    const decision = await listener(exec, makeFailure(message), async () => downstreamDecision)
+    assert.equal(decision.additionalContexts?.length === 1, expected, `unexpected boundary result for name length ${exec.name.length} and message length ${message.length}`)
+    if (!expected) assert.strictEqual(decision, downstreamDecision)
   }
 })
 
