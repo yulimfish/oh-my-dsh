@@ -134,6 +134,7 @@ const baseConfig = {
   maxTaskChars: 12_000,
   maxResultChars: 8_000,
   enableContinuableTasks: false,
+  enableGoalTools: false,
   enableTeamTools: false,
   enableSessionSearch: false,
   enableSessionRead: false,
@@ -220,6 +221,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   const concurrencyConfig = Config({ providerConcurrency: { 'deepseek-official': 2 }, modelConcurrency: { 'deepseek-official/deepseek-flash': 1 } })
   assert.deepEqual(concurrencyConfig.providerConcurrency, { 'deepseek-official': 2 })
   assert.deepEqual(concurrencyConfig.modelConcurrency, { 'deepseek-official/deepseek-flash': 1 })
+  assert.equal(Config({}).enableGoalTools, false)
+  assert.equal(Config({ enableGoalTools: true }).enableGoalTools, true)
   assert.equal(Config({}).enableTeamTools, false)
   assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
   assert.equal(Config({}).enableSessionSearch, false)
@@ -372,6 +375,7 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
+  assert.match(status.text, /goalTools=disabled/u)
   assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
@@ -1483,6 +1487,54 @@ test('mounts default-off Bash file-read guidance only when Cordis events are ava
   assert.match(help, /Bash file-read guidance: enabled \(simple cat\/head\/tail commands only; advisory after successful execution\)/u)
 })
 
+test('mounts model-facing DSH Goal tools only when opted in and the full Host service contract exists', async () => {
+  let serviceCalls = 0
+  const goals = {
+    get() { serviceCalls += 1 },
+    create() { serviceCalls += 1 },
+    edit() { serviceCalls += 1 },
+    pause() { serviceCalls += 1 },
+    resume() { serviceCalls += 1 },
+    complete() { serviceCalls += 1 },
+  }
+  const disabled = makeContext({ services: { goals } })
+  apply(disabled.ctx, baseConfig)
+  for (const toolName of ['dsh_omo_goal_get', 'dsh_omo_goal_create', 'dsh_omo_goal_update']) {
+    assert.equal(disabled.tools.has(toolName), false)
+  }
+  assert.match(disabled.commands.get('omo').handler().text, /Model-facing DSH Goal tools: disabled/u)
+
+  const unavailable = makeContext()
+  assert.throws(
+    () => apply(unavailable.ctx, { ...baseConfig, enableGoalTools: true }),
+    /enableGoalTools requires DSH goals\.get\/create\/edit\/pause\/resume\/complete/u,
+  )
+  assert.equal(unavailable.tools.size, 0, 'missing Goal service fails before registering any Tools')
+
+  const partial = makeContext({ services: { goals: { get() {} } } })
+  assert.throws(
+    () => apply(partial.ctx, { ...baseConfig, enableGoalTools: true }),
+    /enableGoalTools requires DSH goals\.get\/create\/edit\/pause\/resume\/complete/u,
+  )
+  assert.equal(partial.tools.size, 0, 'partial Goal service fails before registering any Tools')
+
+  const enabled = makeContext({ services: { goals } })
+  apply(enabled.ctx, { ...baseConfig, enableGoalTools: true })
+  for (const toolName of ['dsh_omo_goal_get', 'dsh_omo_goal_create', 'dsh_omo_goal_update']) {
+    assert.equal(typeof enabled.tools.get(toolName)?.execute, 'function')
+  }
+  const status = enabled.commands.get('omo').handler({ rawInput: 'status' }).text
+  assert.match(status, /goalTools=enabled/u)
+  assert.match(enabled.commands.get('omo').handler().text, /Model-facing DSH Goal tools: enabled \(exact calling Agent only\)/u)
+  assert.equal(serviceCalls, 0, 'tool registration and status do not call Goal business methods')
+  const lifecycle = enabled.effects.find(effect => effect.label === 'dsh-omo current-Agent Goal tools')
+  assert.equal(typeof lifecycle?.dispose, 'function')
+  await lifecycle.dispose()
+  assert.equal(enabled.tools.has('dsh_omo_goal_get'), false)
+  assert.equal(enabled.tools.has('dsh_omo_goal_create'), false)
+  assert.equal(enabled.tools.has('dsh_omo_goal_update'), false)
+})
+
 test('mounts the native Goal command only with Goals and opt-in Agent Teams tools only with the Host service', async () => {
   const goalCalls = []
   const goals = {
@@ -1506,6 +1558,7 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   assert.match(goalFixture.commands.get('omo').handler().text, /Session search: disabled/u)
   assert.match(goalFixture.commands.get('omo').handler().text, /Session read: disabled/u)
   assert.match(goalFixture.commands.get('omo').handler().text, /Session list: disabled/u)
+  assert.match(goalFixture.commands.get('omo').handler().text, /Model-facing DSH Goal tools: disabled \(exact calling Agent only\)/u)
   const goalAgent = { id: 'goal-agent' }
   assert.equal((await goalFixture.commands.get('goal').handler({ agent: goalAgent, rawInput: '' })).kind, 'success')
   assert.equal((await goalFixture.commands.get('goal').handler({ agent: goalAgent, rawInput: 'Build the feature' })).kind, 'success')
