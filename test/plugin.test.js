@@ -153,6 +153,7 @@ const baseConfig = {
   enableReadmeOnRead: false,
   enableClaudeRulesOnRead: false,
   enableWriteExistingFileGuard: false,
+  enableNotepadWriteGuard: false,
   enableEditErrorRecovery: false,
   enableJsonErrorRecovery: false,
   enableBashFileReadGuidance: false,
@@ -179,6 +180,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableProjectAgentFiles: true }).enableProjectAgentFiles, true)
   assert.equal(Config({}).enableWriteExistingFileGuard, false)
   assert.equal(Config({ enableWriteExistingFileGuard: true }).enableWriteExistingFileGuard, true)
+  assert.equal(Config({}).enableNotepadWriteGuard, false)
+  assert.equal(Config({ enableNotepadWriteGuard: true }).enableNotepadWriteGuard, true)
   assert.equal(Config({}).enableEditErrorRecovery, false)
   assert.equal(Config({ enableEditErrorRecovery: true }).enableEditErrorRecovery, true)
   assert.equal(Config({}).enableJsonErrorRecovery, false)
@@ -376,7 +379,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
   assert.match(status.text, /goalTools=disabled/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -1417,6 +1420,33 @@ test('mounts the opt-in existing-file guard only with full DSH contracts and dis
   assert.ok(guardEffect)
   await guardEffect.dispose()
   assert.equal(enabled.guards.size, 0, 'unloading the integration removes the global monotonic Tool guard')
+})
+
+test('mounts default-off notepad write Tool guard and disposes it', async () => {
+  const disabled = makeContext()
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.guards.size, 0)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /notepadWriteGuard=disabled/u)
+
+  const missingGuard = makeContext()
+  missingGuard.ctx.tools.guard = undefined
+  assert.throws(
+    () => apply(missingGuard.ctx, { ...baseConfig, enableNotepadWriteGuard: true }),
+    /enableNotepadWriteGuard requires DSH tools\.guard/u,
+  )
+  assert.equal(missingGuard.guards.size, 0)
+
+  const enabled = makeContext()
+  apply(enabled.ctx, { ...baseConfig, enableNotepadWriteGuard: true })
+  assert.equal(enabled.guards.size, 1)
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /notepadWriteGuard=enabled/u)
+  const [guard] = enabled.guards
+  assert.equal(guard({ name: 'write', arguments: { file_path: path.join('.omo', 'notepads', 'state.md') } }),
+    'Refused: .omo/notepads and .sisyphus/notepads are append-only history. Do not bypass this Tool guard with another tool or direct filesystem access; report the original Edit failure and ask the user for guidance.')
+  const effect = enabled.effects.find(entry => entry.label === 'dsh-omo notepad write guard')
+  assert.ok(effect)
+  await effect.dispose()
+  assert.equal(enabled.guards.size, 0)
 })
 
 test('mounts default-off edit-error recovery guidance only when the Cordis event API is available', () => {
