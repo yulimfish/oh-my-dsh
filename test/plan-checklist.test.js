@@ -193,8 +193,15 @@ test('reports fixed advisory warnings for malformed structured rows on explicit 
   ])
   const rendered = tool.output.render({ plan: 'active' }, result)[0].text
   assert.match(rendered, /Advisory format warnings/u)
-  assert.doesNotMatch(rendered, /Missing structured label|Invalid final-wave label|Not part of|Fenced example/u)
+  assert.doesNotMatch(rendered, /Missing structured label|Malformed Unicode-spacing row|Invalid final-wave label|Not part of|Fenced example/u)
   assert.equal(typeof fixture.fs.writeText, 'undefined', 'the checklist remains read-only')
+
+  const unicodeWhitespace = makeWorkspace({ markdown: '## TODOs\n-\u00a0[ ] Non-breaking space row' })
+  const unicodeResult = await toolFor(unicodeWhitespace).execute({ plan: 'active' }, { agent: AGENT })
+  assert.deepEqual(unicodeResult.formatWarnings, [
+    'A recognized TODOs or Final Verification Wave section contains no valid structured task rows.',
+    'Some checkbox labels in structured sections do not match the required task format.',
+  ])
 })
 
 test('renders hostile task labels inside a dynamically fenced Markdown code span', async () => {
