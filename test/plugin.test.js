@@ -156,6 +156,7 @@ const baseConfig = {
   enableNotepadWriteGuard: false,
   enableEditErrorRecovery: false,
   enableJsonErrorRecovery: false,
+  enableDelegateTaskErrorGuidance: false,
   enableBashFileReadGuidance: false,
   projectSkillDirs: ['.opencode/skills', '.claude/skills'],
   disabledSkills: [],
@@ -186,6 +187,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableEditErrorRecovery: true }).enableEditErrorRecovery, true)
   assert.equal(Config({}).enableJsonErrorRecovery, false)
   assert.equal(Config({ enableJsonErrorRecovery: true }).enableJsonErrorRecovery, true)
+  assert.equal(Config({}).enableDelegateTaskErrorGuidance, false)
+  assert.equal(Config({ enableDelegateTaskErrorGuidance: true }).enableDelegateTaskErrorGuidance, true)
   assert.equal(Config({}).enableBashFileReadGuidance, false)
   assert.equal(Config({ enableBashFileReadGuidance: true }).enableBashFileReadGuidance, true)
   assert.deepEqual(Config({ userAgents: [{ name: 'docs-auditor', description: 'Review docs.', prompt: 'Check for gaps.', mode: 'subagent' }] }).userAgents, [
@@ -379,7 +382,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
   assert.match(status.text, /goalTools=disabled/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -1491,6 +1494,28 @@ test('mounts default-off JSON error recovery guidance only when the Cordis event
   assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
   assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /jsonErrorRecovery=enabled/u)
   assert.match(enabled.commands.get('omo').handler().text, /JSON error recovery: enabled \(matched Tool failures only; no argument rewrite\)/u)
+})
+
+test('mounts default-off delegated task input guidance only when Cordis events are available', () => {
+  const disabled = makeContext()
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('tools/post-execute'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /delegateTaskErrorGuidance=disabled/u)
+
+  const missingCordis = makeContext()
+  missingCordis.ctx.on = undefined
+  assert.throws(
+    () => apply(missingCordis.ctx, { ...baseConfig, enableDelegateTaskErrorGuidance: true }),
+    /enableDelegateTaskErrorGuidance requires Cordis ctx\.on/u,
+  )
+  assert.equal(missingCordis.events.has('tools/post-execute'), false)
+  assert.equal(missingCordis.tools.size, 0, 'missing event API fails before registering tools')
+
+  const enabled = makeContext()
+  apply(enabled.ctx, { ...baseConfig, enableDelegateTaskErrorGuidance: true })
+  assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /delegateTaskErrorGuidance=enabled/u)
+  assert.match(enabled.commands.get('omo').handler().text, /Task input guidance: enabled \(dsh_omo_task blank\/oversized argument errors only; no retries\)/u)
 })
 
 test('mounts default-off Bash file-read guidance only when Cordis events are available', () => {
