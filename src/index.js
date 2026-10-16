@@ -18,6 +18,7 @@ import { registerClaudeRulesOnReadContext } from './claude-rules-context.js'
 import { createJobKillCommand } from './job-commands.js'
 import { registerJobTools } from './job-tools.js'
 import { readTerminalBackendTypes, registerAgentTerminalTools } from './terminal-tools.js'
+import { registerPlanChecklistTool } from './plan-checklist.js'
 import { createModelCapabilitiesCommand } from './model-capabilities.js'
 import { normalizeCategoryRoutes, normalizeExplicitFallbackModels, resolveCategoryRoute } from './category-routes.js'
 import { normalizeRuntimeFallback, registerRuntimeFallback } from './runtime-fallback.js'
@@ -67,6 +68,7 @@ export const Config = z.object({
   enableSessionRead: z.boolean().default(false),
   enableSessionList: z.boolean().default(false),
   enableSessionInfo: z.boolean().default(false),
+  enablePlanChecklist: z.boolean().default(false),
   enableJobTools: z.boolean().default(false),
   enableToolResultPruning: z.boolean().default(false),
   enableAgentTerminalTools: z.boolean().default(false),
@@ -1361,7 +1363,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
               `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; toolResultPruner=${presence('toolResultPruner')}; terminals=${presence('terminals')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
               'Presence does not prove readiness or health. This command does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
@@ -1452,6 +1454,10 @@ export function apply(ctx, rawConfig) {
   const sessionsService = optionalService(ctx, 'sessions')
   const agentsService = optionalService(ctx, 'agents')
   const mcpResourcesService = optionalService(ctx, 'mcpResources')
+  if (config.enablePlanChecklist && (!sessionQueryService || typeof sessionQueryService.observeSession !== 'function'
+    || !ctx.fs || ['resolve', 'contains', 'lstat', 'stat', 'readBytes'].some(method => typeof ctx.fs[method] !== 'function'))) {
+    throw new Error('dsh-omo: enablePlanChecklist requires DSH sessionQuery.observeSession and fs.resolve/contains/lstat/stat/readBytes')
+  }
   if (config.enableSessionSearch && (!sessionQueryService
     || typeof sessionQueryService.searchSessions !== 'function'
     || typeof sessionQueryService.observeSession !== 'function')) {
@@ -1543,6 +1549,7 @@ export function apply(ctx, rawConfig) {
       jobTools: config.enableJobTools === true,
       toolResultPruning: activeToolResultPruner !== undefined,
       agentTerminalTools: config.enableAgentTerminalTools === true && Array.isArray(terminalBackendTypes) && terminalBackendTypes.length > 0,
+      planChecklist: config.enablePlanChecklist === true,
       sessionSearch: config.enableSessionSearch === true,
       sessionRead: config.enableSessionRead === true,
       sessionList: config.enableSessionList === true,
@@ -1650,6 +1657,10 @@ export function apply(ctx, rawConfig) {
   if (config.enableSessionInfo) {
     const disposeSessionInfo = registerSessionInfoTool(ctx, sessionQueryService)
     ctx.effect(() => disposeSessionInfo, 'dsh-omo session info tool')
+  }
+  if (config.enablePlanChecklist) {
+    const disposePlanChecklist = registerPlanChecklistTool(ctx, sessionQueryService, ctx.fs)
+    ctx.effect(() => disposePlanChecklist, 'dsh-omo read-only plan checklist tool')
   }
   if (config.enableJobTools) {
     const disposeJobTools = registerJobTools(ctx, jobController, { toolResultPruner: activeToolResultPruner })

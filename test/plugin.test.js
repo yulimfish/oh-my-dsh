@@ -225,6 +225,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableToolResultPruning: true }).enableToolResultPruning, true)
   assert.equal(Config({}).enableAgentTerminalTools, false)
   assert.equal(Config({ enableAgentTerminalTools: true }).enableAgentTerminalTools, true)
+  assert.equal(Config({}).enablePlanChecklist, false)
+  assert.equal(Config({ enablePlanChecklist: true }).enablePlanChecklist, true)
   assert.equal(Config({}).enableLspTools, false)
   assert.equal(Config({ enableLspTools: true }).enableLspTools, true)
   assert.equal(Config({}).enableRootAgentsContext, false)
@@ -250,6 +252,36 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
     enabled: true,
     chains: [{ provider: 'primary', model: 'main' }],
   } }), /fallbacks/u)
+})
+
+test('read-only plan checklist is default-off and requires DSH workspace-read contracts', async () => {
+  const missing = makeContext()
+  assert.throws(
+    () => apply(missing.ctx, { ...baseConfig, enablePlanChecklist: true }),
+    /enablePlanChecklist requires DSH sessionQuery\.observeSession and fs\.resolve\/contains\/lstat\/stat\/readBytes/u,
+  )
+  assert.equal(missing.tools.size, 0)
+
+  const sessionQuery = { observeSession() {} }
+  const fs = { resolve() {}, contains() {}, lstat() {}, stat() {}, readBytes() {} }
+  const disabled = makeContext({ services: { sessionQuery }, fs })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.tools.has('dsh_omo_plan_checklist'), false)
+
+  const incomplete = makeContext({ services: { sessionQuery }, fs: { resolve() {} } })
+  assert.throws(
+    () => apply(incomplete.ctx, { ...baseConfig, enablePlanChecklist: true }),
+    /enablePlanChecklist requires DSH sessionQuery\.observeSession and fs\.resolve\/contains\/lstat\/stat\/readBytes/u,
+  )
+  assert.equal(incomplete.tools.size, 0)
+
+  const enabled = makeContext({ services: { sessionQuery }, fs })
+  apply(enabled.ctx, { ...baseConfig, enablePlanChecklist: true })
+  assert.equal(typeof enabled.tools.get('dsh_omo_plan_checklist').execute, 'function')
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /planChecklist=enabled/u)
+  const effect = enabled.effects.find(item => item.label === 'dsh-omo read-only plan checklist tool')
+  await effect.dispose()
+  assert.equal(enabled.tools.has('dsh_omo_plan_checklist'), false)
 })
 
 test('validates bounded provider/model concurrency maps before plugin registration', () => {
@@ -324,7 +356,7 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
