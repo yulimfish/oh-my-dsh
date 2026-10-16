@@ -69,6 +69,7 @@ export const Config = z.object({
   enableSessionList: z.boolean().default(false),
   enableSessionInfo: z.boolean().default(false),
   enablePlanChecklist: z.boolean().default(false),
+  enableModelCapabilitiesRefresh: z.boolean().default(false),
   enableJobTools: z.boolean().default(false),
   enableToolResultPruning: z.boolean().default(false),
   enableAgentTerminalTools: z.boolean().default(false),
@@ -1177,7 +1178,7 @@ function renderCapabilityStatus(ctx, providerName) {
   }
 }
 
-function registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName) {
+function registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName, webService, lifecycleSignal) {
   let availableCommandNames = ''
   let taskCommandHelp = ''
   let skillRefreshHelp = ''
@@ -1203,7 +1204,11 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
   const registrations = [
     ...(goalService ? [createGoalCommand(goalService)] : []),
     ...(stopContinuationCommand ? [stopContinuationCommand] : []),
-    ...(llmService ? [createModelCapabilitiesCommand(llmService)] : []),
+    ...(llmService || config.enableModelCapabilitiesRefresh ? [createModelCapabilitiesCommand(llmService, {
+      enableModelCapabilitiesRefresh: config.enableModelCapabilitiesRefresh,
+      web: webService,
+      lifecycleSignal,
+    })] : []),
     {
       name: 'ulw',
       description: 'Start an ultrawork-style multi-step task with specialist delegation and verification.',
@@ -1363,8 +1368,8 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
-              `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; toolResultPruner=${presence('toolResultPruner')}; terminals=${presence('terminals')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; web=${presence('web')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; toolResultPruner=${presence('toolResultPruner')}; terminals=${presence('terminals')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
               'Presence does not prove readiness or health. This command does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
           }
@@ -1423,6 +1428,10 @@ export function apply(ctx, rawConfig) {
   const runtimeFallbackPolicy = normalizeRuntimeFallback(config.runtimeFallback)
   const goalService = optionalService(ctx, 'goals')
   const llmService = optionalService(ctx, 'llm')
+  const webService = optionalService(ctx, 'web')
+  if (config.enableModelCapabilitiesRefresh && (!webService || typeof webService.fetch !== 'function')) {
+    throw new Error('dsh-omo: enableModelCapabilitiesRefresh requires the optional DSH web.fetch service')
+  }
   const teamService = optionalService(ctx, 'agentTeams')
   if (config.enableTeamTools && !teamService) {
     throw new Error('dsh-omo: enableTeamTools requires the optional DSH agentTeams service')
@@ -1550,6 +1559,7 @@ export function apply(ctx, rawConfig) {
       toolResultPruning: activeToolResultPruner !== undefined,
       agentTerminalTools: config.enableAgentTerminalTools === true && Array.isArray(terminalBackendTypes) && terminalBackendTypes.length > 0,
       planChecklist: config.enablePlanChecklist === true,
+      modelCapabilitiesRefresh: config.enableModelCapabilitiesRefresh === true,
       sessionSearch: config.enableSessionSearch === true,
       sessionRead: config.enableSessionRead === true,
       sessionList: config.enableSessionList === true,
@@ -1566,6 +1576,7 @@ export function apply(ctx, rawConfig) {
     services: Object.freeze({
       goals: goalService !== undefined && goalService !== null,
       llm: llmService !== undefined && llmService !== null,
+      web: webService !== undefined && webService !== null,
       agentTeams: teamService !== undefined && teamService !== null,
       jobController: jobController !== undefined && jobController !== null,
       toolResultPruner: toolResultPruner !== undefined && toolResultPruner !== null,
@@ -1641,7 +1652,7 @@ export function apply(ctx, rawConfig) {
     interpolate: false,
     text: buildUltraworkGuidance(disabledOmoCommands, activeRoleNames, config.enableWriteExistingFileGuard, config.enableProjectAgentFiles),
   })
-  registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName)
+  registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName, webService, lifecycle.controller.signal)
   if (config.enableSessionSearch) {
     const disposeSessionSearch = registerSessionSearchTool(ctx, sessionQueryService)
     ctx.effect(() => disposeSessionSearch, 'dsh-omo session search tool')

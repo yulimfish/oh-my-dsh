@@ -139,6 +139,7 @@ const baseConfig = {
   enableSessionRead: false,
   enableSessionList: false,
   enableSessionInfo: false,
+  enableModelCapabilitiesRefresh: false,
   enableJobTools: false,
   enableToolResultPruning: false,
   enableAgentTerminalTools: false,
@@ -227,6 +228,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableAgentTerminalTools: true }).enableAgentTerminalTools, true)
   assert.equal(Config({}).enablePlanChecklist, false)
   assert.equal(Config({ enablePlanChecklist: true }).enablePlanChecklist, true)
+  assert.equal(Config({}).enableModelCapabilitiesRefresh, false)
+  assert.equal(Config({ enableModelCapabilitiesRefresh: true }).enableModelCapabilitiesRefresh, true)
   assert.equal(Config({}).enableLspTools, false)
   assert.equal(Config({ enableLspTools: true }).enableLspTools, true)
   assert.equal(Config({}).enableRootAgentsContext, false)
@@ -337,6 +340,7 @@ test('/omo status reports feature flags and service presence without calling bus
   const services = {
     goals: { get: () => calls.push('goals.get'), clear: () => calls.push('goals.clear') },
     llm: { listProviders: () => calls.push('llm.listProviders'), resolveModelInfo: () => calls.push('llm.resolveModelInfo') },
+    web: { fetch: () => calls.push('web.fetch') },
     agentTeams: { membership: () => calls.push('agentTeams.membership') },
     jobController: { list: () => calls.push('jobController.list'), follow: () => calls.push('jobController.follow') },
     lsp: { query: () => calls.push('lsp.query') },
@@ -356,8 +360,8 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
-  assert.match(status.text, /goals=present; llm=present; agentTeams=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; modelCapabilitiesRefresh=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
   assert.equal(command.handler({ rawInput: 'status extra' }).kind, 'error')
@@ -365,7 +369,7 @@ test('/omo status reports feature flags and service presence without calling bus
 
   const absent = makeContext()
   apply(absent.ctx, baseConfig)
-  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; agentTeams=absent; jobController=absent; toolResultPruner=absent; terminals=absent; lsp=absent; sessionQuery=absent; sessions=absent; mcpResources=absent/u)
+  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; web=absent; agentTeams=absent; jobController=absent; toolResultPruner=absent; terminals=absent; lsp=absent; sessionQuery=absent; sessions=absent; mcpResources=absent/u)
 })
 
 test('Agent terminal tools are opt-in and require a registered Agent-owned PTY backend', async () => {
@@ -1703,7 +1707,7 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   assert.equal([...teamFixture.tools.keys()].some(toolName => toolName.startsWith('team_')), false)
 })
 
-test('registers on-demand model capability diagnostics only with the native DSH LLM service', async () => {
+test('registers native DSH model diagnostics when the LLM service is mounted', async () => {
   const calls = []
   const llm = {
     listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }],
@@ -1720,7 +1724,7 @@ test('registers on-demand model capability diagnostics only with the native DSH 
   apply(fixture.ctx, baseConfig)
   assert.ok(fixture.commands.has('omo-models'))
   const command = fixture.commands.get('omo-models')
-  assert.match((await command.handler({ rawInput: '' })).text, /deepseek — DeepSeek/u)
+  assert.match((await command.handler({ rawInput: '' })).text, /`deepseek` — `DeepSeek`/u)
   const controller = new AbortController()
   const resolved = await command.handler({ rawInput: 'deepseek/deepseek-flash', signal: controller.signal })
   assert.match(resolved.text, /Context window: 64000/u)
@@ -1734,6 +1738,40 @@ test('registers on-demand model capability diagnostics only with the native DSH 
   const withoutLlm = makeContext()
   apply(withoutLlm.ctx, baseConfig)
   assert.equal(withoutLlm.commands.has('omo-models'), false)
+})
+
+test('models.dev capability refresh is opt-in and runs only after explicit command invocation', async () => {
+  assert.throws(() => apply(makeContext().ctx, { ...baseConfig, enableModelCapabilitiesRefresh: true }), /web\.fetch/u)
+  assert.throws(() => apply(makeContext({ services: { web: {} } }).ctx, { ...baseConfig, enableModelCapabilitiesRefresh: true }), /web\.fetch/u)
+
+  const calls = []
+  const web = {
+    async fetch(request, signal) {
+      calls.push({ request, signal })
+      return {
+        url: 'https://models.dev/api.json',
+        statusCode: 200,
+        body: { kind: 'text', content: JSON.stringify({
+          provider: { models: { 'catalog-model': { id: 'catalog-model', reasoning: true, limit: { context: 64_000 } } } },
+        }) },
+        truncated: false,
+      }
+    },
+  }
+  const fixture = makeContext({ services: { web } })
+  apply(fixture.ctx, { ...baseConfig, enableModelCapabilitiesRefresh: true })
+  assert.equal(fixture.commands.has('omo-models'), true, 'the opt-in command does not require an LLM provider')
+  assert.deepEqual(calls, [], 'plugin setup must not perform a web request')
+
+  const command = fixture.commands.get('omo-models')
+  const refreshed = await command.handler({ rawInput: 'refresh' })
+  assert.equal(refreshed.kind, 'success')
+  assert.match(refreshed.text, /1 model IDs/u)
+  assert.deepEqual(calls[0].request, { url: 'https://models.dev/api.json' })
+  assert.ok(calls[0].signal instanceof AbortSignal)
+  assert.match((await command.handler({ rawInput: 'snapshot catalog-model' })).text, /Context|Limits/u)
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /modelCapabilitiesRefresh=enabled/u)
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /web=present/u)
 })
 
 test('disabledSkills turns off both model and user invocation for bundled skills', () => {
