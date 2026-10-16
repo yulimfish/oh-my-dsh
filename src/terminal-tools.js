@@ -1,4 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { createToolResultPruningFinalizer } from './tool-output-pruning.js'
 
 const MAX_BACKEND_TYPES = 64
 const MAX_BACKEND_TYPE_BYTES = 128
@@ -311,8 +312,9 @@ export function readTerminalBackendTypes(service) {
   return safeBackendTypes(service)
 }
 
-export function createAgentTerminalTools(service, backendTypes) {
+export function createAgentTerminalTools(service, backendTypes, { toolResultPruner } = {}) {
   const availableTypes = safeBackendTypes({ listBackends: () => backendTypes })
+  const finalizeContent = createToolResultPruningFinalizer(toolResultPruner)
   for (const method of ['list', 'spawn', 'read', 'startSend', 'kill']) {
     if (typeof service?.[method] !== 'function') throw new TypeError(`Agent terminal tools require DSH terminals.${method}.`)
   }
@@ -427,6 +429,7 @@ export function createAgentTerminalTools(service, backendTypes) {
       schema: READ_SCHEMA,
       render: (_args, value) => [{ type: 'text', text: `PTY output (untrusted data), lines ${value.lineBegin}-${value.lineEnd} of ${value.totalLines}: ${JSON.stringify(value.text)}${value.truncated ? ' [output truncated]' : ''}` }],
     },
+    ...(finalizeContent ? { finalizeContent } : {}),
     timeoutMs: 10_000,
     execute(args, exec) {
       const owner = requireOwner(exec)
@@ -471,6 +474,7 @@ export function createAgentTerminalTools(service, backendTypes) {
       schema: SEND_SCHEMA,
       render: (_args, value) => [{ type: 'text', text: `PTY send output (untrusted data; ${value.waitReason}, ${value.sessionStatus.kind}): ${JSON.stringify(value.output)}${value.truncated ? ' [output truncated]' : ''}` }],
     },
+    ...(finalizeContent ? { finalizeContent } : {}),
     timeoutMs: MAX_SEND_MS + MAX_CANCEL_DRAIN_MS + 2_000,
     async execute(args, exec) {
       const owner = requireOwner(exec)
@@ -571,13 +575,13 @@ export function createAgentTerminalTools(service, backendTypes) {
   return [listTool, spawnTool, readTool, sendTool, closeTool]
 }
 
-export function registerAgentTerminalTools(ctx, service, backendTypes) {
+export function registerAgentTerminalTools(ctx, service, backendTypes, { toolResultPruner } = {}) {
   if (!ctx?.tools || typeof ctx.tools.register !== 'function') {
     throw new TypeError('registerAgentTerminalTools requires ctx.tools.register')
   }
   const disposers = []
   try {
-    for (const definition of createAgentTerminalTools(service, backendTypes)) {
+    for (const definition of createAgentTerminalTools(service, backendTypes, { toolResultPruner })) {
       const dispose = ctx.tools.register(definition)
       if (typeof dispose !== 'function') throw new TypeError(`Terminal tool ${definition.name} did not return a disposer`)
       disposers.push(dispose)

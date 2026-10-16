@@ -197,7 +197,7 @@ enableJobTools: true
 
 `dsh_omo_job_list` reads only the initial rows snapshot from the infinite stream, then closes it; output is capped at 50 jobs (25 by default) and 48,000 bytes after serialization/rendering. `dsh_omo_job_follow` derives its owner session from the current `exec.agent.id` (never a model-supplied `sessionId`), accepts an optional absolute byte offset `from`, and bounds each call to 8 seconds, 32 frames, 16 KiB of UTF-8 output, and 48,000 serialized/rendered bytes. It preserves absolute cursors and `lossy`/`gapBefore` indicators while projecting an explicit allowlist; `JobView.detail` and `output.spillPaths` are omitted. These model-facing tools do not expose or call `jobController.kill`; when `enableJobTools` is on and the Host method exists, only the separate human command `/omo-job-kill` calls it. Native DSH job-control tools are separate and remain governed by Host policy. Job kinds, labels, and log output are untrusted data. The model-facing tools provide DSH job monitoring only; they do not implement OMO `background_output`, `background_cancel`, or background subagent-result retrieval.
 
-`enableToolResultPruning` defaults to `false` and requires `enableJobTools: true`. If the optional Host `toolResultPruner.pruneContent` method is present, it attaches DSH's final-content pruner to `dsh_omo_job_follow` only: successful over-budget text may be pruned while the structured `value` remains unchanged; error results and pruner failures keep their original content. The Host pruner preserves rich-block order. If the service is absent or incomplete, no finalizer is registered. This is a narrow DSH output-pruning adapter, not OMO Dynamic Context Pruning (duplicate-call recovery, protected tools, turn protection, and compaction-triggered behavior); it never invokes durable `pruneSession` rewrites. Enable it alongside job tools with:
+`enableToolResultPruning` defaults to `false` and requires at least one high-output adapter: `enableJobTools: true` or `enableAgentTerminalTools: true`. If the optional Host `toolResultPruner.pruneContent` method is present, it attaches DSH's final-content pruner only to successful `dsh_omo_job_follow`, `dsh_omo_terminal_read`, and `dsh_omo_terminal_send` results. Over-budget rendered text may be pruned while each structured `value` remains unchanged; errors and pruner failures keep original content. The Host pruner preserves rich-block order. If the service is absent or incomplete, no finalizer is registered. This is narrow DSH output pruning, not OMO Dynamic Context Pruning (duplicate-call recovery, protected tools, turn protection, and compaction-triggered behavior); it never invokes durable `pruneSession` rewrites. Enable it alongside job tools with:
 
 ```yaml
 enableJobTools: true
@@ -212,6 +212,13 @@ This grants an enabled Agent the ability to send interactive input that may exec
 
 ```yaml
 enableAgentTerminalTools: true
+```
+
+To opt into the Host output pruner for PTY reads and sends as well, enable both flags (the optional pruner Service must also be present):
+
+```yaml
+enableAgentTerminalTools: true
+enableToolResultPruning: true
 ```
 
 ## Project skills

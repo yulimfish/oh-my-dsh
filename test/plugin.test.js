@@ -383,12 +383,46 @@ test('Agent terminal tools are opt-in and require a registered Agent-owned PTY b
     ['dsh_omo_terminal_list', 'dsh_omo_terminal_spawn', 'dsh_omo_terminal_read', 'dsh_omo_terminal_send', 'dsh_omo_terminal_close'],
   )
   assert.deepEqual(enabled.tools.get('dsh_omo_terminal_spawn').parameters.properties.type.enum, ['pty-default'])
+  assert.equal(enabled.tools.get('dsh_omo_terminal_read').finalizeContent, undefined)
+  assert.equal(enabled.tools.get('dsh_omo_terminal_send').finalizeContent, undefined)
   const enabledStatus = enabled.commands.get('omo').handler({ rawInput: 'status' }).text
   assert.match(enabledStatus, /agentTerminalTools=enabled/u)
   const effect = enabled.effects.find(item => item.label === 'dsh-omo Agent terminal tools')
   await effect.dispose()
   assert.equal(enabled.tools.has('dsh_omo_terminal_spawn'), false)
   assert.equal(enabled.tools.has('dsh_omo_terminal_send'), false)
+
+  const prunedInputs = []
+  const prunedBlocks = [{ type: 'text', text: 'pruned terminal output' }]
+  const value = { text: 'full structured PTY output' }
+  const toolResultPruner = {
+    pruneContent(blocks) {
+      prunedInputs.push(blocks)
+      return prunedBlocks
+    },
+  }
+  const enabledPruning = makeContext({ services: { terminals: terminalService, toolResultPruner } })
+  apply(enabledPruning.ctx, { ...baseConfig, enableAgentTerminalTools: true, enableToolResultPruning: true })
+  const readTool = enabledPruning.tools.get('dsh_omo_terminal_read')
+  const sendTool = enabledPruning.tools.get('dsh_omo_terminal_send')
+  assert.equal(typeof readTool.finalizeContent, 'function')
+  assert.equal(typeof sendTool.finalizeContent, 'function')
+  assert.equal(enabledPruning.tools.get('dsh_omo_terminal_list').finalizeContent, undefined)
+  assert.equal(enabledPruning.tools.get('dsh_omo_terminal_spawn').finalizeContent, undefined)
+  assert.equal(enabledPruning.tools.get('dsh_omo_terminal_close').finalizeContent, undefined)
+  const readContent = [{ type: 'text', text: 'full read output' }]
+  const sendContent = [{ type: 'text', text: 'full send output' }]
+  const readResult = { isError: false, value, content: readContent }
+  const sendResult = { isError: false, value, content: sendContent }
+  assert.equal(readTool.finalizeContent({}, readResult), prunedBlocks)
+  assert.equal(sendTool.finalizeContent({}, sendResult), prunedBlocks)
+  assert.equal(readResult.value, value)
+  assert.equal(sendResult.value, value)
+  assert.equal(readResult.content, readContent)
+  assert.equal(sendResult.content, sendContent)
+  assert.equal(prunedInputs.length, 2)
+  assert.match(enabledPruning.commands.get('omo').handler({ rawInput: 'status' }).text, /toolResultPruning=enabled; agentTerminalTools=enabled/u)
+  await enabledPruning.effects.find(item => item.label === 'dsh-omo Agent terminal tools').dispose()
 })
 
 test('/omo status capabilities explicitly queries bounded live provider registries', () => {
@@ -1553,7 +1587,7 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   const invalidPruningConfigFixture = makeContext()
   assert.throws(
     () => apply(invalidPruningConfigFixture.ctx, { ...baseConfig, enableToolResultPruning: true }),
-    /enableToolResultPruning requires enableJobTools/u,
+    /enableToolResultPruning requires enableJobTools or enableAgentTerminalTools/u,
   )
   assert.equal(invalidPruningConfigFixture.tools.size, 0)
 

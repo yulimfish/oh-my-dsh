@@ -1430,8 +1430,8 @@ export function apply(ctx, rawConfig) {
     || typeof jobController.list !== 'function' || typeof jobController.follow !== 'function')) {
     throw new Error('dsh-omo: enableJobTools requires the optional DSH jobController.list and jobController.follow methods')
   }
-  if (config.enableToolResultPruning && !config.enableJobTools) {
-    throw new Error('dsh-omo: enableToolResultPruning requires enableJobTools')
+  if (config.enableToolResultPruning && !config.enableJobTools && !config.enableAgentTerminalTools) {
+    throw new Error('dsh-omo: enableToolResultPruning requires enableJobTools or enableAgentTerminalTools')
   }
   const toolResultPruner = optionalService(ctx, 'toolResultPruner')
   const activeToolResultPruner = config.enableToolResultPruning
@@ -1656,7 +1656,7 @@ export function apply(ctx, rawConfig) {
     ctx.effect(() => disposeJobTools, 'dsh-omo Host job tools')
   }
   if (config.enableAgentTerminalTools) {
-    const disposeTerminalTools = registerAgentTerminalTools(ctx, terminalsService, terminalBackendTypes)
+    const disposeTerminalTools = registerAgentTerminalTools(ctx, terminalsService, terminalBackendTypes, { toolResultPruner: activeToolResultPruner })
     ctx.effect(() => disposeTerminalTools, 'dsh-omo Agent terminal tools')
   }
   if (config.enableLspTools) {
