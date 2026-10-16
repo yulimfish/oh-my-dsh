@@ -20,6 +20,7 @@ import { registerJobTools } from './job-tools.js'
 import { readTerminalBackendTypes, registerAgentTerminalTools } from './terminal-tools.js'
 import { registerPlanChecklistTool } from './plan-checklist.js'
 import { createModelCapabilitiesCommand } from './model-capabilities.js'
+import { createOmoWebSearchHandler } from './web-search-command.js'
 import { normalizeCategoryRoutes, normalizeExplicitFallbackModels, resolveCategoryRoute } from './category-routes.js'
 import { normalizeRuntimeFallback, registerRuntimeFallback } from './runtime-fallback.js'
 import { buildRefactorDirective, parseRefactorInput, REFACTOR_COMMAND_HINT } from './refactor-command.js'
@@ -70,6 +71,7 @@ export const Config = z.object({
   enableSessionInfo: z.boolean().default(false),
   enablePlanChecklist: z.boolean().default(false),
   enableModelCapabilitiesRefresh: z.boolean().default(false),
+  enableWebSearchCommand: z.boolean().default(false),
   enableJobTools: z.boolean().default(false),
   enableToolResultPruning: z.boolean().default(false),
   enableAgentTerminalTools: z.boolean().default(false),
@@ -1200,6 +1202,9 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
     return { kind: 'success', text: `Queued ${mode.label} work for the current agent.` }
   }
 
+  const webSearchHandler = config.enableWebSearchCommand
+    ? createOmoWebSearchHandler(webService, lifecycleSignal)
+    : undefined
   const stopContinuationCommand = goalService ? createStopContinuationCommand(goalService) : undefined
   const registrations = [
     ...(goalService ? [createGoalCommand(goalService)] : []),
@@ -1356,10 +1361,17 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
     },
     {
       name: 'omo',
-      description: 'Show installed DSH OMO-inspired specialist roles and commands; /omo status is passive, while /omo status capabilities explicitly queries read-only provider registries.',
-      input: { hint: '[status|status capabilities]' },
+      description: config.enableWebSearchCommand
+        ? 'Show installed DSH OMO-inspired specialist roles and commands; /omo status is passive, while /omo status capabilities explicitly queries read-only provider registries. Optional /omo web-search performs one human-invoked DSH web.search and never fetches result URLs.'
+        : 'Show installed DSH OMO-inspired specialist roles and commands; /omo status is passive, while /omo status capabilities explicitly queries read-only provider registries.',
+      input: { hint: config.enableWebSearchCommand ? '[status|status capabilities|web-search <query>]' : '[status|status capabilities]' },
       handler: invocation => {
         const rawInput = typeof invocation?.rawInput === 'string' ? invocation.rawInput.trim() : ''
+        const webSearchPrefix = /^web-search(?:\s+|$)/u.exec(rawInput)
+        if (webSearchPrefix) {
+          if (!webSearchHandler) return { kind: 'error', text: 'DSH web search is disabled by configuration; set enableWebSearchCommand: true to enable /omo web-search.' }
+          return webSearchHandler({ rawInput: rawInput.slice(webSearchPrefix[0].length), signal: invocation?.signal })
+        }
         if (rawInput === 'status capabilities') return renderCapabilityStatus(ctx, providerName)
         if (rawInput === 'status') {
           const presence = name => statusSnapshot.services[name] ? 'present' : 'absent'
@@ -1368,16 +1380,21 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; webSearchCommand=${enabled(statusSnapshot.flags.webSearchCommand)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
               `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; web=${presence('web')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; toolResultPruner=${presence('toolResultPruner')}; terminals=${presence('terminals')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
-              'Presence does not prove readiness or health. This command does not call service methods, query models, read session content, or mutate feature state.',
+              'Presence does not prove readiness or health. This status path does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
           }
         }
-        if (rawInput) return { kind: 'error', text: 'Usage: /omo [status|status capabilities].' }
+        if (rawInput) return {
+          kind: 'error',
+          text: config.enableWebSearchCommand
+            ? 'Usage: /omo [status|status capabilities|web-search <query>].'
+            : 'Usage: /omo [status|status capabilities].',
+        }
         return {
           kind: 'success',
-          text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Project agent files: ${config.enableProjectAgentFiles ? 'enabled' : 'disabled'} (current-session cwd only; prompt persona with optional DSH toolFilter allowlist). Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). LSP navigation: ${config.enableLspTools ? 'enabled' : 'disabled'} (two read-only queries; provider-dependent and not a path authorization boundary). Root AGENTS context: ${config.enableRootAgentsContext ? 'enabled' : 'disabled'} (bounded cwd/AGENTS.md snapshot for new Agent scopes before their first step; root-only, no watcher, repository text is untrusted). AGENTS-on-read: ${config.enableAgentsOnRead ? 'enabled' : 'disabled'} (post-read injection; root AGENTS skipped when the root snapshot is enabled; repository text is untrusted). Root README context: ${config.enableRootReadmeContext ? 'enabled' : 'disabled'} (opt-in root README.md snapshot for Agent prompt context). README-on-read: ${config.enableReadmeOnRead ? 'enabled' : 'disabled'} (post-read injection; root README skipped when the root snapshot is enabled). Claude rules after read/write/edit: ${config.enableClaudeRulesOnRead ? 'enabled' : 'disabled'} (legacy opt-in flag; no verified multiedit schema). Write-existing-file guard: ${config.enableWriteExistingFileGuard ? 'enabled' : 'disabled'} (final isError:false result for case-insensitive read of preflighted in-cwd regular file required before one same-Agent case-insensitive write; same-named custom Tools count; raw .omo slash-segment including .omo/.. aliases or overwrite boolean true/exact case-insensitive "true" without trimming bypass; args unchanged; verified missing/outside normally pass below caps, but caps may busy-deny writes; UX only, read/write TOCTOU remains). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
+          text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Human-only DSH web search: ${config.enableWebSearchCommand ? 'enabled via /omo web-search <query>; no URLs are auto-fetched' : 'disabled' }. Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Project agent files: ${config.enableProjectAgentFiles ? 'enabled' : 'disabled'} (current-session cwd only; prompt persona with optional DSH toolFilter allowlist). Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). LSP navigation: ${config.enableLspTools ? 'enabled' : 'disabled'} (two read-only queries; provider-dependent and not a path authorization boundary). Root AGENTS context: ${config.enableRootAgentsContext ? 'enabled' : 'disabled'} (bounded cwd/AGENTS.md snapshot for new Agent scopes before their first step; root-only, no watcher, repository text is untrusted). AGENTS-on-read: ${config.enableAgentsOnRead ? 'enabled' : 'disabled'} (post-read injection; root AGENTS skipped when the root snapshot is enabled; repository text is untrusted). Root README context: ${config.enableRootReadmeContext ? 'enabled' : 'disabled'} (opt-in root README.md snapshot for Agent prompt context). README-on-read: ${config.enableReadmeOnRead ? 'enabled' : 'disabled'} (post-read injection; root README skipped when the root snapshot is enabled). Claude rules after read/write/edit: ${config.enableClaudeRulesOnRead ? 'enabled' : 'disabled'} (legacy opt-in flag; no verified multiedit schema). Write-existing-file guard: ${config.enableWriteExistingFileGuard ? 'enabled' : 'disabled'} (final isError:false result for case-insensitive read of preflighted in-cwd regular file required before one same-Agent case-insensitive write; same-named custom Tools count; raw .omo slash-segment including .omo/.. aliases or overwrite boolean true/exact case-insensitive "true" without trimming bypass; args unchanged; verified missing/outside normally pass below caps, but caps may busy-deny writes; UX only, read/write TOCTOU remains). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
         }
       },
     },
@@ -1431,6 +1448,9 @@ export function apply(ctx, rawConfig) {
   const webService = optionalService(ctx, 'web')
   if (config.enableModelCapabilitiesRefresh && (!webService || typeof webService.fetch !== 'function')) {
     throw new Error('dsh-omo: enableModelCapabilitiesRefresh requires the optional DSH web.fetch service')
+  }
+  if (config.enableWebSearchCommand && (!webService || typeof webService.search !== 'function')) {
+    throw new Error('dsh-omo: enableWebSearchCommand requires the optional DSH web.search service')
   }
   const teamService = optionalService(ctx, 'agentTeams')
   if (config.enableTeamTools && !teamService) {
@@ -1560,6 +1580,7 @@ export function apply(ctx, rawConfig) {
       agentTerminalTools: config.enableAgentTerminalTools === true && Array.isArray(terminalBackendTypes) && terminalBackendTypes.length > 0,
       planChecklist: config.enablePlanChecklist === true,
       modelCapabilitiesRefresh: config.enableModelCapabilitiesRefresh === true,
+      webSearchCommand: config.enableWebSearchCommand === true,
       sessionSearch: config.enableSessionSearch === true,
       sessionRead: config.enableSessionRead === true,
       sessionList: config.enableSessionList === true,
