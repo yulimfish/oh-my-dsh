@@ -2046,6 +2046,59 @@ test('does not attribute omitted non-text blocks to the child relay', async () =
   assert.deepEqual(fixture.disposals, ['child-media'])
 })
 
+test('does not relay whitespace-only child text but preserves meaningful surrounding whitespace', async () => {
+  const whitespace = makeContext()
+  whitespace.ctx.subagents.start = async () => ({
+    id: 'child-whitespace',
+    result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: ' \t\n' }] }),
+    dispose: async () => { whitespace.disposals.push('child-whitespace') },
+  })
+  apply(whitespace.ctx, baseConfig)
+  await whitespace.tools.get('dsh_omo_task').execute(
+    { role: 'test', task: 'Return a result' },
+    { agent: { id: 'parent-agent', followup: message => whitespace.followups.push(message) }, signal: new AbortController().signal },
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(whitespace.followups.length, 1)
+  assert.match(whitespace.followups[0].content[0].text, /The child returned only whitespace text; no relay message follows/u)
+  assert.deepEqual(whitespace.disposals, ['child-whitespace'])
+
+  const meaningful = makeContext()
+  meaningful.ctx.subagents.start = async () => ({
+    id: 'child-meaningful-whitespace',
+    result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: ' \nverified result\t ' }] }),
+    dispose: async () => { meaningful.disposals.push('child-meaningful-whitespace') },
+  })
+  apply(meaningful.ctx, baseConfig)
+  await meaningful.tools.get('dsh_omo_task').execute(
+    { role: 'test', task: 'Return a result' },
+    { agent: { id: 'parent-agent', followup: message => meaningful.followups.push(message) }, signal: new AbortController().signal },
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(meaningful.followups.length, 2)
+  assert.equal(meaningful.followups[1].content[1].text, ' \nverified result\t ')
+  assert.deepEqual(meaningful.disposals, ['child-meaningful-whitespace'])
+})
+
+test('bounds whitespace-only child excerpt inspection without relaying a blank message', async () => {
+  const fixture = makeContext()
+  fixture.ctx.subagents.start = async () => ({
+    id: 'child-long-whitespace',
+    result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: ' '.repeat(baseConfig.maxResultChars + 10) }] }),
+    dispose: async () => { fixture.disposals.push('child-long-whitespace') },
+  })
+  apply(fixture.ctx, baseConfig)
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'test', task: 'Return a result' },
+    { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal },
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fixture.followups.length, 1)
+  assert.match(fixture.followups[0].content[0].text, /No non-whitespace text was found in the bounded child excerpt/u)
+  assert.match(fixture.followups[0].content[0].text, /output excerpt was truncated/u)
+  assert.deepEqual(fixture.disposals, ['child-long-whitespace'])
+})
+
 test('applies configured model route and explicit tool restriction', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
