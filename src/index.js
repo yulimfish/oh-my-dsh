@@ -42,6 +42,7 @@ const DEFAULT_MAX_CONCURRENT = 4
 const DEFAULT_MAX_DEPTH = 1
 const DEFAULT_MAX_TASK_CHARS = 12_000
 const MAX_CHILD_OUTPUT_BLOCKS = 256
+const MAX_CHILD_OUTPUT_CHARS = 65_536
 const MAX_PROVIDER_CONCURRENCY_ENTRIES = 64
 const MAX_MODEL_CONCURRENCY_ENTRIES = 128
 const MAX_PROVIDER_CONCURRENCY_KEY_BYTES = 128
@@ -561,7 +562,8 @@ async function settleBackgroundChild({ run, role, task, parent, ctx, activeChild
     if (lifecycle.disposed) return
     const completed = result.stopReason === 'completed'
     const outcome = completed ? 'specialist result' : 'specialist incomplete; output may be partial'
-    const excerpt = childOutputExcerpt(result, maxResultChars)
+    const resultCharLimit = Math.min(maxResultChars, MAX_CHILD_OUTPUT_CHARS)
+    const excerpt = childOutputExcerpt(result, resultCharLimit)
     const stopReason = String(result.stopReason).replace(/[\r\n]+/gu, ' ').slice(0, 80)
     const diagnostic = typeof result.diagnostic === 'string' && result.diagnostic
       ? `\nDiagnostic (DSH): ${result.diagnostic.slice(0, 1_000)}`
@@ -574,7 +576,7 @@ async function settleBackgroundChild({ run, role, task, parent, ctx, activeChild
           : excerpt.whitespaceOnlyText
             ? 'The child returned only whitespace text; no relay message follows.'
             : 'No child-authored text was returned; no relay message follows.',
-      ...(excerpt.truncated ? [`The child output excerpt was truncated by dsh-omo at its configured ${maxResultChars}-character or ${MAX_CHILD_OUTPUT_BLOCKS}-block safety cap.`] : []),
+      ...(excerpt.truncated ? [`The child output excerpt was truncated by dsh-omo at its effective ${resultCharLimit}-character or ${MAX_CHILD_OUTPUT_BLOCKS}-block safety cap.`] : []),
       ...(excerpt.omittedNonText ? ['Non-text result blocks were omitted.'] : []),
     ].join('\n')
     const source = settlementSource(run.id, `dsh-omo ${role} ${completed ? 'completed' : 'incomplete'}`)
