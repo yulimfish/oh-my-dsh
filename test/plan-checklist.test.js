@@ -150,6 +150,7 @@ test('reads only a bounded current-workspace plan and returns a sanitized summar
     hasNextTask: true,
     nextTaskLabel: 'First task',
     nextTaskLabelTruncated: false,
+    formatWarnings: [],
   })
   assert.equal(fixture.calls.observe.length, 1)
   assert.equal(fixture.calls.observe[0].id, AGENT.id)
@@ -163,6 +164,37 @@ test('reads only a bounded current-workspace plan and returns a sanitized summar
   const rendered = tool.output.render({ plan: 'active.md' }, result)[0].text
   assert.match(rendered, /untrusted plan text/u)
   assert.doesNotMatch(rendered, /SECRET BODY SHOULD NOT BE RETURNED/u)
+})
+
+test('reports fixed advisory warnings for malformed structured rows on explicit read only', async () => {
+  const fixture = makeWorkspace({ markdown: [
+    '## TODOs',
+    '- [ ] 1. Valid task',
+    '- [ ] Missing structured label',
+    '-\u00a0[ ] Malformed Unicode-spacing row',
+    '## Final Verification Wave',
+    '- [ ] F-1. Invalid final-wave label',
+    '## Notes',
+    '- [ ] Not part of a structured task section',
+    '```md',
+    '## TODOs',
+    '- [ ] T2. Fenced example',
+    '```',
+  ].join('\n') })
+  const tool = toolFor(fixture)
+  const warningSchema = tool.output.schema.properties.formatWarnings
+  assert.equal(warningSchema.type, 'array')
+  assert.equal(warningSchema.items.type, 'string')
+  const result = await tool.execute({ plan: 'active' }, { agent: AGENT })
+  assert.equal(result.total, 1)
+  assert.deepEqual(result.formatWarnings, [
+    'A recognized TODOs or Final Verification Wave section contains no valid structured task rows.',
+    'Some checkbox labels in structured sections do not match the required task format.',
+  ])
+  const rendered = tool.output.render({ plan: 'active' }, result)[0].text
+  assert.match(rendered, /Advisory format warnings/u)
+  assert.doesNotMatch(rendered, /Missing structured label|Invalid final-wave label|Not part of|Fenced example/u)
+  assert.equal(typeof fixture.fs.writeText, 'undefined', 'the checklist remains read-only')
 })
 
 test('renders hostile task labels inside a dynamically fenced Markdown code span', async () => {
@@ -209,7 +241,7 @@ test('returns an empty summary for a missing plan without reading content', asyn
   const result = await toolFor(fixture).execute({ plan: 'active' }, { agent: AGENT })
   assert.deepEqual(result, {
     plan: 'active.md', exists: false, completed: 0, remaining: 0, total: 0,
-    hasNextTask: false, nextTaskLabel: '', nextTaskLabelTruncated: false,
+    hasNextTask: false, nextTaskLabel: '', nextTaskLabelTruncated: false, formatWarnings: [],
   })
   assert.equal(fixture.calls.readBytes.length, 0)
   assert.equal(fixture.calls.disposed, 1)
