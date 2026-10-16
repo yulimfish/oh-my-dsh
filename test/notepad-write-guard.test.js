@@ -43,6 +43,20 @@ test('allows Edit, unrelated Tools, and path segments that are not notepads', ()
   for (const input of nearMisses) assert.equal(guard(input), undefined)
 })
 
+test('caps lexical path inspection by JavaScript UTF-16 string length', () => {
+  const guard = createNotepadWriteGuard()
+  const prefix = join('.omo', 'notepads')
+  const exactlyAtCap = `${prefix}${sep}${'x'.repeat(4_096 - prefix.length - 1)}`
+  assert.equal(exactlyAtCap.length, 4_096)
+  assert.equal(guard(execution('write', { path: exactlyAtCap })), NOTEPAD_WRITE_GUARD_REASON)
+  assert.equal(guard(execution('write', { path: `${exactlyAtCap}x` })), undefined)
+
+  const astralPath = `${prefix}${sep}${'🧪'.repeat(2_050)}`
+  assert.ok([...astralPath].length < 4_096)
+  assert.ok(astralPath.length > 4_096)
+  assert.equal(guard(execution('write', { path: astralPath })), undefined)
+})
+
 test('honors upstream nullish path fallback and field precedence', () => {
   const guard = createNotepadWriteGuard()
   const notepadPath = join('.omo', 'notepads', 'state.md')
