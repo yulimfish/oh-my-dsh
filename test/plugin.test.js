@@ -142,6 +142,8 @@ const baseConfig = {
   enableSessionRead: false,
   enableSessionList: false,
   enableSessionInfo: false,
+  enablePlanChecklist: false,
+  enablePlanFormatAdvisory: false,
   enableModelCapabilitiesRefresh: false,
   enableWebSearchCommand: false,
   enableJobTools: false,
@@ -181,6 +183,9 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).userAgents, [])
   assert.equal(Config({}).enableContinuableTaskFollowups, false)
   assert.equal(Config({ enableContinuableTaskFollowups: true }).enableContinuableTaskFollowups, true)
+  assert.equal(Config({}).enablePlanChecklist, false)
+  assert.equal(Config({}).enablePlanFormatAdvisory, false)
+  assert.equal(Config({ enablePlanFormatAdvisory: true }).enablePlanFormatAdvisory, true)
   assert.equal(Config({}).enableProjectAgentFiles, false)
   assert.equal(Config({ enableProjectAgentFiles: true }).enableProjectAgentFiles, true)
   assert.equal(Config({}).enableWriteExistingFileGuard, false)
@@ -314,6 +319,40 @@ test('read-only plan checklist is default-off and requires DSH workspace-read co
   assert.equal(enabled.tools.has('dsh_omo_plan_checklist'), false)
 })
 
+test('post-write plan format advisory is default-off and requires verified DSH read contracts', () => {
+  const missing = makeContext()
+  assert.throws(
+    () => apply(missing.ctx, { ...baseConfig, enablePlanFormatAdvisory: true }),
+    /enablePlanFormatAdvisory requires Cordis ctx\.on, DSH sessionQuery\.observeSession, and fs\.resolve\/contains\/lstat\/stat\/readBytes/u,
+  )
+  assert.equal(missing.tools.size, 0)
+
+  const sessionQuery = { observeSession() {} }
+  const fs = { resolve() {}, contains() {}, lstat() {}, stat() {}, readBytes() {} }
+  const disabled = makeContext({ services: { sessionQuery }, fs })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('tools/post-execute'), false)
+
+  const incomplete = makeContext({ services: { sessionQuery }, fs: { resolve() {} } })
+  assert.throws(
+    () => apply(incomplete.ctx, { ...baseConfig, enablePlanFormatAdvisory: true }),
+    /enablePlanFormatAdvisory requires Cordis ctx\.on, DSH sessionQuery\.observeSession, and fs\.resolve\/contains\/lstat\/stat\/readBytes/u,
+  )
+
+  const missingEvents = makeContext({ services: { sessionQuery }, fs })
+  missingEvents.ctx.on = undefined
+  assert.throws(
+    () => apply(missingEvents.ctx, { ...baseConfig, enablePlanFormatAdvisory: true }),
+    /enablePlanFormatAdvisory requires Cordis ctx\.on/u,
+  )
+
+  const enabled = makeContext({ services: { sessionQuery }, fs })
+  apply(enabled.ctx, { ...baseConfig, enablePlanFormatAdvisory: true })
+  assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
+  assert.equal(enabled.tools.has('dsh_omo_plan_checklist'), false, 'advisory does not enable the explicit checklist Tool')
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /planFormatAdvisory=enabled/u)
+})
+
 test('validates bounded provider/model concurrency maps before plugin registration', () => {
   const accepted = makeContext()
   apply(accepted.ctx, {
@@ -389,7 +428,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
   assert.match(status.text, /continuableTaskFollowups=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')

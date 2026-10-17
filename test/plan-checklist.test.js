@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { posix as path } from 'node:path'
 import { createPlanChecklistTool, parsePlanChecklist, registerPlanChecklistTool } from '../src/plan-checklist.js'
+import { createPlanFormatAdvisoryListener } from '../src/plan-format-advisory.js'
 
 const CWD = '/workspace/project'
 const AGENT = Object.freeze({ id: 'session-current' })
@@ -89,6 +90,23 @@ function makeWorkspace({
 
 function toolFor(fixture, lifecycleSignal) {
   return createPlanChecklistTool(fixture.sessionQuery, fixture.fs, lifecycleSignal)
+}
+
+function planWriteExec({ name = 'write', filePath = PLAN_PATH, signal = new AbortController().signal, schema } = {}) {
+  return {
+    name,
+    schema: schema ?? {
+      name,
+      parameters: {
+        type: 'object',
+        properties: { file_path: { type: 'string' } },
+        required: ['file_path'],
+      },
+    },
+    arguments: { file_path: filePath },
+    agent: AGENT,
+    signal,
+  }
 }
 
 test('parses simple checkboxes, ignores nested/fenced examples, and separates in-progress work', () => {
@@ -376,4 +394,100 @@ test('registration is disposable and plugin-lifecycle cancellation aborts in-fli
   assert.equal(registered.size, 0)
   resolveRead(new Uint8Array())
   dispose()
+})
+
+test('post-write advisory appends only fixed warnings after successful verified plan writes and edits', async () => {
+  const secret = 'SECRET TASK LABEL MUST NOT LEAK'
+  const markdown = `## TODOs\n- [ ] T1. Valid task\n- [ ] ${secret}\n## Final Verification Wave\n- [ ] F1. Verify\n`
+  const fixture = makeWorkspace({ markdown })
+  const lifecycle = new AbortController()
+  const listener = createPlanFormatAdvisoryListener(fixture.sessionQuery, fixture.fs, lifecycle.signal)
+  const existing = { role: 'user', content: [{ type: 'text', text: 'Existing context.' }] }
+  const originalDecision = { kind: 'accept', value: { ok: true }, additionalContexts: [existing] }
+
+  for (const name of ['write', 'edit']) {
+    const decision = await listener(
+      planWriteExec({ name }),
+      { isError: false, value: { ok: true }, content: [] },
+      async () => originalDecision,
+    )
+    assert.equal(decision.kind, 'accept')
+    assert.deepEqual(decision.value, { ok: true })
+    assert.equal(decision.additionalContexts[0], existing)
+    assert.equal(decision.additionalContexts.length, 2)
+    assert.equal(originalDecision.additionalContexts.length, 1, 'the downstream decision remains unchanged')
+    const advisory = decision.additionalContexts[1].content[0].text
+    assert.match(advisory, /Some checkbox labels in structured sections do not match the required task format\./u)
+    assert.match(advisory, /do not rewrite the plan without an explicit instruction/u)
+    assert.doesNotMatch(advisory, /SECRET TASK LABEL|Valid task|F1\. Verify/u)
+  }
+  assert.equal(fixture.calls.observe.length, 2)
+  assert.equal(fixture.calls.disposed, 2)
+  assert.equal(fixture.calls.readBytes.length, 2)
+  assert.ok(fixture.calls.readBytes.every(call => call.maxBytes === 128 * 1024))
+  assert.equal(typeof fixture.fs.writeText, 'undefined')
+
+  const valid = makeWorkspace({ markdown: '## TODOs\n- [ ] T1. Correct structured task\n' })
+  const validDecision = { kind: 'accept', value: { ok: true } }
+  const validListener = createPlanFormatAdvisoryListener(valid.sessionQuery, valid.fs)
+  assert.equal(await validListener(
+    planWriteExec(), { isError: false, value: { ok: true }, content: [] }, async () => validDecision,
+  ), validDecision, 'well-formed plans add no context')
+})
+
+test('post-write advisory fails closed for unknown schemas, non-plan paths, failures, and blocked decisions', async () => {
+  const fixture = makeWorkspace({ markdown: '## TODOs\n- [ ] Missing required label\n' })
+  const listener = createPlanFormatAdvisoryListener(fixture.sessionQuery, fixture.fs)
+  const accepted = { kind: 'accept', value: { ok: true } }
+  const successful = { isError: false, value: { ok: true }, content: [] }
+  const calls = []
+  const next = async decision => { calls.push(true); return decision ?? accepted }
+
+  const noSchema = planWriteExec()
+  delete noSchema.schema
+  await listener(noSchema, successful, () => next())
+  await listener(planWriteExec({ schema: {
+    name: 'write', parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: [] },
+  } }), successful, () => next())
+  await listener({ ...planWriteExec(), name: 'unknown' }, successful, () => next())
+  await listener(planWriteExec({ filePath: `${CWD}/notes/active.md` }), successful, () => next())
+  await listener(planWriteExec({ filePath: `${CWD}/notes/.omo/plans/active.md` }), successful, () => next())
+  await listener(planWriteExec(), { ...successful, isError: true }, () => next())
+  await listener(planWriteExec(), successful, () => next({ kind: 'block', feedback: [{ type: 'text', text: 'blocked' }] }))
+
+  assert.equal(calls.length, 7, 'next is preserved for every dispatch')
+  assert.equal(fixture.calls.readBytes.length, 0)
+  assert.equal(fixture.calls.observe.length, 1, 'ordinary non-plan writes are rejected before session observation')
+  assert.equal(fixture.calls.resolve.some(call => call.value === `${CWD}/notes/.omo/plans/active.md`), false,
+    'reject a lexically outside absolute candidate before filesystem resolution')
+  assert.equal(fixture.calls.disposed, 1, 'only the absolute lookalike candidate observes a session')
+})
+
+test('post-write advisory fails open on version changes and lifecycle cancellation', async () => {
+  const markdown = '## TODOs\n- [ ] Missing required label\n'
+  const changed = makeWorkspace({ markdown, onRead: ({ node }) => { node.version = 'changed-after-read' } })
+  const unchangedDecision = { kind: 'accept', value: { ok: true } }
+  const changedListener = createPlanFormatAdvisoryListener(changed.sessionQuery, changed.fs)
+  const afterRace = await changedListener(planWriteExec(), { isError: false, value: {}, content: [] }, async () => unchangedDecision)
+  assert.equal(afterRace, unchangedDecision)
+  assert.equal(changed.calls.disposed, 1)
+
+  const fixture = makeWorkspace({ markdown })
+  let resolveRead
+  let markReadStarted
+  const readStarted = new Promise(resolve => { markReadStarted = resolve })
+  fixture.fs.readBytes = (_target, _signal, maxBytes) => {
+    fixture.calls.readBytes.push({ maxBytes })
+    markReadStarted()
+    return new Promise(resolve => { resolveRead = resolve })
+  }
+  const lifecycle = new AbortController()
+  const listener = createPlanFormatAdvisoryListener(fixture.sessionQuery, fixture.fs, lifecycle.signal)
+  const decision = { kind: 'accept', value: { ok: true } }
+  const pending = listener(planWriteExec(), { isError: false, value: {}, content: [] }, async () => decision)
+  await readStarted
+  lifecycle.abort()
+  assert.equal(await pending, decision)
+  assert.equal(fixture.calls.disposed, 1)
+  resolveRead(new TextEncoder().encode(markdown))
 })

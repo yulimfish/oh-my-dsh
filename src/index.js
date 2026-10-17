@@ -20,6 +20,7 @@ import { createJobKillCommand } from './job-commands.js'
 import { registerJobTools } from './job-tools.js'
 import { readTerminalBackendTypes, registerAgentTerminalTools } from './terminal-tools.js'
 import { registerPlanChecklistTool } from './plan-checklist.js'
+import { createPlanFormatAdvisoryListener } from './plan-format-advisory.js'
 import { createModelCapabilitiesCommand } from './model-capabilities.js'
 import { createOmoWebSearchHandler } from './web-search-command.js'
 import { normalizeCategoryRoutes, normalizeExplicitFallbackModels, resolveCategoryRoute } from './category-routes.js'
@@ -83,6 +84,7 @@ export const Config = z.object({
   enableSessionList: z.boolean().default(false),
   enableSessionInfo: z.boolean().default(false),
   enablePlanChecklist: z.boolean().default(false),
+  enablePlanFormatAdvisory: z.boolean().default(false),
   enableModelCapabilitiesRefresh: z.boolean().default(false),
   enableWebSearchCommand: z.boolean().default(false),
   enableJobTools: z.boolean().default(false),
@@ -1503,7 +1505,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; continuableTaskFollowups=${enabled(statusSnapshot.flags.continuableTaskFollowups)}; goalTools=${enabled(statusSnapshot.flags.goalTools)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; teamTaskUseReminder=${enabled(statusSnapshot.flags.teamTaskUseReminder)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; webSearchCommand=${enabled(statusSnapshot.flags.webSearchCommand)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; notepadWriteGuard=${enabled(statusSnapshot.flags.notepadWriteGuard)}; editErrorRecovery=${enabled(statusSnapshot.flags.editErrorRecovery)}; jsonErrorRecovery=${enabled(statusSnapshot.flags.jsonErrorRecovery)}; delegateTaskErrorGuidance=${enabled(statusSnapshot.flags.delegateTaskErrorGuidance)}; bashFileReadGuidance=${enabled(statusSnapshot.flags.bashFileReadGuidance)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; continuableTaskFollowups=${enabled(statusSnapshot.flags.continuableTaskFollowups)}; goalTools=${enabled(statusSnapshot.flags.goalTools)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; teamTaskUseReminder=${enabled(statusSnapshot.flags.teamTaskUseReminder)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; planFormatAdvisory=${enabled(statusSnapshot.flags.planFormatAdvisory)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; webSearchCommand=${enabled(statusSnapshot.flags.webSearchCommand)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; notepadWriteGuard=${enabled(statusSnapshot.flags.notepadWriteGuard)}; editErrorRecovery=${enabled(statusSnapshot.flags.editErrorRecovery)}; jsonErrorRecovery=${enabled(statusSnapshot.flags.jsonErrorRecovery)}; delegateTaskErrorGuidance=${enabled(statusSnapshot.flags.delegateTaskErrorGuidance)}; bashFileReadGuidance=${enabled(statusSnapshot.flags.bashFileReadGuidance)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
               `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; web=${presence('web')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; toolResultPruner=${presence('toolResultPruner')}; terminals=${presence('terminals')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
               'Presence does not prove readiness or health. This status path does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
@@ -1638,6 +1640,11 @@ export function apply(ctx, rawConfig) {
     || !ctx.fs || ['resolve', 'contains', 'lstat', 'stat', 'readBytes'].some(method => typeof ctx.fs[method] !== 'function'))) {
     throw new Error('dsh-omo: enablePlanChecklist requires DSH sessionQuery.observeSession and fs.resolve/contains/lstat/stat/readBytes')
   }
+  if (config.enablePlanFormatAdvisory && (!sessionQueryService || typeof sessionQueryService.observeSession !== 'function'
+    || !ctx.fs || ['resolve', 'contains', 'lstat', 'stat', 'readBytes'].some(method => typeof ctx.fs[method] !== 'function')
+    || typeof ctx.on !== 'function')) {
+    throw new Error('dsh-omo: enablePlanFormatAdvisory requires Cordis ctx.on, DSH sessionQuery.observeSession, and fs.resolve/contains/lstat/stat/readBytes')
+  }
   if (config.enableSessionSearch && (!sessionQueryService
     || typeof sessionQueryService.searchSessions !== 'function'
     || typeof sessionQueryService.observeSession !== 'function')) {
@@ -1748,6 +1755,7 @@ export function apply(ctx, rawConfig) {
       toolResultPruning: activeToolResultPruner !== undefined,
       agentTerminalTools: config.enableAgentTerminalTools === true && Array.isArray(terminalBackendTypes) && terminalBackendTypes.length > 0,
       planChecklist: config.enablePlanChecklist === true,
+      planFormatAdvisory: config.enablePlanFormatAdvisory === true,
       modelCapabilitiesRefresh: config.enableModelCapabilitiesRefresh === true,
       webSearchCommand: config.enableWebSearchCommand === true,
       sessionSearch: config.enableSessionSearch === true,
@@ -1894,6 +1902,11 @@ export function apply(ctx, rawConfig) {
   if (config.enableRootReadmeContext) registerRootReadmeContext(ctx, agentsService, sessionsService, ctx.fs)
   if (config.enableReadmeOnRead) registerReadmeOnReadContext(ctx, agentsService, sessionsService, ctx.fs, { skipRoot: config.enableRootReadmeContext })
   if (config.enableClaudeRulesOnRead) registerClaudeRulesOnReadContext(ctx, agentsService, sessionsService, ctx.fs)
+  if (config.enablePlanFormatAdvisory) {
+    ctx.on('tools/post-execute', createPlanFormatAdvisoryListener(
+      sessionQueryService, ctx.fs, lifecycle.controller.signal,
+    ))
+  }
   if (config.enableEditErrorRecovery) ctx.on('tools/post-execute', createEditErrorRecoveryListener())
   if (config.enableJsonErrorRecovery) ctx.on('tools/post-execute', createJsonErrorRecoveryListener())
   if (config.enableDelegateTaskErrorGuidance) ctx.on('tools/post-execute', createDelegateTaskErrorGuidanceListener())

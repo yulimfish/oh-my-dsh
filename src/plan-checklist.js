@@ -1,4 +1,4 @@
-import { isAbsolute } from 'node:path'
+import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { TextDecoder } from 'node:util'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
@@ -139,7 +139,7 @@ function requireAgent(exec) {
   return agent
 }
 
-function validatePlanName(value) {
+export function validatePlanName(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 83
     || CONTROL_OR_BIDI.test(value)) {
     throw new TypeError('plan must be a safe basename under .omo/plans (optionally ending in .md).')
@@ -287,7 +287,7 @@ function sameFile(before, after, bytes) {
     && (after.info.size === undefined || after.info.size === bytes.byteLength)
 }
 
-async function readPlanBytes(fs, cwd, stem, signal) {
+async function readPlanBytes(fs, cwd, stem, signal, requestedPath) {
   const path = `.omo/plans/${stem}.md`
   const root = await resolveRoot(fs, cwd, signal)
   const omo = await resolveDirectory(fs, '.omo', cwd, root.target, signal)
@@ -296,6 +296,20 @@ async function readPlanBytes(fs, cwd, stem, signal) {
   if (!plans) return undefined
   const beforeFile = await resolvePlanFile(fs, path, cwd, plans.target, signal)
   if (!beforeFile) return undefined
+  if (requestedPath !== undefined) {
+    if (typeof requestedPath !== 'string' || requestedPath.length === 0 || requestedPath.length > MAX_CWD_CHARS
+      || CONTROL_OR_BIDI.test(requestedPath)) {
+      throw new PlanChecklistError('The written path is not a safe plan target.')
+    }
+    const expectedPath = resolvePath(cwd, '.omo', 'plans', `${stem}.md`)
+    if (resolvePath(cwd, requestedPath) !== expectedPath) return undefined
+    const requestedTarget = validateTarget(
+      await awaitWithSignal(() => fs.resolve(requestedPath, { cwd, signal }), signal),
+      'Written Tool target',
+    )
+    assertNotAborted(signal)
+    if (targetKey(requestedTarget) !== targetKey(beforeFile.target)) return undefined
+  }
 
   let bytes
   try {
@@ -493,7 +507,7 @@ async function disposeLateObservation(pending) {
   } catch {}
 }
 
-async function inspectPlan(sessionQuery, fs, agent, stem, signal) {
+async function inspectPlan(sessionQuery, fs, agent, stem, signal, { requestedPath, formatOnly = false } = {}) {
   assertNotAborted(signal)
   let pending
   try {
@@ -525,7 +539,7 @@ async function inspectPlan(sessionQuery, fs, agent, stem, signal) {
       || !isAbsolute(cwd) || CONTROL_OR_BIDI.test(cwd)) {
       throw new PlanChecklistError('The current DSH session has no safe absolute working directory.')
     }
-    const bytes = await readPlanBytes(fs, cwd, stem, signal)
+    const bytes = await readPlanBytes(fs, cwd, stem, signal, requestedPath)
     assertNotAborted(signal)
     if (bytes === undefined) result = emptyResult(stem)
     else {
@@ -533,7 +547,10 @@ async function inspectPlan(sessionQuery, fs, agent, stem, signal) {
       try { markdown = new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch {
         throw new PlanChecklistError('Plan file is not valid UTF-8.')
       }
-      result = projectChecklist(stem, parsePlanChecklist(markdown), analyzePlanFormat(markdown))
+      const formatWarnings = analyzePlanFormat(markdown)
+      result = formatOnly
+        ? { formatWarnings }
+        : projectChecklist(stem, parsePlanChecklist(markdown), formatWarnings)
     }
   } catch (error) {
     failure = error
@@ -543,6 +560,33 @@ async function inspectPlan(sessionQuery, fs, agent, stem, signal) {
   if (disposeFailed) throw new PlanChecklistError('Could not release the current DSH session observation safely.')
   if (failure) throw failure
   return result
+}
+
+export async function readPlanFormatWarnings(sessionQuery, fs, agent, planName, requestedPath, execSignal, lifecycleSignal) {
+  if (!sessionQuery || typeof sessionQuery.observeSession !== 'function') {
+    throw new TypeError('Plan format inspection requires DSH sessionQuery.observeSession.')
+  }
+  const requiredFsMethods = ['resolve', 'contains', 'lstat', 'stat', 'readBytes']
+  if (!fs || requiredFsMethods.some(method => typeof fs[method] !== 'function')) {
+    throw new TypeError(`Plan format inspection requires DSH fs.${requiredFsMethods.join('/')}.`)
+  }
+  if (typeof requestedPath !== 'string' || requestedPath.length === 0 || requestedPath.length > MAX_CWD_CHARS
+    || CONTROL_OR_BIDI.test(requestedPath)) {
+    throw new TypeError('Plan format inspection requires a safe Tool file path.')
+  }
+  const stem = validatePlanName(planName)
+  const safeAgent = requireAgent({ agent })
+  const scope = createOperationScope(execSignal, lifecycleSignal)
+  try {
+    const result = await inspectPlan(sessionQuery, fs, safeAgent, stem, scope.signal, {
+      requestedPath,
+      formatOnly: true,
+    })
+    assertNotAborted(scope.signal)
+    return result.formatWarnings
+  } finally {
+    scope.dispose()
+  }
 }
 
 export function createPlanChecklistTool(sessionQuery, fs, lifecycleSignal) {
