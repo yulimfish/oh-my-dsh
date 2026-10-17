@@ -134,6 +134,7 @@ const baseConfig = {
   maxTaskChars: 12_000,
   maxResultChars: 8_000,
   enableContinuableTasks: false,
+  enableContinuableTaskFollowups: false,
   enableGoalTools: false,
   enableTeamTools: false,
   enableTeamTaskUseReminder: false,
@@ -178,6 +179,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).disabledOmoRoles, [])
   assert.deepEqual(Config({ disabledOmoRoles: ['architect', 'reviewer'] }).disabledOmoRoles, ['architect', 'reviewer'])
   assert.deepEqual(Config({}).userAgents, [])
+  assert.equal(Config({}).enableContinuableTaskFollowups, false)
+  assert.equal(Config({ enableContinuableTaskFollowups: true }).enableContinuableTaskFollowups, true)
   assert.equal(Config({}).enableProjectAgentFiles, false)
   assert.equal(Config({ enableProjectAgentFiles: true }).enableProjectAgentFiles, true)
   assert.equal(Config({}).enableWriteExistingFileGuard, false)
@@ -384,6 +387,7 @@ test('/omo status reports feature flags and service presence without calling bus
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
+  assert.match(status.text, /continuableTaskFollowups=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
   assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
@@ -3760,6 +3764,22 @@ test('rejects unknown role routes and incomplete model routes', async () => {
   })
 })
 
+test('continuable-child follow-ups are default-off and require the bounded DSH services', () => {
+  const disabled = makeContext()
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.tools.has('dsh_omo_task_followup'), false)
+
+  const withoutContinuableTasks = makeContext()
+  assert.throws(() => apply(withoutContinuableTasks.ctx, {
+    ...baseConfig, enableContinuableTaskFollowups: true,
+  }), /enableContinuableTaskFollowups requires enableContinuableTasks/)
+
+  const missingServices = makeContext()
+  assert.throws(() => apply(missingServices.ctx, {
+    ...baseConfig, enableContinuableTasks: true, enableContinuableTaskFollowups: true,
+  }), /requires DSH subagents\.startContinuable\/listChildren\/sendMessage/)
+})
+
 test('uses the DSH continuation seam only when enabled and rejects unpersisted token ceilings', async () => {
   const disabled = makeContext()
   apply(disabled.ctx, baseConfig)
@@ -3849,6 +3869,138 @@ test('starts a DSH continuable child with persisted route restrictions and no lo
   assert.equal(fixture.followups.length, 0)
   resolveOneShot({ stopReason: 'completed', output: [] })
   await new Promise(resolve => setImmediate(resolve))
+})
+
+test('reports accepted but untrackable children when DSH IDs exceed the local follow-up bound', async () => {
+  const fixture = makeContext()
+  const childId = 'c'.repeat(257)
+  fixture.ctx.subagents.startContinuable = async () => ({ childId, messageId: 'accepted-long-id' })
+  fixture.ctx.subagents.listChildren = async () => []
+  fixture.ctx.subagents.sendMessage = async () => 'unused'
+  apply(fixture.ctx, {
+    ...baseConfig, enableContinuableTasks: true, enableContinuableTaskFollowups: true,
+  })
+  const tool = fixture.tools.get('dsh_omo_task_continuable')
+  const args = { role: 'quick', task: 'Start a child whose ID exceeds the follow-up tracking limit.' }
+  const result = await tool.execute(args, {
+    agent: { id: 'parent-agent' }, signal: new AbortController().signal,
+  })
+  assert.equal(result.status, 'accepted')
+  assert.equal(result.followupTracked, false)
+  assert.match(tool.output.render(args, result)[0].text, /child ID exceeds 256 UTF-16 code units; follow-up is unavailable/)
+})
+
+test('continuable follow-up sends bounded text only to a tracked direct child and returns acceptance, not a result', async () => {
+  const fixture = makeContext()
+  const listed = []
+  const sent = []
+  fixture.ctx.subagents.listChildren = async (parentSessionId, signal) => {
+    listed.push({ parentSessionId, signal })
+    return [{ id: 'continuable-child-1', createdAt: 'now', mode: 'continuable', label: 'untrusted-label' }]
+  }
+  fixture.ctx.subagents.sendMessage = async (sender, targetId, content, options) => {
+    sent.push({ sender, targetId, content, options })
+    return 'followup-message-1'
+  }
+  apply(fixture.ctx, {
+    ...baseConfig, enableContinuableTasks: true, enableContinuableTaskFollowups: true,
+  })
+  const parent = { id: 'parent-agent' }
+  const signal = new AbortController().signal
+  const exec = { agent: parent, signal }
+  const startTool = fixture.tools.get('dsh_omo_task_continuable')
+  const followupTool = fixture.tools.get('dsh_omo_task_followup')
+  assert.ok(followupTool)
+
+  const startResult = await startTool.execute({ role: 'quick', task: 'Start one specialist child' }, exec)
+  assert.equal(startResult.followupTracked, true)
+  const result = await followupTool.execute({ childId: 'continuable-child-1', message: 'Continue with the remaining bounded check.' }, exec)
+  assert.deepEqual(result, {
+    status: 'accepted', childId: 'continuable-child-1', messageId: 'followup-message-1',
+  })
+  assert.equal(listed.length, 1)
+  assert.equal(listed[0].parentSessionId, 'parent-agent')
+  assert.ok(listed[0].signal instanceof AbortSignal)
+  assert.equal(listed[0].signal.aborted, false)
+  assert.deepEqual(sent, [{
+    sender: parent,
+    targetId: 'continuable-child-1',
+    content: [{ type: 'text', text: 'Continue with the remaining bounded check.' }],
+    options: { signal: listed[0].signal },
+  }])
+  assert.match(followupTool.description, /cold-resume/i)
+  assert.match(followupTool.description, /never completion or a retrieved result/i)
+  await assert.rejects(followupTool.execute({ childId: 'continuable-child-1', message: 'x'.repeat(4_097) }, exec), /4,096 UTF-16 code units/)
+  await assert.rejects(followupTool.execute({ childId: 'x'.repeat(257), message: 'Too long ID.' }, exec), /256 UTF-16 code units/)
+  await assert.rejects(followupTool.execute({ childId: 'foreign-child', message: 'Do not send.' }, exec), /not started by dsh-omo/)
+  assert.equal(sent.length, 1)
+})
+
+test('follow-up revalidates direct-child mode and clears records on parent/plugin disposal', async () => {
+  const fixture = makeContext()
+  let visible = false
+  fixture.ctx.subagents.listChildren = async () => visible
+    ? [{ id: 'continuable-child-1', mode: 'continuable' }]
+    : [{ id: 'continuable-child-1', mode: 'one-shot' }]
+  let sends = 0
+  fixture.ctx.subagents.sendMessage = async () => { sends += 1; return 'accepted' }
+  apply(fixture.ctx, {
+    ...baseConfig, enableContinuableTasks: true, enableContinuableTaskFollowups: true,
+  })
+  const parent = { id: 'parent-agent' }
+  const exec = { agent: parent, signal: new AbortController().signal }
+  const startTool = fixture.tools.get('dsh_omo_task_continuable')
+  const followupTool = fixture.tools.get('dsh_omo_task_followup')
+  await startTool.execute({ role: 'quick', task: 'Start a child' }, exec)
+  await assert.rejects(followupTool.execute({ childId: 'continuable-child-1', message: 'Follow up.' }, exec), /no longer a direct continuable child/)
+  visible = true
+  await assert.rejects(followupTool.execute({ childId: 'continuable-child-1', message: 'Retry.' }, exec), /not started by dsh-omo/)
+  assert.equal(sends, 0)
+
+  await startTool.execute({ role: 'quick', task: 'Start a second child' }, exec)
+  const disposedListener = fixture.events.get('agent/disposed')
+  assert.equal(typeof disposedListener, 'function')
+  disposedListener({ agent: parent })
+  await assert.rejects(followupTool.execute({ childId: 'continuable-child-2', message: 'No longer tracked.' }, exec), /not started by dsh-omo/)
+
+  await startTool.execute({ role: 'quick', task: 'Start a child before cleanup' }, exec)
+  const cleanup = fixture.effects.find(effect => effect.label === 'dsh-omo continuable task follow-up registry')?.dispose
+  assert.equal(typeof cleanup, 'function')
+  await cleanup()
+  await assert.rejects(followupTool.execute({ childId: 'continuable-child-3', message: 'Shutdown.' }, exec), /shutting down/)
+  assert.equal(sends, 0)
+})
+
+test('plugin shutdown during child-list revalidation cannot cold-resume a child', async () => {
+  const fixture = makeContext()
+  let resolveChildren
+  fixture.ctx.subagents.listChildren = async (_parentSessionId, signal) => {
+    assert.equal(signal.aborted, false)
+    return new Promise(resolve => { resolveChildren = resolve })
+  }
+  let sends = 0
+  fixture.ctx.subagents.sendMessage = async () => { sends += 1; return 'accepted' }
+  apply(fixture.ctx, {
+    ...baseConfig, enableContinuableTasks: true, enableContinuableTaskFollowups: true,
+  })
+  const parent = { id: 'parent-agent' }
+  const exec = { agent: parent, signal: new AbortController().signal }
+  await fixture.tools.get('dsh_omo_task_continuable').execute(
+    { role: 'quick', task: 'Start a child before shutdown' }, exec,
+  )
+  const followup = fixture.tools.get('dsh_omo_task_followup').execute(
+    { childId: 'continuable-child-1', message: 'Do not run after shutdown.' }, exec,
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  const cleanupLifecycle = fixture.effects.find(effect => effect.label === 'dsh-omo background workers')?.dispose
+  const cleanupRegistry = fixture.effects.find(effect => effect.label === 'dsh-omo continuable task follow-up registry')?.dispose
+  assert.equal(typeof cleanupLifecycle, 'function')
+  assert.equal(typeof cleanupRegistry, 'function')
+  await cleanupLifecycle()
+  await cleanupRegistry()
+  resolveChildren([{ id: 'continuable-child-1', mode: 'continuable' }])
+  await assert.rejects(followup, /dsh-omo is shutting down/)
+  assert.equal(sends, 0)
 })
 
 test('labels every resolved non-completed subagent outcome as partial and keeps host diagnostics separate', async () => {

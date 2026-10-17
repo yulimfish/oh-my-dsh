@@ -33,6 +33,7 @@ import { createEditErrorRecoveryListener } from './edit-error-recovery.js'
 import { createJsonErrorRecoveryListener } from './json-error-recovery.js'
 import { createDelegateTaskErrorGuidanceListener } from './delegate-task-error-guidance.js'
 import { createTeamTaskUseReminder } from './team-task-use-reminder.js'
+import { createContinuableTaskRegistry } from './continuable-task-registry.js'
 import { createBashFileReadGuidanceListener } from './bash-file-read-guidance.js'
 import { createProjectAgentFilesAdapter, PROJECT_AGENT_FILE_NAME } from './project-agent-files.js'
 
@@ -73,6 +74,7 @@ export const Config = z.object({
   maxTaskChars: z.number().default(DEFAULT_MAX_TASK_CHARS),
   maxResultChars: z.number().default(8_000),
   enableContinuableTasks: z.boolean().default(false),
+  enableContinuableTaskFollowups: z.boolean().default(false),
   enableGoalTools: z.boolean().default(false),
   enableTeamTools: z.boolean().default(false),
   enableTeamTaskUseReminder: z.boolean().default(false),
@@ -1034,7 +1036,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, act
   })
 }
 
-function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet) {
+function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet, continuableTaskRegistry) {
   const continuationCommandGuidance = [
     disabledOmoCommands.has('omo-tasks')
       ? 'dsh-omo /omo-tasks is disabled by configuration'
@@ -1060,11 +1062,12 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, user
           role: { type: 'string', required: true },
           status: { type: 'string', enum: ['accepted'], required: true },
           messageId: { type: 'string', required: true },
+          ...(continuableTaskRegistry ? { followupTracked: { type: 'boolean' } } : {}),
         },
       },
       render: (_args, value) => [{
         type: 'text',
-        text: `Accepted continuable ${value.role} child ${value.childId} (message ${value.messageId}).${disabledOmoCommands.has('omo-tasks') ? ' dsh-omo /omo-tasks is disabled by configuration; the DSH session persists.' : ' Use /omo-tasks to list it; the DSH session persists.'}`,
+        text: `Accepted continuable ${value.role} child ${value.childId} (message ${value.messageId}).${disabledOmoCommands.has('omo-tasks') ? ' dsh-omo /omo-tasks is disabled by configuration; the DSH session persists.' : ' Use /omo-tasks to list it; the DSH session persists.'}${value.followupTracked === false ? (value.childId.length > 256 ? ' The DSH child ID exceeds 256 UTF-16 code units; follow-up is unavailable.' : ' This Agent/child ID pair could not be stored in the bounded follow-up registry; follow-up is unavailable.') : ''}`,
       }],
     },
     timeoutMs: 30_000,
@@ -1111,11 +1114,87 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, user
         },
         signal: exec.signal,
       })
+      const followupTracked = continuableTaskRegistry?.record(exec.agent.id, accepted.childId)
       return {
         childId: accepted.childId,
         role: args.role,
         status: 'accepted',
         messageId: accepted.messageId,
+        ...(continuableTaskRegistry ? { followupTracked: followupTracked === true } : {}),
+      }
+    },
+  })
+}
+
+function continuableTaskFollowupTool(ctx, registry, lifecycle) {
+  return defineTool({
+    name: 'dsh_omo_task_followup',
+    description: 'Send one bounded text follow-up only to a direct continuable child that dsh_omo_task_continuable started successfully in this plugin instance. The child is revalidated through DSH listChildren. A running child may admit the message at a step boundary; an idle/absent child may start or cold-resume and continue independently. Acceptance means inbox admission only, never completion or a retrieved result. The plugin reserves at most 8 send attempts per child, 32 per tracked parent record, and 256 total reserved send attempts per plugin instance; reservation is not refunded after later errors. Use only for an explicit follow-up instruction; no polling, retries, arbitrary session targeting, or child output retrieval.',
+    parameters: {
+      childId: { type: 'string', required: true, description: 'Exact childId returned by dsh_omo_task_continuable in this plugin process; bounded to 256 UTF-16 code units.' },
+      message: { type: 'string', required: true, description: 'One text-only follow-up message; bounded to 4,096 UTF-16 code units.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          status: { type: 'string', enum: ['accepted'], required: true },
+          childId: { type: 'string', required: true },
+          messageId: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: `DSH accepted one follow-up message for continuable child ${value.childId}${value.messageId ? ` (message ${value.messageId})` : ''}. Acceptance is not completion; the child may start/resume and continue after this Tool returns.`,
+      }],
+    },
+    timeoutMs: 30_000,
+    async execute(args, exec) {
+      const agent = exec?.agent
+      if (!agent?.id) throw new Error('dsh_omo_task_followup requires an active parent agent.')
+      const signal = exec?.signal
+        ? AbortSignal.any([exec.signal, lifecycle.controller.signal])
+        : lifecycle.controller.signal
+      const assertActive = () => {
+        if (lifecycle.disposed || lifecycle.controller.signal.aborted) throw new Error('dsh-omo is shutting down.')
+        throwIfAborted(signal)
+      }
+      const childId = args?.childId
+      const message = args?.message
+      if (typeof childId !== 'string' || childId.trim().length === 0 || childId.length > 256) {
+        throw new Error('childId must be a non-empty string of at most 256 UTF-16 code units.')
+      }
+      if (typeof message !== 'string' || message.trim().length === 0 || message.length > 4_096) {
+        throw new Error('message must be non-empty and at most 4,096 UTF-16 code units.')
+      }
+      assertActive()
+      const reservation = registry.reserveSend(agent.id, childId)
+      if (reservation.status !== 'reserved') {
+        const reason = reservation.status === 'quota'
+          ? 'The bounded per-child, per-parent, or plugin-instance-wide follow-up quota is exhausted.'
+          : reservation.status === 'disposed'
+            ? 'dsh-omo is shutting down.'
+            : reservation.status === 'untracked'
+              ? 'This child was not started by dsh-omo in this plugin instance, or is no longer tracked.'
+              : 'The parent or child ID is invalid.'
+        throw new Error(reason)
+      }
+      assertActive()
+      const children = await ctx.subagents.listChildren(agent.id, signal)
+      assertActive()
+      const directContinuableChild = Array.isArray(children)
+        && children.some(child => child?.id === childId && child?.mode === 'continuable')
+      if (!directContinuableChild) {
+        registry.remove(agent.id, childId)
+        throw new Error('The tracked session is no longer a direct continuable child of this agent.')
+      }
+      assertActive()
+      const messageId = await ctx.subagents.sendMessage(agent, childId, [{ type: 'text', text: message }], { signal })
+      return {
+        status: 'accepted',
+        childId,
+        ...(typeof messageId === 'string' && messageId.length <= 256 ? { messageId } : {}),
       }
     },
   })
@@ -1424,7 +1503,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; goalTools=${enabled(statusSnapshot.flags.goalTools)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; teamTaskUseReminder=${enabled(statusSnapshot.flags.teamTaskUseReminder)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; webSearchCommand=${enabled(statusSnapshot.flags.webSearchCommand)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; notepadWriteGuard=${enabled(statusSnapshot.flags.notepadWriteGuard)}; editErrorRecovery=${enabled(statusSnapshot.flags.editErrorRecovery)}; jsonErrorRecovery=${enabled(statusSnapshot.flags.jsonErrorRecovery)}; delegateTaskErrorGuidance=${enabled(statusSnapshot.flags.delegateTaskErrorGuidance)}; bashFileReadGuidance=${enabled(statusSnapshot.flags.bashFileReadGuidance)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; continuableTaskFollowups=${enabled(statusSnapshot.flags.continuableTaskFollowups)}; goalTools=${enabled(statusSnapshot.flags.goalTools)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; teamTaskUseReminder=${enabled(statusSnapshot.flags.teamTaskUseReminder)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; webSearchCommand=${enabled(statusSnapshot.flags.webSearchCommand)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; notepadWriteGuard=${enabled(statusSnapshot.flags.notepadWriteGuard)}; editErrorRecovery=${enabled(statusSnapshot.flags.editErrorRecovery)}; jsonErrorRecovery=${enabled(statusSnapshot.flags.jsonErrorRecovery)}; delegateTaskErrorGuidance=${enabled(statusSnapshot.flags.delegateTaskErrorGuidance)}; bashFileReadGuidance=${enabled(statusSnapshot.flags.bashFileReadGuidance)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
               `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; web=${presence('web')}; agentTeams=${presence('agentTeams')}; jobController=${presence('jobController')}; toolResultPruner=${presence('toolResultPruner')}; terminals=${presence('terminals')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
               'Presence does not prove readiness or health. This status path does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
@@ -1438,7 +1517,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
         }
         return {
           kind: 'success',
-          text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Team task-use reminder: ${config.enableTeamTaskUseReminder ? 'enabled' : 'disabled'} (Team Agents only; 10 accepted non-task Tool calls; fixed advisory). Model-facing DSH Goal tools: ${config.enableGoalTools ? 'enabled' : 'disabled'} (exact calling Agent only). Human-only DSH web search: ${config.enableWebSearchCommand ? 'enabled via /omo web-search <query>; no URLs are auto-fetched' : 'disabled' }. Edit error recovery: ${config.enableEditErrorRecovery ? 'enabled' : 'disabled'} (post-failure read-before-retry context only). JSON error recovery: ${config.enableJsonErrorRecovery ? 'enabled' : 'disabled'} (matched Tool failures only; no argument rewrite). Task input guidance: ${config.enableDelegateTaskErrorGuidance ? 'enabled' : 'disabled'} (dsh_omo_task blank/oversized argument errors only; no retries). Bash file-read guidance: ${config.enableBashFileReadGuidance ? 'enabled' : 'disabled'} (simple cat/head/tail commands only; advisory after successful execution). Notepad write guard: ${config.enableNotepadWriteGuard ? 'enabled' : 'disabled'} (global lexical ToolGuard only; not filesystem authorization). Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Project agent files: ${config.enableProjectAgentFiles ? 'enabled' : 'disabled'} (current-session cwd only; prompt persona with optional DSH toolFilter allowlist). Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). LSP navigation: ${config.enableLspTools ? 'enabled' : 'disabled'} (two read-only queries; provider-dependent and not a path authorization boundary). Root AGENTS context: ${config.enableRootAgentsContext ? 'enabled' : 'disabled'} (bounded cwd/AGENTS.md snapshot for new Agent scopes before their first step; root-only, no watcher, repository text is untrusted). AGENTS-on-read: ${config.enableAgentsOnRead ? 'enabled' : 'disabled'} (post-read injection; root AGENTS skipped when the root snapshot is enabled; repository text is untrusted). Root README context: ${config.enableRootReadmeContext ? 'enabled' : 'disabled'} (opt-in root README.md snapshot for Agent prompt context). README-on-read: ${config.enableReadmeOnRead ? 'enabled' : 'disabled'} (post-read injection; root README skipped when the root snapshot is enabled). Claude rules after read/write/edit: ${config.enableClaudeRulesOnRead ? 'enabled' : 'disabled'} (legacy opt-in flag; no verified multiedit schema). Write-existing-file guard: ${config.enableWriteExistingFileGuard ? 'enabled' : 'disabled'} (final isError:false result for case-insensitive read of preflighted in-cwd regular file required before one same-Agent case-insensitive write; same-named custom Tools count; raw .omo slash-segment including .omo/.. aliases or overwrite boolean true/exact case-insensitive "true" without trimming bypass; args unchanged; verified missing/outside normally pass below caps, but caps may busy-deny writes; UX only, read/write TOCTOU remains). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
+          text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Team task-use reminder: ${config.enableTeamTaskUseReminder ? 'enabled' : 'disabled'} (Team Agents only; 10 accepted non-task Tool calls; fixed advisory). Model-facing DSH Goal tools: ${config.enableGoalTools ? 'enabled' : 'disabled'} (exact calling Agent only). Human-only DSH web search: ${config.enableWebSearchCommand ? 'enabled via /omo web-search <query>; no URLs are auto-fetched' : 'disabled' }. Edit error recovery: ${config.enableEditErrorRecovery ? 'enabled' : 'disabled'} (post-failure read-before-retry context only). JSON error recovery: ${config.enableJsonErrorRecovery ? 'enabled' : 'disabled'} (matched Tool failures only; no argument rewrite). Task input guidance: ${config.enableDelegateTaskErrorGuidance ? 'enabled' : 'disabled'} (dsh_omo_task blank/oversized argument errors only; no retries). Bash file-read guidance: ${config.enableBashFileReadGuidance ? 'enabled' : 'disabled'} (simple cat/head/tail commands only; advisory after successful execution). Notepad write guard: ${config.enableNotepadWriteGuard ? 'enabled' : 'disabled'} (global lexical ToolGuard only; not filesystem authorization). Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Continuable task follow-ups: ${config.enableContinuableTaskFollowups ? 'enabled' : 'disabled'} (tracked direct children only; acceptance is not completion). Project agent files: ${config.enableProjectAgentFiles ? 'enabled' : 'disabled'} (current-session cwd only; prompt persona with optional DSH toolFilter allowlist). Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). LSP navigation: ${config.enableLspTools ? 'enabled' : 'disabled'} (two read-only queries; provider-dependent and not a path authorization boundary). Root AGENTS context: ${config.enableRootAgentsContext ? 'enabled' : 'disabled'} (bounded cwd/AGENTS.md snapshot for new Agent scopes before their first step; root-only, no watcher, repository text is untrusted). AGENTS-on-read: ${config.enableAgentsOnRead ? 'enabled' : 'disabled'} (post-read injection; root AGENTS skipped when the root snapshot is enabled; repository text is untrusted). Root README context: ${config.enableRootReadmeContext ? 'enabled' : 'disabled'} (opt-in root README.md snapshot for Agent prompt context). README-on-read: ${config.enableReadmeOnRead ? 'enabled' : 'disabled'} (post-read injection; root README skipped when the root snapshot is enabled). Claude rules after read/write/edit: ${config.enableClaudeRulesOnRead ? 'enabled' : 'disabled'} (legacy opt-in flag; no verified multiedit schema). Write-existing-file guard: ${config.enableWriteExistingFileGuard ? 'enabled' : 'disabled'} (final isError:false result for case-insensitive read of preflighted in-cwd regular file required before one same-Agent case-insensitive write; same-named custom Tools count; raw .omo slash-segment including .omo/.. aliases or overwrite boolean true/exact case-insensitive "true" without trimming bypass; args unchanged; verified missing/outside normally pass below caps, but caps may busy-deny writes; UX only, read/write TOCTOU remains). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
         }
       },
     },
@@ -1500,6 +1579,21 @@ export function apply(ctx, rawConfig) {
   if (config.enableWebSearchCommand && (!webService || typeof webService.search !== 'function')) {
     throw new Error('dsh-omo: enableWebSearchCommand requires the optional DSH web.search service')
   }
+  if (config.enableContinuableTaskFollowups && !config.enableContinuableTasks) {
+    throw new Error('dsh-omo: enableContinuableTaskFollowups requires enableContinuableTasks')
+  }
+  if (config.enableContinuableTaskFollowups && (!ctx.subagents
+    || typeof ctx.subagents.startContinuable !== 'function'
+    || typeof ctx.subagents.listChildren !== 'function'
+    || typeof ctx.subagents.sendMessage !== 'function')) {
+    throw new Error('dsh-omo: enableContinuableTaskFollowups requires DSH subagents.startContinuable/listChildren/sendMessage')
+  }
+  if (config.enableContinuableTaskFollowups && (typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
+    throw new Error('dsh-omo: enableContinuableTaskFollowups requires Cordis ctx.on and ctx.effect')
+  }
+  const continuableTaskRegistry = config.enableContinuableTaskFollowups
+    ? createContinuableTaskRegistry()
+    : undefined
   const teamService = optionalService(ctx, 'agentTeams')
   if (config.enableTeamTools && !teamService) {
     throw new Error('dsh-omo: enableTeamTools requires the optional DSH agentTeams service')
@@ -1645,6 +1739,7 @@ export function apply(ctx, rawConfig) {
   const statusSnapshot = Object.freeze({
     flags: Object.freeze({
       continuableTasks: config.enableContinuableTasks === true,
+      continuableTaskFollowups: config.enableContinuableTaskFollowups === true,
       goalTools: config.enableGoalTools === true,
       runtimeFallback: runtimeFallbackPolicy.enabled,
       teamTools: config.enableTeamTools === true,
@@ -1735,7 +1830,8 @@ export function apply(ctx, rawConfig) {
   }
   ctx.tools.register(specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles, routeConcurrency))
   if (projectAgentFiles) ctx.tools.register(projectAgentFilesTool(ctx, projectAgentFiles, providerName, userAgents))
-  if (config.enableContinuableTasks) ctx.tools.register(continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet))
+  if (config.enableContinuableTasks) ctx.tools.register(continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet, continuableTaskRegistry))
+  if (config.enableContinuableTaskFollowups) ctx.tools.register(continuableTaskFollowupTool(ctx, continuableTaskRegistry, lifecycle))
   if (config.enableGoalTools) {
     const disposeGoalTools = registerGoalTools(ctx, goalService)
     ctx.effect(() => disposeGoalTools, 'dsh-omo current-Agent Goal tools')
@@ -1801,6 +1897,10 @@ export function apply(ctx, rawConfig) {
   if (config.enableEditErrorRecovery) ctx.on('tools/post-execute', createEditErrorRecoveryListener())
   if (config.enableJsonErrorRecovery) ctx.on('tools/post-execute', createJsonErrorRecoveryListener())
   if (config.enableDelegateTaskErrorGuidance) ctx.on('tools/post-execute', createDelegateTaskErrorGuidanceListener())
+  if (continuableTaskRegistry) {
+    ctx.on('agent/disposed', payload => continuableTaskRegistry.clearAgent(payload?.agent))
+    ctx.effect(() => continuableTaskRegistry.dispose, 'dsh-omo continuable task follow-up registry')
+  }
   if (config.enableTeamTaskUseReminder) {
     const reminder = createTeamTaskUseReminder(teamService)
     ctx.on('tools/post-execute', reminder.listener)
