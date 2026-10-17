@@ -38,6 +38,7 @@ import { createGoalUseReminder } from './goal-use-reminder.js'
 import { createAgentUsageReminder } from './agent-usage-reminder.js'
 import { createCompactionResumeAdvisory } from './compaction-resume-advisory.js'
 import { createSearchToolResultPruningListener } from './search-tool-result-pruning.js'
+import { normalizeImageQueryRoute, registerImageQueryTool } from './image-query-tool.js'
 import { createContinuableTaskRegistry } from './continuable-task-registry.js'
 import { createBashFileReadGuidanceListener } from './bash-file-read-guidance.js'
 import { createProjectAgentFilesAdapter, PROJECT_AGENT_FILE_NAME } from './project-agent-files.js'
@@ -97,6 +98,11 @@ export const Config = z.object({
   enableJobTools: z.boolean().default(false),
   enableToolResultPruning: z.boolean().default(false),
   enableSearchToolResultPruning: z.boolean().default(false),
+  enableImageQueryTool: z.boolean().default(false),
+  imageQueryRoute: z.union([z.object({
+    provider: z.string().required(),
+    model: z.string().required(),
+  }), z.const(null)]).default(null),
   enableAgentTerminalTools: z.boolean().default(false),
   enableLspTools: z.boolean().default(false),
   enableRootAgentsContext: z.boolean().default(false),
@@ -1513,7 +1519,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; continuableTaskFollowups=${enabled(statusSnapshot.flags.continuableTaskFollowups)}; goalTools=${enabled(statusSnapshot.flags.goalTools)}; goalUseReminder=${enabled(statusSnapshot.flags.goalUseReminder)}; agentUsageReminder=${enabled(statusSnapshot.flags.agentUsageReminder)}; compactionResumeAdvisory=${enabled(statusSnapshot.flags.compactionResumeAdvisory)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; teamTaskUseReminder=${enabled(statusSnapshot.flags.teamTaskUseReminder)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; searchToolResultPruning=${enabled(statusSnapshot.flags.searchToolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; planFormatAdvisory=${enabled(statusSnapshot.flags.planFormatAdvisory)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; webSearchCommand=${enabled(statusSnapshot.flags.webSearchCommand)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; notepadWriteGuard=${enabled(statusSnapshot.flags.notepadWriteGuard)}; editErrorRecovery=${enabled(statusSnapshot.flags.editErrorRecovery)}; jsonErrorRecovery=${enabled(statusSnapshot.flags.jsonErrorRecovery)}; delegateTaskErrorGuidance=${enabled(statusSnapshot.flags.delegateTaskErrorGuidance)}; bashFileReadGuidance=${enabled(statusSnapshot.flags.bashFileReadGuidance)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; continuableTaskFollowups=${enabled(statusSnapshot.flags.continuableTaskFollowups)}; goalTools=${enabled(statusSnapshot.flags.goalTools)}; goalUseReminder=${enabled(statusSnapshot.flags.goalUseReminder)}; agentUsageReminder=${enabled(statusSnapshot.flags.agentUsageReminder)}; compactionResumeAdvisory=${enabled(statusSnapshot.flags.compactionResumeAdvisory)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; teamTaskUseReminder=${enabled(statusSnapshot.flags.teamTaskUseReminder)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; imageQueryTool=${enabled(statusSnapshot.flags.imageQueryTool)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; searchToolResultPruning=${enabled(statusSnapshot.flags.searchToolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; planFormatAdvisory=${enabled(statusSnapshot.flags.planFormatAdvisory)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; webSearchCommand=${enabled(statusSnapshot.flags.webSearchCommand)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; notepadWriteGuard=${enabled(statusSnapshot.flags.notepadWriteGuard)}; editErrorRecovery=${enabled(statusSnapshot.flags.editErrorRecovery)}; jsonErrorRecovery=${enabled(statusSnapshot.flags.jsonErrorRecovery)}; delegateTaskErrorGuidance=${enabled(statusSnapshot.flags.delegateTaskErrorGuidance)}; bashFileReadGuidance=${enabled(statusSnapshot.flags.bashFileReadGuidance)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
               `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; web=${presence('web')}; agentTeams=${presence('agentTeams')}; agents=${presence('agents')}; jobController=${presence('jobController')}; toolResultPruner=${presence('toolResultPruner')}; terminals=${presence('terminals')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
               'Presence does not prove readiness or health. This status path does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
@@ -1582,6 +1588,14 @@ export function apply(ctx, rawConfig) {
     throw new Error('dsh-omo: enableGoalTools requires DSH goals.get/create/edit/pause/resume/complete')
   }
   const llmService = optionalService(ctx, 'llm')
+  const imageQueryRoute = config.enableImageQueryTool ? normalizeImageQueryRoute(config.imageQueryRoute) : undefined
+  if (config.enableImageQueryTool && typeof llmService?.prepareCall !== 'function') {
+    throw new Error('dsh-omo: enableImageQueryTool requires the optional DSH llm.prepareCall service')
+  }
+  if (config.enableImageQueryTool && (typeof ctx.on !== 'function' || typeof ctx.effect !== 'function'
+    || typeof ctx.tools?.register !== 'function')) {
+    throw new Error('dsh-omo: enableImageQueryTool requires Cordis ctx.on/effect and DSH tools.register')
+  }
   const webService = optionalService(ctx, 'web')
   if (config.enableModelCapabilitiesRefresh && (!webService || typeof webService.fetch !== 'function')) {
     throw new Error('dsh-omo: enableModelCapabilitiesRefresh requires the optional DSH web.fetch service')
@@ -1807,6 +1821,7 @@ export function apply(ctx, rawConfig) {
       teamTools: config.enableTeamTools === true,
       teamTaskUseReminder: config.enableTeamTaskUseReminder === true,
       jobTools: config.enableJobTools === true,
+      imageQueryTool: config.enableImageQueryTool === true,
       toolResultPruning: activeToolResultPruner !== undefined,
       searchToolResultPruning: activeSearchToolResultPruner !== undefined,
       agentTerminalTools: config.enableAgentTerminalTools === true && Array.isArray(terminalBackendTypes) && terminalBackendTypes.length > 0,
@@ -1894,6 +1909,10 @@ export function apply(ctx, rawConfig) {
     ctx.effect(() => disposeNotepadWriteGuard, 'dsh-omo notepad write guard')
   }
   ctx.tools.register(specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles, routeConcurrency))
+  if (config.enableImageQueryTool) {
+    const disposeImageQueryTool = registerImageQueryTool(ctx, llmService, imageQueryRoute)
+    ctx.effect(() => disposeImageQueryTool, 'dsh-omo image-query Tool and pre-step capture')
+  }
   if (projectAgentFiles) ctx.tools.register(projectAgentFilesTool(ctx, projectAgentFiles, providerName, userAgents))
   if (config.enableContinuableTasks) ctx.tools.register(continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet, continuableTaskRegistry))
   if (config.enableContinuableTaskFollowups) ctx.tools.register(continuableTaskFollowupTool(ctx, continuableTaskRegistry, lifecycle))

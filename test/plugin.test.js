@@ -152,6 +152,7 @@ const baseConfig = {
   enableJobTools: false,
   enableToolResultPruning: false,
   enableSearchToolResultPruning: false,
+  enableImageQueryTool: false,
   enableAgentTerminalTools: false,
   enableLspTools: false,
   enableRootAgentsContext: false,
@@ -266,6 +267,9 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableToolResultPruning: true }).enableToolResultPruning, true)
   assert.equal(Config({}).enableSearchToolResultPruning, false)
   assert.equal(Config({ enableSearchToolResultPruning: true }).enableSearchToolResultPruning, true)
+  assert.equal(Config({}).enableImageQueryTool, false)
+  assert.equal(Config({}).imageQueryRoute, undefined)
+  assert.equal(Config({ enableImageQueryTool: true, imageQueryRoute: { provider: 'vision-provider', model: 'vision-model' } }).enableImageQueryTool, true)
   assert.equal(Config({}).enableAgentTerminalTools, false)
   assert.equal(Config({ enableAgentTerminalTools: true }).enableAgentTerminalTools, true)
   assert.equal(Config({}).enablePlanChecklist, false)
@@ -299,6 +303,69 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
     enabled: true,
     chains: [{ provider: 'primary', model: 'main' }],
   } }), /fallbacks/u)
+})
+
+test('image-query Tool is default-off and requires an explicit route plus an optional LLM service', () => {
+  let prepareCalls = 0
+  const llm = { prepareCall() { prepareCalls += 1; throw new Error('must not run during setup') } }
+  const disabled = makeContext({ services: { llm } })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.tools.has('dsh_omo_image_query'), false)
+  assert.equal(disabled.events.has('agent/pre-step'), false)
+  assert.equal(prepareCalls, 0, 'default-off setup does not prepare or call a model')
+
+  const missingRoute = makeContext({ services: { llm } })
+  assert.throws(
+    () => apply(missingRoute.ctx, { ...baseConfig, enableImageQueryTool: true }),
+    /enableImageQueryTool requires an explicit imageQueryRoute/u,
+  )
+
+  const malformedRoute = makeContext({ services: { llm } })
+  assert.throws(
+    () => apply(malformedRoute.ctx, {
+      ...baseConfig,
+      enableImageQueryTool: true,
+      imageQueryRoute: { provider: ' ', model: 'vision-model' },
+    }),
+    /imageQueryRoute\.provider must not be blank/u,
+  )
+  assert.equal(malformedRoute.tools.size, 0, 'route validation happens before any Tool registration')
+
+  const missingLlm = makeContext()
+  assert.throws(
+    () => apply(missingLlm.ctx, {
+      ...baseConfig,
+      enableImageQueryTool: true,
+      imageQueryRoute: { provider: 'vision-provider', model: 'vision-model' },
+    }),
+    /enableImageQueryTool requires the optional DSH llm\.prepareCall service/u,
+  )
+
+  const missingToolRegistry = makeContext({ services: { llm } })
+  missingToolRegistry.ctx.tools.register = undefined
+  assert.throws(
+    () => apply(missingToolRegistry.ctx, {
+      ...baseConfig,
+      enableImageQueryTool: true,
+      imageQueryRoute: { provider: 'vision-provider', model: 'vision-model' },
+    }),
+    /enableImageQueryTool requires Cordis ctx.on\/effect and DSH tools.register/u,
+  )
+  assert.equal(missingToolRegistry.tools.size, 0)
+
+  const enabled = makeContext({ services: { llm } })
+  apply(enabled.ctx, {
+    ...baseConfig,
+    enableImageQueryTool: true,
+    imageQueryRoute: { provider: 'vision-provider', model: 'vision-model' },
+  })
+  assert.equal(enabled.tools.has('dsh_omo_image_query'), true)
+  assert.equal(enabled.events.has('agent/pre-step'), true)
+  assert.equal(prepareCalls, 0, 'enabling the Tool performs no model request')
+  const registration = enabled.effects.find(effect => effect.label === 'dsh-omo image-query Tool and pre-step capture')
+  assert.ok(registration)
+  registration.dispose()
+  assert.equal(enabled.tools.has('dsh_omo_image_query'), false)
 })
 
 test('read-only plan checklist is default-off and requires DSH workspace-read contracts', async () => {
@@ -442,7 +509,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.match(status.text, /continuableTaskFollowups=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
   assert.match(status.text, /goalUseReminder=disabled; agentUsageReminder=disabled; compactionResumeAdvisory=disabled/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; toolResultPruning=disabled; searchToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; searchToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
