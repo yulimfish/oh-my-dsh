@@ -137,6 +137,7 @@ const baseConfig = {
   enableContinuableTaskFollowups: false,
   enableGoalTools: false,
   enableGoalUseReminder: false,
+  enableCompactionResumeAdvisory: false,
   enableTeamTools: false,
   enableTeamTaskUseReminder: false,
   enableSessionSearch: false,
@@ -241,6 +242,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableGoalTools: true }).enableGoalTools, true)
   assert.equal(Config({}).enableGoalUseReminder, false)
   assert.equal(Config({ enableGoalUseReminder: true }).enableGoalUseReminder, true)
+  assert.equal(Config({}).enableCompactionResumeAdvisory, false)
+  assert.equal(Config({ enableCompactionResumeAdvisory: true }).enableCompactionResumeAdvisory, true)
   assert.equal(Config({}).enableTeamTools, false)
   assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
   assert.equal(Config({}).enableTeamTaskUseReminder, false)
@@ -432,6 +435,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
   assert.match(status.text, /continuableTaskFollowups=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
+  assert.match(status.text, /goalUseReminder=disabled; compactionResumeAdvisory=disabled/u)
   assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
@@ -1565,7 +1569,7 @@ test('mounts default-off delegated task input guidance only when Cordis events a
   apply(enabled.ctx, { ...baseConfig, enableDelegateTaskErrorGuidance: true })
   assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
   assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /delegateTaskErrorGuidance=enabled/u)
-  assert.match(enabled.commands.get('omo').handler().text, /Task input guidance: enabled \(dsh_omo_task and dsh_omo_task_continuable blank\/oversized task-text errors only; no retries\)/u)
+  assert.match(enabled.commands.get('omo').handler().text, /Task input guidance: enabled \(input-confirmed blank\/oversized errors for dsh_omo_task and dsh_omo_task_continuable; no retries\)/u)
 })
 
 test('mounts default-off Bash file-read guidance only when Cordis events are available', () => {
@@ -1720,6 +1724,87 @@ test('mounts the bounded non-Team Goal-use reminder only with explicit prerequis
     async () => ({ kind: 'accept', content: [] }),
   )
   assert.equal(afterDispose.additionalContexts, undefined)
+})
+
+test('mounts the default-off compact-resume advisory only with live Agent and prompt-scope prerequisites', async () => {
+  const liveAgents = new Map()
+  const agents = { get: agentId => liveAgents.get(agentId) }
+  const systemPrompt = { context: () => () => {} }
+
+  const disabled = makeContext({ services: { agents, systemPrompt } })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('agent/created'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /compactionResumeAdvisory=disabled/u)
+
+  const missingAgents = makeContext({ services: { systemPrompt } })
+  assert.throws(
+    () => apply(missingAgents.ctx, { ...baseConfig, enableCompactionResumeAdvisory: true }),
+    /enableCompactionResumeAdvisory requires DSH agents\.get/u,
+  )
+  assert.equal(missingAgents.tools.size, 0)
+
+  const missingSystemPrompt = makeContext({ services: { agents } })
+  assert.throws(
+    () => apply(missingSystemPrompt.ctx, { ...baseConfig, enableCompactionResumeAdvisory: true }),
+    /enableCompactionResumeAdvisory requires DSH systemPrompt\.context/u,
+  )
+  assert.equal(missingSystemPrompt.tools.size, 0)
+
+  const missingEvents = makeContext({ services: { agents, systemPrompt } })
+  missingEvents.ctx.on = undefined
+  assert.throws(
+    () => apply(missingEvents.ctx, { ...baseConfig, enableCompactionResumeAdvisory: true }),
+    /enableCompactionResumeAdvisory requires Cordis ctx\.on and ctx\.effect/u,
+  )
+  assert.equal(missingEvents.tools.size, 0)
+
+  const missingEffects = makeContext({ services: { agents, systemPrompt } })
+  missingEffects.ctx.effect = undefined
+  assert.throws(
+    () => apply(missingEffects.ctx, { ...baseConfig, enableCompactionResumeAdvisory: true }),
+    /enableCompactionResumeAdvisory requires Cordis ctx\.on and ctx\.effect/u,
+  )
+  assert.equal(missingEffects.tools.size, 0)
+
+  const fixture = makeContext({ services: { agents, systemPrompt } })
+  apply(fixture.ctx, { ...baseConfig, enableCompactionResumeAdvisory: true })
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /compactionResumeAdvisory=enabled/u)
+  assert.match(fixture.commands.get('omo').handler().text, /Compaction-resume advisory: enabled \(fixed per-step context after compact; no summary rewrite\)/u)
+
+  const contexts = []
+  let contextDisposals = 0
+  const agentContext = {
+    systemPrompt: {
+      context(entry) {
+        contexts.push(entry)
+        return () => { contextDisposals += 1 }
+      },
+    },
+    effect(execute) {
+      const cleanup = execute()
+      let active = true
+      return () => {
+        if (!active) return
+        active = false
+        cleanup?.()
+      }
+    },
+  }
+  const agent = { id: 'compact-agent', ctx: agentContext }
+  liveAgents.set(agent.id, agent)
+  const listener = fixture.events.get('agent/created')
+  await listener({ agent, source: 'resume' })
+  assert.equal(contexts.length, 0)
+  await listener({ agent, source: 'compact', history: 'must never be interpolated' })
+  assert.equal(contexts.length, 1)
+  assert.equal(contexts[0].text.includes('must never be interpolated'), false)
+  assert.equal(contexts[0].order, 150)
+  const advisoryEffect = fixture.effects.find(effect => effect.label === 'dsh-omo compaction-resume advisory')
+  assert.equal(typeof advisoryEffect?.dispose, 'function')
+  await advisoryEffect.dispose()
+  assert.equal(contextDisposals, 1)
+  await listener({ agent, source: 'compact' })
+  assert.equal(contexts.length, 1, 'plugin disposal prevents future context registration')
 })
 
 test('mounts the native Goal command only with Goals and opt-in Agent Teams tools only with the Host service', async () => {
