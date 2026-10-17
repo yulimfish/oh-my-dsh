@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { posix as path } from 'node:path'
-import { createPlanChecklistTool, parsePlanChecklist, registerPlanChecklistTool } from '../src/plan-checklist.js'
+import {
+  createPlanChecklistTool,
+  effortBandForDuration,
+  parsePlanChecklist,
+  PLAN_FORMAT_WARNING_MESSAGES,
+  registerPlanChecklistTool,
+} from '../src/plan-checklist.js'
 import { createPlanFormatAdvisoryListener } from '../src/plan-format-advisory.js'
 
 const CWD = '/workspace/project'
@@ -394,6 +400,84 @@ test('registration is disposable and plugin-lifecycle cancellation aborts in-fli
   assert.equal(registered.size, 0)
   resolveRead(new Uint8Array())
   dispose()
+})
+
+test('matches the pinned OMO Effort duration grammar and size-band boundaries', () => {
+  const cases = [
+    ['30 minutes', 'Quick'],
+    ['1 hour', 'Quick'],
+    ['1.01 hours', 'Short'],
+    ['2 hrs', 'Short'],
+    ['4 hours', 'Short'],
+    ['4.01 hours', 'Medium'],
+    ['1 day', 'Medium'],
+    ['16 hours', 'Medium'],
+    ['16.01 hours', 'Large'],
+    ['3 days', 'Large'],
+    ['40 hours', 'Large'],
+    ['40.01 hours', 'XL'],
+    ['1-2 hours', 'Short'],
+    ['200 hours', 'XL'],
+    ['2-3 weeks', 'XL'],
+    ['2–3 weeks', 'XL'],
+    ['3 to 4 days', 'Large'],
+    ['1,5 hours', 'Short'],
+    ['1 month', 'XL'],
+  ]
+  for (const [value, expected] of cases) assert.equal(effortBandForDuration(value), expected, value)
+  assert.equal(effortBandForDuration('Medium'), null)
+  assert.equal(effortBandForDuration('1 h'), null, 'the pinned grammar requires hr/hour, not bare h')
+  assert.equal(effortBandForDuration(''), null)
+})
+
+test('explicit checklist reports only fixed Effort duration warnings', async () => {
+  const fixture = makeWorkspace({ markdown: '**Effort:** PRIVATE VALUE 3 days\n' })
+  const tool = toolFor(fixture)
+  const result = await tool.execute({ plan: 'active' }, { agent: AGENT })
+  assert.deepEqual(result.formatWarnings, [PLAN_FORMAT_WARNING_MESSAGES.effortDuration])
+  const rendered = tool.output.render({ plan: 'active' }, result)[0].text
+  assert.match(rendered, /first \*\*Effort:\*\* field contains a duration/u)
+  assert.doesNotMatch(rendered, /PRIVATE VALUE|3 days/u)
+  assert.equal(typeof fixture.fs.writeText, 'undefined')
+})
+
+test('post-write Effort advisory is fixed, first-field-only, and never rewrites the plan', async () => {
+  const rawDuration = 'PRIVATE ESTIMATE 3 days'
+  const rawTask = 'PRIVATE TASK LABEL'
+  const markdown = `**Effort:** ${rawDuration}\n## TODOs\n- [ ] ${rawTask}\n## Final Verification Wave\n`
+  const fixture = makeWorkspace({ markdown })
+  const originalBytes = new Uint8Array(fixture.nodes.get(PLAN_PATH).bytes)
+  const listener = createPlanFormatAdvisoryListener(fixture.sessionQuery, fixture.fs)
+  const completion = [{ type: 'text', text: 'write succeeded' }]
+  const existing = { role: 'user', content: [{ type: 'text', text: 'Prior context.' }] }
+  const originalDecision = { kind: 'accept', content: completion, additionalContexts: [existing] }
+  const decision = await listener(
+    planWriteExec(), { isError: false, value: {}, content: [] }, async () => originalDecision,
+  )
+  assert.equal(decision.content, completion)
+  assert.equal(decision.additionalContexts[0], existing)
+  assert.equal(decision.additionalContexts.length, 2)
+  const advisory = decision.additionalContexts[1].content[0].text
+  assert.match(advisory, /The first \*\*Effort:\*\* field contains a duration/u)
+  assert.match(advisory, /A recognized TODOs or Final Verification Wave section contains no valid structured task rows\./u)
+  assert.match(advisory, /Some checkbox labels in structured sections do not match the required task format\./u)
+  assert.doesNotMatch(advisory, /PRIVATE ESTIMATE|PRIVATE TASK LABEL|3 days/u)
+  assert.deepEqual(fixture.nodes.get(PLAN_PATH).bytes, originalBytes)
+  assert.equal(typeof fixture.fs.writeText, 'undefined')
+
+  for (const content of [
+    '**Effort:** Medium\n**Effort:** 3 days\n',
+    '**Effort:** 1 h\n',
+    '**effort:** 3 days\n',
+    '# No Effort field\n',
+  ]) {
+    const noWarning = makeWorkspace({ markdown: content })
+    const noWarningListener = createPlanFormatAdvisoryListener(noWarning.sessionQuery, noWarning.fs)
+    const noWarningDecision = { kind: 'accept', value: { ok: true } }
+    assert.equal(await noWarningListener(
+      planWriteExec(), { isError: false, value: {}, content: [] }, async () => noWarningDecision,
+    ), noWarningDecision, `no Effort advisory for ${JSON.stringify(content)}`)
+  }
 })
 
 test('post-write advisory appends only fixed warnings after successful verified plan writes and edits', async () => {

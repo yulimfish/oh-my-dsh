@@ -1,13 +1,10 @@
 import { isAbsolute } from 'node:path'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { readPlanFormatWarnings, validatePlanName } from './plan-checklist.js'
+import { PLAN_FORMAT_WARNING_MESSAGES, readPlanFormatWarnings, validatePlanName } from './plan-checklist.js'
 
 const MAX_FILE_PATH_CHARS = 4_096
 const CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/u
-const FORMAT_WARNINGS = new Set([
-  'A recognized TODOs or Final Verification Wave section contains no valid structured task rows.',
-  'Some checkbox labels in structured sections do not match the required task format.',
-])
+const FORMAT_WARNINGS = new Set(Object.values(PLAN_FORMAT_WARNING_MESSAGES))
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -46,7 +43,7 @@ function safePlanFromExecution(exec) {
 }
 
 function formatWarningMessage(warnings) {
-  const safeWarnings = warnings.filter(warning => FORMAT_WARNINGS.has(warning)).slice(0, 2)
+  const safeWarnings = warnings.filter(warning => FORMAT_WARNINGS.has(warning)).slice(0, 3)
   if (safeWarnings.length === 0) return undefined
   return `The current OMO plan checklist has formatting warnings:\n${safeWarnings.map(warning => `- ${warning}`).join('\n')}\nThis is advisory only; do not rewrite the plan without an explicit instruction.`
 }
