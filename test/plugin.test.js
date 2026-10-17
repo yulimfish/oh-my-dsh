@@ -151,6 +151,7 @@ const baseConfig = {
   enableWebSearchCommand: false,
   enableJobTools: false,
   enableToolResultPruning: false,
+  enableSearchToolResultPruning: false,
   enableAgentTerminalTools: false,
   enableLspTools: false,
   enableRootAgentsContext: false,
@@ -263,6 +264,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableJobTools: true }).enableJobTools, true)
   assert.equal(Config({}).enableToolResultPruning, false)
   assert.equal(Config({ enableToolResultPruning: true }).enableToolResultPruning, true)
+  assert.equal(Config({}).enableSearchToolResultPruning, false)
+  assert.equal(Config({ enableSearchToolResultPruning: true }).enableSearchToolResultPruning, true)
   assert.equal(Config({}).enableAgentTerminalTools, false)
   assert.equal(Config({ enableAgentTerminalTools: true }).enableAgentTerminalTools, true)
   assert.equal(Config({}).enablePlanChecklist, false)
@@ -439,7 +442,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.match(status.text, /continuableTaskFollowups=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
   assert.match(status.text, /goalUseReminder=disabled; agentUsageReminder=disabled; compactionResumeAdvisory=disabled/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; toolResultPruning=disabled; searchToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -548,7 +551,7 @@ test('Agent terminal tools are opt-in and require a registered Agent-owned PTY b
   assert.equal(readResult.content, readContent)
   assert.equal(sendResult.content, sendContent)
   assert.equal(prunedInputs.length, 2)
-  assert.match(enabledPruning.commands.get('omo').handler({ rawInput: 'status' }).text, /toolResultPruning=enabled; agentTerminalTools=enabled/u)
+  assert.match(enabledPruning.commands.get('omo').handler({ rawInput: 'status' }).text, /toolResultPruning=enabled; searchToolResultPruning=disabled; agentTerminalTools=enabled/u)
   await enabledPruning.effects.find(item => item.label === 'dsh-omo Agent terminal tools').dispose()
 })
 
@@ -2168,6 +2171,74 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
     /enableToolResultPruning requires enableJobTools or enableAgentTerminalTools/u,
   )
   assert.equal(invalidPruningConfigFixture.tools.size, 0)
+
+  const missingSearchPrunerFixture = makeContext()
+  assert.throws(
+    () => apply(missingSearchPrunerFixture.ctx, { ...baseConfig, enableSearchToolResultPruning: true }),
+    /enableSearchToolResultPruning requires DSH toolResultPruner\.pruneContent/u,
+  )
+  assert.equal(missingSearchPrunerFixture.tools.size, 0, 'missing search pruner fails before registrations')
+
+  const incompleteSearchPrunerFixture = makeContext({ services: { toolResultPruner: {} } })
+  assert.throws(
+    () => apply(incompleteSearchPrunerFixture.ctx, { ...baseConfig, enableSearchToolResultPruning: true }),
+    /enableSearchToolResultPruning requires DSH toolResultPruner\.pruneContent/u,
+  )
+
+  const searchBlocks = Object.freeze([{ type: 'text', text: 'downstream grep content' }])
+  const resultBlocks = Object.freeze([{ type: 'text', text: 'dispatch result content must not be used' }])
+  const replacementBlocks = Object.freeze([{ type: 'text', text: '[Host-pruned content]' }])
+  const searchAgent = Object.freeze({ id: 'search-agent' })
+  const contextMessage = Object.freeze({ role: 'user', content: Object.freeze([{ type: 'text', text: 'preserve advisory' }]) })
+  const additionalContexts = Object.freeze([contextMessage])
+  let prunedInput
+  const searchToolLookups = []
+  const searchPruningFixture = makeContext({
+    services: {
+      toolResultPruner: {
+        pruneContent(content) {
+          prunedInput = content
+          return replacementBlocks
+        },
+      },
+    },
+    getTool: (toolName, agent) => {
+      searchToolLookups.push([toolName, agent])
+      return { name: toolName }
+    },
+  })
+  apply(searchPruningFixture.ctx, { ...baseConfig, enableSearchToolResultPruning: true })
+  const searchPostExecute = searchPruningFixture.events.get('tools/post-execute')
+  assert.equal(typeof searchPostExecute, 'function')
+  const downstreamDecision = Object.freeze({ kind: 'accept', content: searchBlocks, additionalContexts, marker: 'preserved' })
+  const searchDecision = await searchPostExecute({
+    name: 'grep', agent: searchAgent, parent: undefined, signal: new AbortController().signal,
+  }, {
+    isError: false, value: { structured: 'leave untouched' }, content: resultBlocks,
+  }, async () => downstreamDecision)
+  assert.notStrictEqual(searchDecision, downstreamDecision)
+  assert.strictEqual(searchDecision.content, replacementBlocks)
+  assert.strictEqual(searchDecision.additionalContexts, additionalContexts)
+  assert.equal(searchDecision.marker, 'preserved')
+  assert.strictEqual(prunedInput, searchBlocks, 'the downstream decision content is pruned, not result.content')
+  assert.deepEqual(searchToolLookups, [['grep', searchAgent]])
+  assert.match(searchPruningFixture.commands.get('omo').handler({ rawInput: 'status' }).text, /searchToolResultPruning=enabled/u)
+  assert.match(searchPruningFixture.commands.get('omo').handler().text, /Search Tool result pruning: enabled for direct grep\/glob calls only/u)
+  const searchPruningEffect = searchPruningFixture.effects.find(effect => effect.label === 'dsh-omo direct search Tool result pruning')
+  assert.ok(searchPruningEffect)
+  await searchPruningEffect.dispose()
+  const afterSearchDispose = await searchPostExecute({
+    name: 'grep', agent: searchAgent, parent: undefined, signal: new AbortController().signal,
+  }, { isError: false, content: searchBlocks }, async () => downstreamDecision)
+  assert.strictEqual(afterSearchDispose, downstreamDecision, 'disposed listener accepts without pruning')
+
+  const missingSearchGetFixture = makeContext({ services: { toolResultPruner: { pruneContent: blocks => blocks } } })
+  missingSearchGetFixture.ctx.tools.get = undefined
+  assert.throws(
+    () => apply(missingSearchGetFixture.ctx, { ...baseConfig, enableSearchToolResultPruning: true }),
+    /enableSearchToolResultPruning requires DSH tools\.get/u,
+  )
+  assert.equal(missingSearchGetFixture.tools.size, 0, 'missing visible-definition lookup fails before registrations')
 
   const killRequests = []
   const killEnabledController = {

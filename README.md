@@ -18,6 +18,7 @@ An independent DeepSeek Harness plugin that brings an Oh My OpenCode-inspired sp
 - Adds default-off model-facing `dsh_omo_goal_get`, `dsh_omo_goal_create`, and `dsh_omo_goal_update` tools via `enableGoalTools`; operations target only the exact calling Agent and use DSH revision-fenced Goal state; create never clears a Goal or replaces a non-complete current Goal.
 - Adds a separate default-off `enableGoalUseReminder` DSH-specific advisory when Goal Tools, `agents.get`, and `agentTeams.tryMembership` are available; it skips Team Agents, emits at most three reminders per Agent, and is not generic task CRUD or OMO reminder parity.
 - Adds default-off `enableAgentUsageReminder` as a bounded root-Agent partial: exact visible search/fetch Tool calls append up to three fixed reminders only when at least one DSH delegation Tool is visible; any exact DSH task Tool call suppresses later reminders. State is process-local and resets when DSH disposes/recreates the Agent (including compaction when it creates a new Agent scope); the feature cannot identify OMO orchestrator names or persist per-session state.
+- Adds default-off `enableSearchToolResultPruning` as a name-routed content-only partial: only direct exact `grep`/`glob` calls with a successful result and downstream content-only accept decision are eligible, and only when the caller-visible Tool definition has no content projection/finalizer callback. It uses the Host character-budget pruner, preserves downstream decision fields, skips structured-value outcomes, and does not prune `web.fetch` or call `pruneSession`; it cannot prove native Tool provenance or OMO token/context-budget parity.
 - Adds user-configured category-to-primary-route delegation via `categoryRoutes` and optional `category` arguments; categories may specify up to three ordered explicit `fallbackModels`, which use a bounded DSH spawn-time capability preflight (not upstream model resolution or runtime fallback); categories also support reasoning, an optional `maxTokens` ceiling, disabled-route filtering, task-tool descriptions, partial inherited-tool allow/deny filters (`tools: true`/`false`, with category allows intersecting role allowlists and denies winning), and bounded task-message `promptAppend` (not a system prompt). Categories are not personas or a built-in upstream registry.
 - Adds a default-off, profile-wide `runtimeFallback` controller with up to 32 exact primary provider/model chains, each containing 1–3 explicit fallback routes. It preserves delegated `{kind:'retry'}` actions and consults the supplied `retryPolicy`; it will not cross-route while a normal policy still has retry budget beyond observed delegated same-route retry actions (counted cumulatively across error codes for that route/Agent step), and `always`/unknown/malformed policies fail closed. When no same-route retry remains (or the error is not retryable under that policy), it switches only for selected `failure.status` HTTP values. It does not discover provider/model availability or provide OMO cooldown, timeout, toast, or primary-restoration behavior. A successful provider switch can affect later Agent requests; configure only providers approved for the prompt data.
 - Adds on-demand `/omo-models` diagnostics over registered DSH providers and exact model metadata, plus a default-off, explicit-user-invoked models.dev snapshot refresh that stays in memory and advisory; no startup refresh, durable cache, synthetic LLM call, or route gate.
@@ -114,6 +115,7 @@ DSH filesystem reads are plugin-level, not an approval-gated model Tool, and ide
     enablePlanFormatAdvisory: false
     enableJobTools: false
     enableToolResultPruning: false
+    enableSearchToolResultPruning: false
     enableAgentTerminalTools: false
     enableLspTools: false
     enableRootAgentsContext: false
@@ -243,6 +245,12 @@ enableJobTools: true
 ```yaml
 enableJobTools: true
 enableToolResultPruning: true
+```
+
+`enableSearchToolResultPruning` is a separate default-off option and does not require job or terminal Tools. It listens after direct case-sensitive `grep`/`glob` dispatches and prunes only when the result is explicitly successful, the downstream decision is accepted with a `content` array and no `value` property, the caller signal is live, and `tools.get(name, agent)` resolves a same-named visible Tool with no `projectContent` or `finalizeContent` callback. That lookup is current-scope visibility, not an execution-bound definition token; registry churn while the downstream waterfall is awaiting can make it describe a replacement. It passes only downstream `decision.content` to Host `toolResultPruner.pruneContent` and preserves the remaining decision fields. Plugin setup fails fast unless the Host pruner, `tools.get`, Cordis `ctx.on`, and `ctx.effect` are all present; after setup, runtime pruner exceptions, `null`, or non-array results keep the exact downstream decision. Because Tool names do not prove provenance, a same-named scoped Tool can be affected; no live activation is inferred from this package's unit tests. The Host budget is Unicode-code-point character based (rich non-text blocks cost zero and grapheme clusters may split), not OMO's token estimate or dynamic context budget. It never prunes errors, value-only decisions, nested calls, `web.fetch`, or durable session history. Enable explicitly with:
+
+```yaml
+enableSearchToolResultPruning: true
 ```
 
 ## Optional models.dev capability snapshot
