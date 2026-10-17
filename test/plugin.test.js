@@ -1565,7 +1565,7 @@ test('mounts default-off delegated task input guidance only when Cordis events a
   apply(enabled.ctx, { ...baseConfig, enableDelegateTaskErrorGuidance: true })
   assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
   assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /delegateTaskErrorGuidance=enabled/u)
-  assert.match(enabled.commands.get('omo').handler().text, /Task input guidance: enabled \(dsh_omo_task blank\/oversized argument errors only; no retries\)/u)
+  assert.match(enabled.commands.get('omo').handler().text, /Task input guidance: enabled \(dsh_omo_task and dsh_omo_task_continuable blank\/oversized task-text errors only; no retries\)/u)
 })
 
 test('mounts default-off Bash file-read guidance only when Cordis events are available', () => {

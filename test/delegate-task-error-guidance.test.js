@@ -18,32 +18,36 @@ function makeFailure(message) {
   return { isError: true, error: { message }, content: [{ type: 'text', text: message }] }
 }
 
-test('adds fixed advice for the two bounded dsh_omo_task input errors', async () => {
+test('adds fixed advice for two bounded task-text errors on exact one-shot and continuable Tools', async () => {
   const listener = createDelegateTaskErrorGuidanceListener()
+  const toolNames = ['dsh_omo_task', 'dsh_omo_task_continuable']
   const messages = [
     'Task must not be empty.',
     'Task is 12001 characters; dsh-omo limit is 12000.',
   ]
 
-  for (const message of messages) {
-    const value = { unchanged: true }
-    const previous = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'prior context' }] }
-    const downstreamDecision = { kind: 'accept', value, additionalContexts: [previous] }
-    let nextCalls = 0
-    const result = makeFailure(message)
-    const decision = await listener(makeExec(), result, async () => {
-      nextCalls += 1
-      return downstreamDecision
-    })
+  for (const name of toolNames) {
+    for (const message of messages) {
+      const value = { unchanged: true }
+      const previous = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'prior context' }] }
+      const downstreamDecision = { kind: 'accept', value, additionalContexts: [previous] }
+      let nextCalls = 0
+      const result = makeFailure(message)
+      const decision = await listener(makeExec({ name }), result, async () => {
+        nextCalls += 1
+        return downstreamDecision
+      })
 
-    assert.equal(nextCalls, 1)
-    assert.equal(decision.kind, 'accept')
-    assert.strictEqual(decision.value, value)
-    assert.strictEqual(decision.additionalContexts[0], previous)
-    assert.equal(decision.additionalContexts.length, 2)
-    assert.equal(decision.additionalContexts[1].content[0].text, DELEGATE_TASK_ERROR_GUIDANCE)
-    assert.ok(!decision.additionalContexts[1].content[0].text.includes(message))
-    assert.strictEqual(result.error.message, message, 'the normalized Tool error is not rewritten')
+      assert.equal(nextCalls, 1)
+      assert.equal(decision.kind, 'accept')
+      assert.strictEqual(decision.value, value)
+      assert.strictEqual(decision.additionalContexts[0], previous)
+      assert.equal(decision.additionalContexts.length, 2)
+      assert.equal(decision.additionalContexts[1].content[0].text, DELEGATE_TASK_ERROR_GUIDANCE)
+      assert.ok(!decision.additionalContexts[1].content[0].text.includes(message))
+      assert.ok(!decision.additionalContexts[1].content[0].text.includes('Inspect the bounded target'))
+      assert.strictEqual(result.error.message, message, 'the normalized Tool error is not rewritten')
+    }
   }
 })
 
@@ -52,12 +56,14 @@ test('skips other tools, success, unrelated failures, and oversized error messag
   const oversizedNumericError = `Task is ${'9'.repeat(300)} characters; dsh-omo limit is 12000.`
   const cases = [
     [makeExec({ name: 'task' }), makeFailure('Task must not be empty.')],
-    [makeExec({ name: 'dsh_omo_task_continuable' }), makeFailure('Task must not be empty.')],
+    [makeExec({ name: 'dsh_omo_task_followup' }), makeFailure('Task must not be empty.')],
+    [makeExec({ name: 'dsh_omo_task_extra' }), makeFailure('Task must not be empty.')],
     [makeExec(), { isError: false, error: { message: 'Task must not be empty.' }, content: [] }],
     [makeExec(), makeFailure('The worker limit is saturated.')],
     [makeExec(), makeFailure('dsh-omo one-shot worker limit reached (4); wait for a child to finish.')],
     [makeExec(), makeFailure('Specialist role "unknown" is not available in dsh-omo.')],
     [makeExec(), makeFailure('LLM provider route is unavailable.')],
+    [makeExec({ name: 'dsh_omo_task_continuable' }), makeFailure('DSH continuation services are unavailable in this profile; use one-shot mode.')],
     [makeExec(), makeFailure(oversizedNumericError)],
   ]
 
