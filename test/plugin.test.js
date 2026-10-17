@@ -137,6 +137,7 @@ const baseConfig = {
   enableContinuableTaskFollowups: false,
   enableGoalTools: false,
   enableGoalUseReminder: false,
+  enableAgentUsageReminder: false,
   enableCompactionResumeAdvisory: false,
   enableTeamTools: false,
   enableTeamTaskUseReminder: false,
@@ -242,6 +243,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableGoalTools: true }).enableGoalTools, true)
   assert.equal(Config({}).enableGoalUseReminder, false)
   assert.equal(Config({ enableGoalUseReminder: true }).enableGoalUseReminder, true)
+  assert.equal(Config({}).enableAgentUsageReminder, false)
+  assert.equal(Config({ enableAgentUsageReminder: true }).enableAgentUsageReminder, true)
   assert.equal(Config({}).enableCompactionResumeAdvisory, false)
   assert.equal(Config({ enableCompactionResumeAdvisory: true }).enableCompactionResumeAdvisory, true)
   assert.equal(Config({}).enableTeamTools, false)
@@ -435,7 +438,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
   assert.match(status.text, /continuableTaskFollowups=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
-  assert.match(status.text, /goalUseReminder=disabled; compactionResumeAdvisory=disabled/u)
+  assert.match(status.text, /goalUseReminder=disabled; agentUsageReminder=disabled; compactionResumeAdvisory=disabled/u)
   assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
@@ -1805,6 +1808,104 @@ test('mounts the default-off compact-resume advisory only with live Agent and pr
   assert.equal(contextDisposals, 1)
   await listener({ agent, source: 'compact' })
   assert.equal(contexts.length, 1, 'plugin disposal prevents future context registration')
+})
+
+test('mounts the default-off root-Agent usage reminder only with exact DSH prerequisites', async () => {
+  const disabled = makeContext()
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('tools/post-execute'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /agentUsageReminder=disabled/u)
+
+  const missingAgents = makeContext()
+  assert.throws(
+    () => apply(missingAgents.ctx, { ...baseConfig, enableAgentUsageReminder: true }),
+    /enableAgentUsageReminder requires DSH agents\.get and agents\.roots/u,
+  )
+  assert.equal(missingAgents.tools.size, 0)
+
+  const missingRoots = makeContext({ services: { agents: { get: () => undefined } } })
+  assert.throws(
+    () => apply(missingRoots.ctx, { ...baseConfig, enableAgentUsageReminder: true }),
+    /enableAgentUsageReminder requires DSH agents\.get and agents\.roots/u,
+  )
+  assert.equal(missingRoots.tools.size, 0)
+
+  const agents = { get: () => undefined, roots: () => [] }
+  const missingToolLookup = makeContext({ services: { agents } })
+  missingToolLookup.ctx.tools.get = undefined
+  assert.throws(
+    () => apply(missingToolLookup.ctx, { ...baseConfig, enableAgentUsageReminder: true }),
+    /enableAgentUsageReminder requires DSH tools\.get/u,
+  )
+  assert.equal(missingToolLookup.tools.size, 0)
+
+  const missingEvents = makeContext({ services: { agents } })
+  missingEvents.ctx.on = undefined
+  assert.throws(
+    () => apply(missingEvents.ctx, { ...baseConfig, enableAgentUsageReminder: true }),
+    /enableAgentUsageReminder requires Cordis ctx\.on and ctx\.effect/u,
+  )
+  assert.equal(missingEvents.tools.size, 0)
+
+  const missingEffects = makeContext({ services: { agents } })
+  missingEffects.ctx.effect = undefined
+  assert.throws(
+    () => apply(missingEffects.ctx, { ...baseConfig, enableAgentUsageReminder: true }),
+    /enableAgentUsageReminder requires Cordis ctx\.on and ctx\.effect/u,
+  )
+  assert.equal(missingEffects.tools.size, 0)
+
+  for (const extraFlags of [
+    { enableGoalUseReminder: true },
+    { enableTeamTaskUseReminder: true },
+  ]) {
+    const conflict = makeContext({ services: { agents } })
+    assert.throws(
+      () => apply(conflict.ctx, { ...baseConfig, enableAgentUsageReminder: true, ...extraFlags }),
+      /enableAgentUsageReminder cannot be combined/u,
+    )
+    assert.equal(conflict.tools.size, 0)
+  }
+
+  const liveAgents = new Map()
+  const roots = []
+  const liveAgentService = {
+    get: id => liveAgents.get(id),
+    roots: () => roots,
+  }
+  let agent
+  let taskToolVisible = true
+  const fixture = makeContext({
+    services: { agents: liveAgentService },
+    getTool: (name, scope) => scope === agent && taskToolVisible && name === 'dsh_omo_task' ? { name } : undefined,
+  })
+  apply(fixture.ctx, { ...baseConfig, enableAgentUsageReminder: true })
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /agentUsageReminder=enabled/u)
+  assert.match(fixture.commands.get('omo').handler().text, /Agent-usage reminder: enabled \(root Agents with a visible DSH delegation Tool; maximum 3 per Agent\)/u)
+
+  agent = { id: 'usage-root' }
+  liveAgents.set(agent.id, agent)
+  roots.push(agent)
+  const listener = fixture.events.get('tools/post-execute')
+  assert.equal(typeof listener, 'function')
+  const previous = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'previous context' }] }
+  const secret = 'private input and tool output must not be echoed'
+  const signal = new AbortController().signal
+  const decision = await listener({
+    name: 'grep', agent, arguments: { query: secret }, signal,
+  }, { isError: false, content: [{ type: 'text', text: secret }] }, async () => ({
+    kind: 'accept', value: { ignored: secret }, additionalContexts: [previous],
+  }))
+  assert.equal(decision.additionalContexts.length, 2)
+  assert.strictEqual(decision.additionalContexts[0], previous)
+  assert.match(decision.additionalContexts[1].content[0].text, /DSH partial agent-usage reminder/u)
+  assert.equal(decision.additionalContexts[1].content[0].text.includes(secret), false)
+
+  const reminderEffect = fixture.effects.find(effect => effect.label === 'dsh-omo Agent-usage reminder')
+  assert.equal(typeof reminderEffect?.dispose, 'function')
+  await reminderEffect.dispose()
+  const afterDispose = await listener({ name: 'grep', agent, arguments: {}, signal }, { isError: false }, async () => ({ kind: 'accept', content: [] }))
+  assert.equal(afterDispose.additionalContexts, undefined, 'plugin disposal stops further reminders')
 })
 
 test('mounts the native Goal command only with Goals and opt-in Agent Teams tools only with the Host service', async () => {
