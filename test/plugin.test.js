@@ -136,6 +136,7 @@ const baseConfig = {
   enableContinuableTasks: false,
   enableContinuableTaskFollowups: false,
   enableGoalTools: false,
+  enableGoalUseReminder: false,
   enableTeamTools: false,
   enableTeamTaskUseReminder: false,
   enableSessionSearch: false,
@@ -238,6 +239,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(concurrencyConfig.modelConcurrency, { 'deepseek-official/deepseek-flash': 1 })
   assert.equal(Config({}).enableGoalTools, false)
   assert.equal(Config({ enableGoalTools: true }).enableGoalTools, true)
+  assert.equal(Config({}).enableGoalUseReminder, false)
+  assert.equal(Config({ enableGoalUseReminder: true }).enableGoalUseReminder, true)
   assert.equal(Config({}).enableTeamTools, false)
   assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
   assert.equal(Config({}).enableTeamTaskUseReminder, false)
@@ -408,6 +411,7 @@ test('/omo status reports feature flags and service presence without calling bus
     llm: { listProviders: () => calls.push('llm.listProviders'), resolveModelInfo: () => calls.push('llm.resolveModelInfo') },
     web: { fetch: () => calls.push('web.fetch') },
     agentTeams: { membership: () => calls.push('agentTeams.membership') },
+    agents: { get: () => calls.push('agents.get') },
     jobController: { list: () => calls.push('jobController.list'), follow: () => calls.push('jobController.follow') },
     lsp: { query: () => calls.push('lsp.query') },
     sessionQuery: { searchSessions: () => calls.push('sessionQuery.searchSessions'), observeSession: () => calls.push('sessionQuery.observeSession') },
@@ -429,7 +433,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.match(status.text, /continuableTaskFollowups=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
   assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; toolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
-  assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
+  assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
   assert.equal(command.handler({ rawInput: 'status extra' }).kind, 'error')
@@ -437,7 +441,7 @@ test('/omo status reports feature flags and service presence without calling bus
 
   const absent = makeContext()
   apply(absent.ctx, baseConfig)
-  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; web=absent; agentTeams=absent; jobController=absent; toolResultPruner=absent; terminals=absent; lsp=absent; sessionQuery=absent; sessions=absent; mcpResources=absent/u)
+  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; web=absent; agentTeams=absent; agents=absent; jobController=absent; toolResultPruner=absent; terminals=absent; lsp=absent; sessionQuery=absent; sessions=absent; mcpResources=absent/u)
 })
 
 test('Agent terminal tools are opt-in and require a registered Agent-owned PTY backend', async () => {
@@ -1636,6 +1640,88 @@ test('mounts model-facing DSH Goal tools only when opted in and the full Host se
   assert.equal(enabled.tools.has('dsh_omo_goal_update'), false)
 })
 
+test('mounts the bounded non-Team Goal-use reminder only with explicit prerequisites', async () => {
+  const goals = { get() {}, create() {}, edit() {}, pause() {}, resume() {}, complete() {} }
+  const teamService = {
+    tryMembership(agent) { return agent?.id?.startsWith('team-') ? { id: 'team-1' } : undefined },
+  }
+
+  const missingGoalTools = makeContext({ services: { goals, agentTeams: teamService } })
+  assert.throws(
+    () => apply(missingGoalTools.ctx, { ...baseConfig, enableGoalUseReminder: true }),
+    /enableGoalUseReminder requires enableGoalTools/u,
+  )
+  assert.equal(missingGoalTools.tools.size, 0)
+
+  const missingTeamResolver = makeContext({ services: { goals } })
+  assert.throws(
+    () => apply(missingTeamResolver.ctx, { ...baseConfig, enableGoalTools: true, enableGoalUseReminder: true }),
+    /enableGoalUseReminder requires DSH agentTeams\.tryMembership/u,
+  )
+  assert.equal(missingTeamResolver.tools.size, 0)
+
+  const missingAgentsService = makeContext({ services: { goals, agentTeams: teamService } })
+  assert.throws(
+    () => apply(missingAgentsService.ctx, { ...baseConfig, enableGoalTools: true, enableGoalUseReminder: true }),
+    /enableGoalUseReminder requires DSH agents\.get/u,
+  )
+  assert.equal(missingAgentsService.tools.size, 0)
+
+  const liveAgents = new Map()
+  const agents = { get: agentId => liveAgents.get(agentId) }
+  const missingEvents = makeContext({ services: { goals, agentTeams: teamService, agents } })
+  missingEvents.ctx.on = undefined
+  assert.throws(
+    () => apply(missingEvents.ctx, { ...baseConfig, enableGoalTools: true, enableGoalUseReminder: true }),
+    /enableGoalUseReminder requires Cordis ctx\.on and ctx\.effect/u,
+  )
+  assert.equal(missingEvents.tools.size, 0)
+
+  const fixture = makeContext({ services: { goals, agentTeams: teamService, agents } })
+  apply(fixture.ctx, { ...baseConfig, enableGoalTools: true, enableGoalUseReminder: true })
+  const status = fixture.commands.get('omo').handler({ rawInput: 'status' }).text
+  assert.match(status, /goalUseReminder=enabled/u)
+  assert.match(fixture.commands.get('omo').handler().text, /Goal-use reminder: enabled \(non-Team; every 10 accepted non-Goal outcomes; maximum 3 per Agent\)/u)
+  const listener = fixture.events.get('tools/post-execute')
+  const nonTeamAgent = { id: 'non-team-agent' }
+  liveAgents.set(nonTeamAgent.id, nonTeamAgent)
+  for (let index = 0; index < 9; index += 1) {
+    const decision = await listener(
+      { name: 'fs_read', agent: nonTeamAgent, signal: new AbortController().signal },
+      { isError: false },
+      async () => ({ kind: 'accept', content: [] }),
+    )
+    assert.equal(decision.additionalContexts, undefined)
+  }
+  const reminder = await listener(
+    { name: 'fs_read', agent: nonTeamAgent, signal: new AbortController().signal },
+    { isError: true },
+    async () => ({ kind: 'accept', content: [] }),
+  )
+  assert.match(reminder.additionalContexts[0].content[0].text, /DSH Goal-use reminder/u)
+
+  const teamAgent = { id: 'team-lead' }
+  liveAgents.set(teamAgent.id, teamAgent)
+  for (let index = 0; index < 12; index += 1) {
+    const decision = await listener(
+      { name: 'fs_read', agent: teamAgent, signal: new AbortController().signal },
+      { isError: false },
+      async () => ({ kind: 'accept', content: [] }),
+    )
+    assert.equal(decision.additionalContexts, undefined, 'Team Agents are left to the separate Team reminder')
+  }
+  assert.equal(typeof fixture.events.get('agent/disposed'), 'function')
+  const reminderEffect = fixture.effects.find(effect => effect.label === 'dsh-omo Goal-use reminder')
+  assert.equal(typeof reminderEffect?.dispose, 'function')
+  await reminderEffect.dispose()
+  const afterDispose = await listener(
+    { name: 'fs_read', agent: nonTeamAgent, signal: new AbortController().signal },
+    { isError: false },
+    async () => ({ kind: 'accept', content: [] }),
+  )
+  assert.equal(afterDispose.additionalContexts, undefined)
+})
+
 test('mounts the native Goal command only with Goals and opt-in Agent Teams tools only with the Host service', async () => {
   const goalCalls = []
   const goals = {
@@ -1672,7 +1758,7 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
 
   const disabledFixture = makeContext()
   apply(disabledFixture.ctx, baseConfig)
-  assert.equal(disabledFixture.events.has('tools/post-execute'), false, 'the Team task reminder is default-off')
+  assert.equal(disabledFixture.events.has('tools/post-execute'), false, 'the Goal-use and Team task reminders are default-off')
   assert.equal(disabledFixture.events.has('agent/disposed'), false, 'no reminder cleanup listener is installed when disabled')
   assert.equal([...disabledFixture.tools.keys()].some(toolName => toolName.startsWith('team_')), false)
   assert.equal(disabledFixture.commands.has('goal'), false)
