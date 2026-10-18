@@ -5,6 +5,7 @@ import { resolveChildAgentOptions, snapshotSubagentDescriptor } from '@deepseek-
 import { apply, Config, inject, name } from '../src/index.js'
 import { buildWorkerPrompt, getRole, ROLE_NAMES } from '../src/roles.js'
 import { SKILLS } from '../src/skills.js'
+import { TEAM_MODE_LEAD_CONTEXT } from '../src/team-mode-context.js'
 
 function makeContext(options = {}) {
   const tools = new Map()
@@ -180,6 +181,7 @@ const baseConfig = {
   enableAgentUsageReminder: false,
   enableCompactionResumeAdvisory: false,
   enableTeamTools: false,
+  enableTeamModeContext: false,
   enableTeamTaskUseReminder: false,
   enableSessionSearch: false,
   enableSessionEventSearch: false,
@@ -298,6 +300,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableCompactionResumeAdvisory: true }).enableCompactionResumeAdvisory, true)
   assert.equal(Config({}).enableTeamTools, false)
   assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
+  assert.equal(Config({}).enableTeamModeContext, false)
+  assert.equal(Config({ enableTeamModeContext: true }).enableTeamModeContext, true)
   assert.equal(Config({}).enableTeamTaskUseReminder, false)
   assert.equal(Config({ enableTeamTaskUseReminder: true }).enableTeamTaskUseReminder, true)
   assert.equal(Config({}).enableSessionSearch, false)
@@ -558,7 +562,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.match(status.text, /continuableTaskFollowups=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
   assert.match(status.text, /goalUseReminder=disabled; agentUsageReminder=disabled; compactionResumeAdvisory=disabled/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; searchToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; promptFileExpansion=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamModeContext=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; searchToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; promptFileExpansion=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -2105,6 +2109,89 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
     /requires Cordis ctx\.on/u,
   )
   assert.equal(reminderWithoutEvents.tools.size, 0)
+
+  const teamContextWithoutTools = makeContext()
+  assert.throws(
+    () => apply(teamContextWithoutTools.ctx, { ...baseConfig, enableTeamModeContext: true }),
+    /enableTeamModeContext requires enableTeamTools/u,
+  )
+  assert.equal(teamContextWithoutTools.tools.size, 0)
+
+  const teamContextWithoutMembership = makeContext({ services: { agentTeams: {} } })
+  assert.throws(
+    () => apply(teamContextWithoutMembership.ctx, { ...baseConfig, enableTeamTools: true, enableTeamModeContext: true }),
+    /requires DSH agentTeams\.tryMembership/u,
+  )
+  assert.equal(teamContextWithoutMembership.tools.size, 0)
+
+  const teamContextWithoutAgents = makeContext({ services: { agentTeams: { tryMembership() {} } } })
+  assert.throws(
+    () => apply(teamContextWithoutAgents.ctx, { ...baseConfig, enableTeamTools: true, enableTeamModeContext: true }),
+    /requires DSH agents\.get/u,
+  )
+  assert.equal(teamContextWithoutAgents.tools.size, 0)
+
+  const teamContextWithoutPromptService = makeContext({ services: {
+    agentTeams: { tryMembership() {} }, agents: { get() {} },
+  } })
+  assert.throws(
+    () => apply(teamContextWithoutPromptService.ctx, { ...baseConfig, enableTeamTools: true, enableTeamModeContext: true }),
+    /requires DSH systemPrompt\.context/u,
+  )
+  assert.equal(teamContextWithoutPromptService.tools.size, 0)
+
+  const teamContextWithoutEvents = makeContext({ services: {
+    agentTeams: { tryMembership() {} }, agents: { get() {} }, systemPrompt: { context() {} },
+  } })
+  teamContextWithoutEvents.ctx.on = undefined
+  assert.throws(
+    () => apply(teamContextWithoutEvents.ctx, { ...baseConfig, enableTeamTools: true, enableTeamModeContext: true }),
+    /requires Cordis ctx\.on and ctx\.effect/u,
+  )
+  assert.equal(teamContextWithoutEvents.tools.size, 0)
+
+  const teamContextWithoutEffects = makeContext({ services: {
+    agentTeams: { tryMembership() {} }, agents: { get() {} }, systemPrompt: { context() {} },
+  } })
+  teamContextWithoutEffects.ctx.effect = undefined
+  assert.throws(
+    () => apply(teamContextWithoutEffects.ctx, { ...baseConfig, enableTeamTools: true, enableTeamModeContext: true }),
+    /requires Cordis ctx\.on and ctx\.effect/u,
+  )
+  assert.equal(teamContextWithoutEffects.tools.size, 0)
+
+  const teamModeService = {
+    membership: () => ({ id: 'team-id', rootAgentId: 'lead-id', role: 'lead', name: 'lead' }),
+    listMembers: () => [], spawnTeammate() {}, sendMessage() {}, createTask() {}, getTask() {}, listTasks() {},
+    updateTask() {}, waitForChange() {}, interrupt() {}, tryMembership: () => ({ role: 'lead' }),
+  }
+  const agent = { id: 'live-lead' }
+  const contexts = []
+  let contextDisposals = 0
+  agent.ctx = {
+    systemPrompt: { context: entry => {
+      contexts.push(entry)
+      return () => { contextDisposals += 1 }
+    } },
+    effect: execute => {
+      const cleanup = execute()
+      return () => cleanup?.()
+    },
+  }
+  const enabledTeamContext = makeContext({ services: {
+    agentTeams: teamModeService,
+    agents: { get: id => id === agent.id ? agent : undefined },
+    systemPrompt: { context() {} },
+  } })
+  apply(enabledTeamContext.ctx, { ...baseConfig, enableTeamTools: true, enableTeamModeContext: true })
+  const teamModeEffect = enabledTeamContext.effects.find(effect => effect.label === 'dsh-omo Team-mode prompt context')
+  assert.equal(typeof enabledTeamContext.events.get('agent/created'), 'function')
+  await enabledTeamContext.events.get('agent/created')({ agent, source: 'startup' })
+  assert.equal(contexts.length, 1)
+  assert.equal(contexts[0].text, TEAM_MODE_LEAD_CONTEXT)
+  assert.equal(typeof teamModeEffect?.dispose, 'function')
+  await teamModeEffect.dispose()
+  assert.equal(contextDisposals, 1)
 
   const unavailableSessionSearchFixture = makeContext()
   assert.throws(
