@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   createDelegateTaskErrorGuidanceListener,
+  DELEGATE_CATEGORY_ERROR_GUIDANCE,
+  DELEGATE_ROLE_ERROR_GUIDANCE,
   DELEGATE_TASK_ERROR_GUIDANCE,
 } from '../src/delegate-task-error-guidance.js'
 
@@ -51,9 +53,93 @@ test('adds fixed advice for two bounded task-text errors on exact one-shot and c
   }
 })
 
+test('adds fixed guidance for exact unavailable roles and explicit category errors', async () => {
+  const listener = createDelegateTaskErrorGuidanceListener(12000)
+  const privateRole = 'PRIVATE_ROLE-"not-echoed"'
+  const privateCategory = 'PRIVATE_CATEGORY-"not-echoed"'
+  const cases = [
+    {
+      role: privateRole,
+      message: `Specialist role "${privateRole}" is not available in dsh-omo.`,
+      guidance: DELEGATE_ROLE_ERROR_GUIDANCE,
+    },
+    {
+      role: 'explore',
+      category: privateCategory,
+      message: `unknown explicit category "${privateCategory}"`,
+      guidance: DELEGATE_CATEGORY_ERROR_GUIDANCE,
+    },
+    {
+      role: 'explore',
+      category: ' retired-category ',
+      message: 'disabled explicit category "retired-category" cannot be used for task delegation',
+      guidance: DELEGATE_CATEGORY_ERROR_GUIDANCE,
+    },
+  ]
+
+  for (const name of ['dsh_omo_task', 'dsh_omo_task_continuable']) {
+    for (const item of cases) {
+      const previous = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'prior context' }] }
+      const value = { unchanged: true }
+      const downstreamDecision = { kind: 'accept', value, additionalContexts: [previous] }
+      const result = makeFailure(item.message)
+      let nextCalls = 0
+      const decision = await listener(makeExec({
+        name,
+        arguments: {
+          role: item.role,
+          task: 'Inspect the bounded target',
+          ...(item.category !== undefined ? { category: item.category } : {}),
+        },
+      }), result, async () => {
+        nextCalls += 1
+        return downstreamDecision
+      })
+
+      assert.equal(nextCalls, 1)
+      assert.equal(decision.kind, 'accept')
+      assert.strictEqual(decision.value, value)
+      assert.strictEqual(decision.additionalContexts[0], previous)
+      assert.equal(decision.additionalContexts.length, 2)
+      const guidance = decision.additionalContexts[1].content[0].text
+      assert.equal(guidance, item.guidance)
+      assert.ok(!guidance.includes(privateRole))
+      assert.ok(!guidance.includes(privateCategory))
+      assert.strictEqual(result.error.message, item.message)
+    }
+  }
+})
+
+test('skips mismatched or malformed role/category errors and role-default configuration failures', async () => {
+  const listener = createDelegateTaskErrorGuidanceListener(12000)
+  const controlRole = 'bad\nrole'
+  const bidiRole = 'bad\u202erole'
+  const cases = [
+    [makeExec({ arguments: { role: 'requested-role', task: 'valid' } }), makeFailure('Specialist role "different-role" is not available in dsh-omo.')],
+    [makeExec({ arguments: { role: controlRole, task: 'valid' } }), makeFailure(`Specialist role "${controlRole}" is not available in dsh-omo.`)],
+    [makeExec({ arguments: { role: bidiRole, task: 'valid' } }), makeFailure(`Specialist role "${bidiRole}" is not available in dsh-omo.`)],
+    [makeExec({ arguments: { role: 'explore', task: 'valid', category: 'requested-category' } }), makeFailure('unknown explicit category "different-category"')],
+    [makeExec({ arguments: { role: 'explore', task: 'valid' } }), makeFailure('unknown default category "profile-category"')],
+    [makeExec({ arguments: { role: 'explore', task: 'valid' } }), makeFailure('disabled default category "profile-category" cannot be used for task delegation')],
+    [makeExec({ arguments: { role: 'explore', task: 'valid', category: 'explicit-category' } }), makeFailure('unknown default category "profile-category"')],
+    [makeExec({ arguments: { role: 'explore', task: 'valid', category: 'explicit-category' } }), makeFailure('categoryRoutes must be normalized before resolving category "explicit-category"')],
+    [makeExec({ arguments: { role: 'explore', task: 'valid', category: 'explicit-category' } }), makeFailure('disabled explicit category "different-category" cannot be used for task delegation')],
+    [makeExec({ arguments: { role: 'explore', task: 'valid', category: 'explicit-category' } }), makeFailure('unknown explicit category "explicit-category" (provider route unavailable)')],
+  ]
+
+  for (const [exec, result] of cases) {
+    const downstreamDecision = { kind: 'accept', value: { unchanged: true } }
+    const decision = await listener(exec, result, async () => downstreamDecision)
+    assert.strictEqual(decision, downstreamDecision)
+    assert.equal(decision.additionalContexts, undefined)
+  }
+})
+
 test('skips other tools, success, unrelated failures, and oversized error messages', async () => {
   const listener = createDelegateTaskErrorGuidanceListener(12000)
   const oversizedNumericError = `Task is ${'9'.repeat(300)} characters; dsh-omo limit is 12000.`
+  const oversizedRole = 'r'.repeat(260)
+  const oversizedRoleError = `Specialist role "${oversizedRole}" is not available in dsh-omo.`
   const cases = [
     [makeExec({ name: 'task' }), makeFailure('Task must not be empty.')],
     [makeExec({ name: 'dsh_omo_task_followup' }), makeFailure('Task must not be empty.')],
@@ -70,6 +156,7 @@ test('skips other tools, success, unrelated failures, and oversized error messag
     [makeExec(), makeFailure('LLM provider route is unavailable.')],
     [makeExec({ name: 'dsh_omo_task_continuable' }), makeFailure('DSH continuation services are unavailable in this profile; use one-shot mode.')],
     [makeExec(), makeFailure(oversizedNumericError)],
+    [makeExec({ arguments: { role: oversizedRole, task: 'valid' } }), makeFailure(oversizedRoleError)],
   ]
 
   for (const [exec, result] of cases) {
@@ -97,14 +184,42 @@ test('does not add guidance after a downstream block or cancellation', async () 
   assert.equal(nextCalls, 1)
   assert.strictEqual(blockDecision, blocked)
 
-  const controller = new AbortController()
+  const blockedRole = await listener(
+    makeExec({ arguments: { role: 'unavailable', task: 'valid' } }),
+    makeFailure('Specialist role "unavailable" is not available in dsh-omo.'),
+    async () => {
+      nextCalls += 1
+      return blocked
+    },
+  )
+  assert.equal(nextCalls, 2)
+  assert.strictEqual(blockedRole, blocked)
+
   const accepted = { kind: 'accept', value: { unchanged: true } }
+  const controller = new AbortController()
   const cancelledDecision = await listener(makeExec({ arguments: blankArguments, signal: controller.signal }), makeFailure('Task must not be empty.'), async () => {
     nextCalls += 1
     controller.abort()
     return accepted
   })
-  assert.equal(nextCalls, 2)
+  assert.equal(nextCalls, 3)
   assert.strictEqual(cancelledDecision, accepted)
   assert.equal(cancelledDecision.additionalContexts, undefined)
+
+  const categoryController = new AbortController()
+  const cancelledCategory = await listener(
+    makeExec({
+      arguments: { role: 'explore', task: 'valid', category: 'missing' },
+      signal: categoryController.signal,
+    }),
+    makeFailure('unknown explicit category "missing"'),
+    async () => {
+      nextCalls += 1
+      categoryController.abort()
+      return accepted
+    },
+  )
+  assert.equal(nextCalls, 4)
+  assert.strictEqual(cancelledCategory, accepted)
+  assert.equal(cancelledCategory.additionalContexts, undefined)
 })
