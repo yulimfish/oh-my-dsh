@@ -87,6 +87,101 @@ test('counts only exact Team membership and resets state when membership changes
   reminder.dispose()
 })
 
+test('a same-ID Agent replacement starts a fresh reminder cadence', async () => {
+  const reminder = createTeamTaskUseReminder(teamService)
+  const original = { id: 'team-reused-id' }
+  for (let index = 0; index < 9; index += 1) {
+    assert.equal((await createCall(reminder.listener, 'fs_read', original)).result.additionalContexts, undefined)
+  }
+
+  const replacement = { id: original.id }
+  for (let index = 0; index < 9; index += 1) {
+    assert.equal((await createCall(reminder.listener, 'fs_read', replacement)).result.additionalContexts, undefined)
+  }
+  assert.ok((await createCall(reminder.listener, 'fs_read', replacement)).result.additionalContexts)
+  reminder.dispose()
+})
+
+test('late disposal of an old same-ID Agent preserves replacement cadence', async () => {
+  const reminder = createTeamTaskUseReminder(teamService)
+  const original = { id: 'team-reused-id' }
+  for (let index = 0; index < 9; index += 1) await createCall(reminder.listener, 'fs_read', original)
+
+  const replacement = { id: original.id }
+  for (let index = 0; index < 4; index += 1) {
+    assert.equal((await createCall(reminder.listener, 'fs_read', replacement)).result.additionalContexts, undefined)
+  }
+  reminder.clearAgent(original)
+  for (let index = 0; index < 5; index += 1) {
+    assert.equal((await createCall(reminder.listener, 'fs_read', replacement)).result.additionalContexts, undefined)
+  }
+  assert.ok((await createCall(reminder.listener, 'fs_read', replacement)).result.additionalContexts)
+  reminder.dispose()
+})
+
+test('stale membership failure for an old same-ID Agent cannot delete replacement state', async () => {
+  let original
+  let originalIsStale = false
+  const reminder = createTeamTaskUseReminder({
+    membership(agent) {
+      if (agent === original && originalIsStale) throw new Error('stale Agent identity')
+      return { id: 'team-1' }
+    },
+  })
+  original = { id: 'team-reused-id' }
+  for (let index = 0; index < 9; index += 1) await createCall(reminder.listener, 'fs_read', original)
+
+  let resolveDownstream
+  let nextCalls = 0
+  const pendingOld = reminder.listener(
+    { name: 'fs_read', agent: original, signal: new AbortController().signal },
+    { isError: false },
+    () => {
+      nextCalls += 1
+      return new Promise(resolve => { resolveDownstream = resolve })
+    },
+  )
+  const replacement = { id: original.id }
+  for (let index = 0; index < 4; index += 1) await createCall(reminder.listener, 'fs_read', replacement)
+  originalIsStale = true
+  resolveDownstream({ kind: 'accept', content: [] })
+  assert.equal((await pendingOld).kind, 'accept')
+  assert.equal(nextCalls, 1)
+
+  for (let index = 0; index < 5; index += 1) {
+    assert.equal((await createCall(reminder.listener, 'fs_read', replacement)).result.additionalContexts, undefined)
+  }
+  assert.ok((await createCall(reminder.listener, 'fs_read', replacement)).result.additionalContexts)
+  reminder.dispose()
+})
+
+test('a pending callback cannot recreate state after its exact Agent is cleared', async () => {
+  const reminder = createTeamTaskUseReminder(teamService)
+  const agent = { id: 'team-pending-clear' }
+  for (let index = 0; index < 9; index += 1) await createCall(reminder.listener, 'fs_read', agent)
+
+  let resolveDownstream
+  let nextCalls = 0
+  const pending = reminder.listener(
+    { name: 'fs_read', agent, signal: new AbortController().signal },
+    { isError: false },
+    () => {
+      nextCalls += 1
+      return new Promise(resolve => { resolveDownstream = resolve })
+    },
+  )
+  reminder.clearAgent(agent)
+  resolveDownstream({ kind: 'accept', content: [] })
+  assert.equal((await pending).additionalContexts, undefined)
+  assert.equal(nextCalls, 1)
+
+  for (let index = 0; index < 9; index += 1) {
+    assert.equal((await createCall(reminder.listener, 'fs_read', agent)).result.additionalContexts, undefined)
+  }
+  assert.ok((await createCall(reminder.listener, 'fs_read', agent)).result.additionalContexts)
+  reminder.dispose()
+})
+
 test('downstream blocks and cancellation do not count; disposal clears one Agent', async () => {
   const reminder = createTeamTaskUseReminder(teamService)
   const agent = { id: 'team-lead' }
@@ -137,9 +232,10 @@ test('does not resume reminder work after plugin disposal during downstream exec
 
 test('bounds retained state to 256 Agent IDs and evicts the least-recently-used entry', async () => {
   const reminder = createTeamTaskUseReminder(teamService)
-  const first = { id: 'team-agent-0' }
-  for (let index = 0; index < 257; index += 1) {
-    const { result } = await createCall(reminder.listener, 'fs_read', { id: `team-agent-${index}` })
+  const agents = Array.from({ length: 257 }, (_, index) => ({ id: `team-agent-${index}` }))
+  const first = agents[0]
+  for (const agent of agents) {
+    const { result } = await createCall(reminder.listener, 'fs_read', agent)
     assert.equal(result.additionalContexts, undefined)
   }
   for (let index = 0; index < 9; index += 1) {
@@ -153,9 +249,10 @@ test('bounds retained state to 256 Agent IDs and evicts the least-recently-used 
 test('blocked calls and unseen task calls do not churn counted LRU entries', async () => {
   for (const churn of ['blocked', 'task']) {
     const reminder = createTeamTaskUseReminder(teamService)
-    const first = { id: 'team-agent-0' }
-    for (let index = 0; index < 256; index += 1) {
-      const { result } = await createCall(reminder.listener, 'fs_read', { id: `team-agent-${index}` })
+    const agents = Array.from({ length: 256 }, (_, index) => ({ id: `team-agent-${index}` }))
+    const first = agents[0]
+    for (const agent of agents) {
+      const { result } = await createCall(reminder.listener, 'fs_read', agent)
       assert.equal(result.additionalContexts, undefined)
     }
 
