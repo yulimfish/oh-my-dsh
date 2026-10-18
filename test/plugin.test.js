@@ -142,6 +142,7 @@ const baseConfig = {
   enableTeamTools: false,
   enableTeamTaskUseReminder: false,
   enableSessionSearch: false,
+  enableSessionEventSearch: false,
   enableSessionRead: false,
   enableSessionList: false,
   enableSessionInfo: false,
@@ -255,6 +256,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableTeamTaskUseReminder: true }).enableTeamTaskUseReminder, true)
   assert.equal(Config({}).enableSessionSearch, false)
   assert.equal(Config({ enableSessionSearch: true }).enableSessionSearch, true)
+  assert.equal(Config({}).enableSessionEventSearch, false)
+  assert.equal(Config({ enableSessionEventSearch: true }).enableSessionEventSearch, true)
   assert.equal(Config({}).enableSessionRead, false)
   assert.equal(Config({ enableSessionRead: true }).enableSessionRead, true)
   assert.equal(Config({}).enableSessionList, false)
@@ -509,7 +512,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.match(status.text, /continuableTaskFollowups=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
   assert.match(status.text, /goalUseReminder=disabled; agentUsageReminder=disabled; compactionResumeAdvisory=disabled/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; searchToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; searchToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -2083,6 +2086,34 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   assert.ok(sessionSearchEffect)
   await sessionSearchEffect.dispose()
   assert.equal(enabledSessionSearchFixture.tools.has('session_search'), false)
+
+  const unavailableSessionEventSearchFixture = makeContext()
+  assert.throws(
+    () => apply(unavailableSessionEventSearchFixture.ctx, { ...baseConfig, enableSessionEventSearch: true }),
+    /enableSessionEventSearch requires DSH sessionQuery\.searchEvents/u,
+  )
+  assert.equal(unavailableSessionEventSearchFixture.tools.size, 0)
+
+  const noSearchEvents = makeContext({ services: { sessionQuery: { searchSessions() {} } } })
+  assert.throws(
+    () => apply(noSearchEvents.ctx, { ...baseConfig, enableSessionEventSearch: true }),
+    /requires DSH sessionQuery\.searchEvents/u,
+  )
+  assert.equal(noSearchEvents.tools.size, 0)
+
+  const defaultOffSessionEventSearchFixture = makeContext({ services: { sessionQuery: { searchEvents() {} } } })
+  apply(defaultOffSessionEventSearchFixture.ctx, baseConfig)
+  assert.equal(defaultOffSessionEventSearchFixture.tools.has('session_event_search'), false)
+
+  const sessionEventSearchService = { searchEvents: async () => ({ session: { id: 'session-1' }, items: [] }) }
+  const enabledSessionEventSearchFixture = makeContext({ services: { sessionQuery: sessionEventSearchService } })
+  apply(enabledSessionEventSearchFixture.ctx, { ...baseConfig, enableSessionEventSearch: true })
+  assert.ok(enabledSessionEventSearchFixture.tools.has('session_event_search'))
+  assert.match(enabledSessionEventSearchFixture.commands.get('omo').handler().text, /Session event search: enabled/u)
+  const sessionEventSearchEffect = enabledSessionEventSearchFixture.effects.find(effect => effect.label === 'dsh-omo current-session event search tool')
+  assert.ok(sessionEventSearchEffect)
+  await sessionEventSearchEffect.dispose()
+  assert.equal(enabledSessionEventSearchFixture.tools.has('session_event_search'), false)
 
   const unavailableSessionReadFixture = makeContext()
   assert.throws(
