@@ -48,6 +48,25 @@ test('human job-kill command rejects malformed IDs and missing Agents before Hos
   assert.equal(calls, 0)
 })
 
+test('human job-kill command rejects raw NUL/C0/C1 controls before trimming or Host calls', () => {
+  const fixture = makeCommand(() => ({ outcome: 'requested' }))
+  const invalidInputs = [
+    'job\u0000-1',
+    'job\u0001-1',
+    'job-1\n',
+    ' \tjob-1',
+    'job\u007f-1',
+    'job\u0085-1',
+    '\u009fjob-1',
+  ]
+  for (const rawInput of invalidInputs) {
+    const result = fixture.command.handler({ agent: { id: SESSION_ID }, rawInput })
+    assert.equal(result.kind, 'error', `reject ${JSON.stringify(rawInput)}`)
+    assert.match(result.text, /exactly one non-empty DSH job ID/u)
+    assert.deepEqual(fixture.calls, [], `do not call Host for ${JSON.stringify(rawInput)}`)
+  }
+})
+
 test('human job-kill command fails closed on Host errors and malformed outcomes', () => {
   assert.throws(() => createJobKillCommand({}), /jobController\.kill/u)
 

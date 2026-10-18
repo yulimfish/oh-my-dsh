@@ -1,4 +1,5 @@
 const MAX_JOB_ID_CHARS = 256
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u
 
 function safeErrorName(error) {
   const name = error && typeof error === 'object' ? error.name : undefined
@@ -22,6 +23,9 @@ export function createJobKillCommand(jobController) {
       }
       if (rawInput.length > MAX_JOB_ID_CHARS) {
         return { kind: 'error', text: `Job ID must not exceed ${MAX_JOB_ID_CHARS} characters.` }
+      }
+      if (CONTROL_CHARACTERS.test(rawInput)) {
+        return { kind: 'error', text: 'Provide exactly one non-empty DSH job ID.' }
       }
       const jobId = rawInput.trim()
       if (jobId.length === 0 || /\s/u.test(jobId)) {
