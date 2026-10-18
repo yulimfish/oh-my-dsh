@@ -630,7 +630,7 @@ test('/omo status capabilities explicitly queries bounded live provider registri
   const fixture = makeContext({
     getProvider: provider => {
       calls.push(`subagents.getProvider:${provider}`)
-      return { capabilities: { agentOptions: true, persona: false, toolFilter: true, outputSchema: false, depthLimit: true } }
+      return { capabilities: { agentOptions: true, agentPreset: true, outputSchema: false, depthLimit: true } }
     },
     services: {
       llm: {
@@ -646,7 +646,7 @@ test('/omo status capabilities explicitly queries bounded live provider registri
   const status = fixture.commands.get('omo').handler({ rawInput: 'status capabilities' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /live capability registry query/u)
-  assert.match(status.text, /Configured DSH subagent provider "spawn": registered; agentOptions=true; persona=false; toolFilter=true; outputSchema=false; depthLimit=true/u)
+  assert.match(status.text, /Configured DSH subagent provider "spawn": registered; agentOptions=true; agentPreset=true; outputSchema=false; depthLimit=true/u)
   assert.match(status.text, /Registered DSH LLM provider IDs \(2 routes\): \["provider-alpha","provider-beta"\]/u)
   assert.match(status.text, /do not prove credentials, endpoint\/model availability, route compatibility, or future call success/u)
   assert.deepEqual(calls, ['subagents.getProvider:spawn', 'llm.listProviders'])
@@ -2560,6 +2560,171 @@ test('disabledSkills turns off both model and user invocation for bundled skills
   assert.deepEqual(fixture.skills.get('omo-code-review').invocation, { modelInvocable: true, userInvocable: true })
 })
 
+test('uses the current Host startActivation request and preserves the caller-owned result relay', async () => {
+  const activationSpecs = []
+  const fixture = makeContext({
+    getProvider: () => ({
+      name: 'spawn',
+      capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true },
+    }),
+  })
+  fixture.ctx.subagents.startActivation = async spec => {
+    activationSpecs.push(spec)
+    return {
+      childId: 'child-current-activation',
+      messageId: 'accepted-current-activation',
+      result: Promise.resolve({
+        stopReason: 'completed',
+        output: [{ type: 'text', text: 'Current activation result.' }],
+      }),
+      dispose: async () => { fixture.disposals.push('child-current-activation') },
+    }
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxDepth: 2,
+    roleRoutes: [{ role: 'test', provider: 'route-provider', model: 'route-model' }],
+  })
+
+  const parent = { id: 'parent-current-activation', followup: message => fixture.followups.push(message) }
+  const signal = new AbortController().signal
+  const result = await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'test', task: 'Use the current Host activation API' },
+    { agent: parent, signal },
+  )
+  assert.deepEqual(result, { childId: 'child-current-activation', role: 'test', status: 'started' })
+  assert.equal(fixture.starts.length, 0, 'the old ctx.subagents.start contract is not called when startActivation exists')
+  assert.equal(activationSpecs.length, 1)
+  const spec = activationSpecs[0]
+  assert.equal(spec.provider, 'spawn')
+  assert.equal(spec.label, 'test: Use the current Host activation API')
+  assert.equal(spec.signal, signal)
+  assert.equal(spec.delivery, 'caller')
+  assert.equal(spec.request.parent, parent)
+  assert.equal(spec.request.maxDepth, 2)
+  assert.deepEqual(spec.request.agentOptions, { provider: 'route-provider', model: 'route-model' })
+  assert.match(spec.request.prompt[0].text, /Use the current Host activation API/u)
+  assert.equal(Object.hasOwn(spec.request, 'persona'), false)
+  assert.equal(Object.hasOwn(spec.request, 'toolFilter'), false)
+
+  await new Promise(resolve => setImmediate(resolve))
+  assert.ok(fixture.followups.some(message => message.content[0].text.includes('[dsh-omo test specialist result]')))
+  assert.ok(fixture.followups.some(message => message.source.kind === 'agent-message'
+    && message.content.some(block => block.text.includes('Current activation result.'))))
+  assert.deepEqual(fixture.disposals, ['child-current-activation'])
+})
+
+test('releases current-API launch reservations after failure and rejects pre-canceled work', async () => {
+  const fixture = makeContext({
+    getProvider: () => ({ capabilities: { agentOptions: true, depthLimit: true } }),
+  })
+  let calls = 0
+  fixture.ctx.subagents.startActivation = async spec => {
+    calls += 1
+    if (calls === 1) throw new Error('activation backend unavailable')
+    return {
+      childId: 'child-after-failure',
+      result: Promise.resolve({ stopReason: 'completed', output: [] }),
+      dispose: async () => { fixture.disposals.push('child-after-failure') },
+    }
+  }
+  apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1 })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: { id: 'parent-after-failure' }, signal: new AbortController().signal }
+  await assert.rejects(tool.execute({ role: 'test', task: 'First attempt' }, exec), /activation backend unavailable/u)
+  assert.deepEqual(await tool.execute({ role: 'test', task: 'Second attempt' }, exec), {
+    childId: 'child-after-failure', role: 'test', status: 'started',
+  })
+  assert.equal(calls, 2, 'a failed activation does not consume the only worker slot')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(fixture.disposals, ['child-after-failure'])
+
+  const canceled = makeContext({
+    getProvider: () => ({ capabilities: { agentOptions: true, depthLimit: true } }),
+  })
+  let canceledCalls = 0
+  canceled.ctx.subagents.startActivation = async () => { canceledCalls += 1 }
+  apply(canceled.ctx, baseConfig)
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(canceled.tools.get('dsh_omo_task').execute(
+    { role: 'test', task: 'Do not start' },
+    { agent: { id: 'parent-canceled' }, signal: controller.signal },
+  ), /abort|cancel/u)
+  assert.equal(canceledCalls, 0, 'cancellation before publication does not call startActivation')
+})
+
+test('fails closed when current startActivation cannot enforce filters or requested capabilities', async () => {
+  const currentProvider = capabilities => () => ({ name: 'spawn', capabilities })
+  const filtered = makeContext({ getProvider: currentProvider({ depthLimit: true, agentOptions: true }) })
+  let filteredActivation = false
+  filtered.ctx.subagents.startActivation = async () => { filteredActivation = true }
+  apply(filtered.ctx, { ...baseConfig, roleRoutes: [{ role: 'test', allowTools: ['read'] }] })
+  await assert.rejects(
+    filtered.tools.get('dsh_omo_task').execute(
+      { role: 'test', task: 'Use a role allowlist' },
+      { agent: { id: 'parent-filtered' }, signal: new AbortController().signal },
+    ),
+    /does not support per-request tool filters/u,
+  )
+  assert.equal(filteredActivation, false)
+
+  const noAgentOptions = makeContext({ getProvider: currentProvider({ depthLimit: true, agentOptions: false }) })
+  let noOptionsActivation = false
+  noAgentOptions.ctx.subagents.startActivation = async () => { noOptionsActivation = true }
+  apply(noAgentOptions.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'test', provider: 'route-provider', model: 'route-model' }],
+  })
+  await assert.rejects(
+    noAgentOptions.tools.get('dsh_omo_task').execute(
+      { role: 'test', task: 'Select a model route' },
+      { agent: { id: 'parent-no-options' }, signal: new AbortController().signal },
+    ),
+    /does not support the selected route's agentOptions/u,
+  )
+  assert.equal(noOptionsActivation, false)
+
+  const noDepthLimit = makeContext({ getProvider: currentProvider({ agentOptions: true, depthLimit: false }) })
+  let noDepthActivation = false
+  noDepthLimit.ctx.subagents.startActivation = async () => { noDepthActivation = true }
+  apply(noDepthLimit.ctx, baseConfig)
+  await assert.rejects(
+    noDepthLimit.tools.get('dsh_omo_task').execute(
+      { role: 'test', task: 'Respect configured depth' },
+      { agent: { id: 'parent-no-depth' }, signal: new AbortController().signal },
+    ),
+    /does not support the configured maxDepth/u,
+  )
+  assert.equal(noDepthActivation, false)
+})
+
+test('rejects current-API persona and continuable configurations before registration', () => {
+  const current = makeContext({
+    getProvider: () => ({ capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true } }),
+  })
+  current.ctx.subagents.startActivation = async () => {}
+  current.ctx.subagents.startContinuable = undefined
+
+  assert.throws(
+    () => apply(current.ctx, { ...baseConfig, userAgents: [{ name: 'custom-reviewer', prompt: 'Review carefully.' }] }),
+    /userAgents require per-request persona/u,
+  )
+  assert.equal(current.tools.size, 0)
+
+  assert.throws(
+    () => apply(current.ctx, { ...baseConfig, enableProjectAgentFiles: true }),
+    /project agent files require per-request persona/u,
+  )
+  assert.equal(current.tools.size, 0)
+
+  assert.throws(
+    () => apply(current.ctx, { ...baseConfig, enableContinuableTasks: true }),
+    /requires DSH subagents\.startContinuable/u,
+  )
+  assert.equal(current.tools.size, 0)
+})
+
 test('attributes infrastructure failure notices to the DSH settlement source', async () => {
   const fixture = makeContext()
   fixture.ctx.subagents.start = async () => ({
@@ -4276,11 +4441,11 @@ test('uses the DSH continuation seam only when enabled and rejects unpersisted t
 
   const noManager = makeContext()
   noManager.ctx.subagents.startContinuable = undefined
-  apply(noManager.ctx, { ...baseConfig, enableContinuableTasks: true })
-  await assert.rejects(noManager.tools.get('dsh_omo_task_continuable').execute(
-    { role: 'explore', task: 'Persist this task' },
-    { agent: { id: 'parent-agent' }, signal: new AbortController().signal },
-  ), /continuation services are unavailable/)
+  assert.throws(
+    () => apply(noManager.ctx, { ...baseConfig, enableContinuableTasks: true }),
+    /requires DSH subagents\.startContinuable/u,
+  )
+  assert.equal(noManager.tools.size, 0, 'unsupported continuable tools are not registered on the current Host API')
   assert.equal(noManager.starts.length, 0)
 
   const inheritedTokenBound = makeContext()

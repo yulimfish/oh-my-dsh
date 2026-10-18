@@ -16,7 +16,10 @@ function makeContext(failOnCommand) {
     },
     skills: { register: () => () => {}, registerProvider: create => { create({ signal: new AbortController().signal, invalidate() {} }); return () => {} } },
     systemPrompt: { section: () => () => {} },
-    subagents: {},
+    subagents: {
+      startActivation: async () => { throw new Error('unused test activation') },
+      getProvider: () => ({ capabilities: { agentOptions: true, depthLimit: true } }),
+    },
     fs: {},
     logger: { warn() {} },
     effect(execute, label) {

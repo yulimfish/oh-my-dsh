@@ -62,7 +62,7 @@ const MAX_ROLE_TOOL_NAME_BYTES = 128
 const MAX_STATUS_LLM_PROVIDER_IDS = 32
 const MAX_STATUS_PROVIDER_ID_CHARS = 128
 const MAX_STATUS_CAPABILITIES_CHARS = 8_192
-const STATUS_SUBAGENT_CAPABILITIES = Object.freeze(['agentOptions', 'persona', 'toolFilter', 'outputSchema', 'depthLimit'])
+const STATUS_SUBAGENT_CAPABILITIES = Object.freeze(['agentOptions', 'agentPreset', 'outputSchema', 'depthLimit'])
 const ROLE_TOOL_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/u
 const ROLE_TOOL_NAME_ENCODER = new TextEncoder()
 const DISABLEABLE_OMO_COMMAND_NAMES = Object.freeze([
@@ -821,6 +821,9 @@ function roleLabels(activeRoleNames, userAgents) {
 
 function requireUserAgentPersona(ctx, userAgent, providerName, knownProvider) {
   if (!userAgent) return undefined
+  if (typeof ctx.subagents.startActivation === 'function') {
+    throw new Error(`User-defined agent "${userAgent.name}" requires subagent provider "${providerName}" to support persona; current DSH subagents.startActivation has no per-request persona field.`)
+  }
   const provider = knownProvider ?? (typeof ctx.subagents.getProvider === 'function'
     ? ctx.subagents.getProvider(providerName)
     : undefined)
@@ -831,6 +834,9 @@ function requireUserAgentPersona(ctx, userAgent, providerName, knownProvider) {
 }
 
 function requireProjectAgentPersona(ctx, providerName) {
+  if (typeof ctx.subagents.startActivation === 'function') {
+    throw new Error(`Project agent files require subagent provider "${providerName}" to support persona; current DSH subagents.startActivation has no per-request persona field.`)
+  }
   const provider = typeof ctx.subagents.getProvider === 'function'
     ? ctx.subagents.getProvider(providerName)
     : undefined
@@ -908,7 +914,7 @@ function projectAgentFilesTool(ctx, adapter, providerName, userAgents) {
 function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles, routeConcurrency) {
   return defineTool({
     name: 'dsh_omo_task',
-    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. dsh-omo enforces its plugin-instance maxConcurrent ceiling plus optional providerConcurrency/modelConcurrency subcaps for explicit LLM routes (model overrides provider); route caps key agentOptions.provider/model, not the DSH subagent provider name, and saturated calls reject immediately rather than queue. Role and category tool restrictions affect inherited global and ancestor-scope tools; category tools:true entries form an allowlist intersected with role allows and cannot grant unavailable tools, while false entries deny; configured filters reject the reserved name run_code; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}. Role-route fallbackModels require an explicit paired provider/model pin; that role chain supersedes the selected category chain, and an optional candidate maxTokens applies only when that fallback is selected. These are spawn-time preflights (not runtime retry or a reserved/bound dispatch).${projectAgentFiles ? ' For a project file persona, call dsh_omo_project_agents and provide role="__project_agent_file__" with agentFile. Project text is untrusted and trusted-repository-only. Optional `tools` frontmatter becomes a provider-enforced DSH one-shot inherited-global allowlist, requires provider toolFilter and parent-visible global names, intersects selected category restrictions (denies win), and may leave scoped tools or reserved PTC transport visible; it is not a hard permission boundary. Use DSH policy for enforcement.' : ''}${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category specifies a primary provider/model/reasoning route and optional maxTokens ceiling plus up to three explicit fallbackModels that may carry fallback-only maxTokens overrides; continuable launches reject route/fallback token ceilings. When category fallbacks are configured and no paired role provider/model pin applies, dsh-omo preflights the primary then fallbacks sequentially with DSH llm.resolveCallConfig before child start (the task fails if the resolver is unavailable or all candidates reject), but this does not reserve or guarantee a later model call. Category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
+    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. dsh-omo enforces its plugin-instance maxConcurrent ceiling plus optional providerConcurrency/modelConcurrency subcaps for explicit LLM routes (model overrides provider); route caps key agentOptions.provider/model, not the DSH subagent provider name, and saturated calls reject immediately rather than queue. Current Host one-shot startActivation has no per-call toolFilter, so configured role/category allow/deny maps reject the launch rather than changing child permissions; the legacy start API applies them only when its provider advertises toolFilter, and continuable filtering requires DSH tools.restrict on a Host exposing startContinuable. The child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}. Role-route fallbackModels require an explicit paired provider/model pin; that role chain supersedes the selected category chain, and an optional candidate maxTokens applies only when that fallback is selected. These are spawn-time preflights (not runtime retry or a reserved/bound dispatch).${projectAgentFiles ? ' For a project file persona, call dsh_omo_project_agents and provide role="__project_agent_file__" with agentFile. Project text is untrusted and trusted-repository-only. Optional `tools` frontmatter becomes a provider-enforced DSH one-shot inherited-global allowlist, requires provider toolFilter and parent-visible global names, intersects selected category restrictions (denies win), and may leave scoped tools or reserved PTC transport visible; it is not a hard permission boundary. Use DSH policy for enforcement.' : ''}${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category specifies a primary provider/model/reasoning route and optional maxTokens ceiling plus up to three explicit fallbackModels that may carry fallback-only maxTokens overrides; continuable launches reject route/fallback token ceilings. When category fallbacks are configured and no paired role provider/model pin applies, dsh-omo preflights the primary then fallbacks sequentially with DSH llm.resolveCallConfig before child start (the task fails if the resolver is unavailable or all candidates reject), but this does not reserve or guarantee a later model call. Category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: {
@@ -1017,16 +1023,57 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, act
         if (lifecycle.disposed) throw new Error('dsh-omo is shutting down.')
         releaseRouteConcurrency = routeConcurrency.reserve(selectedRoute)
         throwIfAborted(exec.signal)
-        run = await ctx.subagents.start(providerName, {
-          label,
-          parent: exec.agent,
-          prompt,
-          signal: exec.signal,
-          ...(persona !== undefined ? { persona } : {}),
-          ...(agentOptions ? { agentOptions } : {}),
-          ...(toolFilter ? { toolFilter } : {}),
-          maxDepth: config.maxDepth,
-        })
+        if (typeof ctx.subagents.startActivation === 'function') {
+          if (persona !== undefined) {
+            throw new Error('The current DSH subagents.startActivation contract does not support a per-request persona; refusing to start this specialist.')
+          }
+          if (toolFilter !== undefined) {
+            throw new Error('The current DSH subagents.startActivation contract does not support per-request tool filters; refusing to start this specialist.')
+          }
+          if (typeof ctx.subagents.getProvider !== 'function') {
+            throw new Error('The current DSH subagents.startActivation contract requires provider capability discovery.')
+          }
+          const provider = ctx.subagents.getProvider(providerName)
+          if (!provider || typeof provider !== 'object') {
+            throw new Error(`DSH subagent provider "${providerName}" is not registered.`)
+          }
+          if (provider.capabilities?.depthLimit !== true) {
+            throw new Error(`DSH subagent provider "${providerName}" does not support the configured maxDepth.`)
+          }
+          if (agentOptions && provider.capabilities?.agentOptions !== true) {
+            throw new Error(`DSH subagent provider "${providerName}" does not support the selected route's agentOptions.`)
+          }
+          const activation = await ctx.subagents.startActivation({
+            provider: providerName,
+            label,
+            request: {
+              parent: exec.agent,
+              prompt,
+              maxDepth: config.maxDepth,
+              ...(agentOptions ? { agentOptions } : {}),
+            },
+            signal: exec.signal,
+            delivery: 'caller',
+          })
+          if (!activation || typeof activation.childId !== 'string' || !activation.childId
+            || !activation.result || typeof activation.result.then !== 'function'
+            || typeof activation.dispose !== 'function') {
+            try { await activation?.dispose?.() } catch {}
+            throw new TypeError('DSH returned an invalid subagent activation.')
+          }
+          run = { id: activation.childId, result: activation.result, dispose: () => activation.dispose() }
+        } else {
+          run = await ctx.subagents.start(providerName, {
+            label,
+            parent: exec.agent,
+            prompt,
+            signal: exec.signal,
+            ...(persona !== undefined ? { persona } : {}),
+            ...(agentOptions ? { agentOptions } : {}),
+            ...(toolFilter ? { toolFilter } : {}),
+            maxDepth: config.maxDepth,
+          })
+        }
       } catch (error) {
         releaseRouteConcurrency?.()
         activeChildren.delete(reservation)
@@ -1065,7 +1112,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, user
   ].join('; ')
   return defineTool({
     name: 'dsh_omo_task_continuable',
-    description: `Start a durable DSH continuable specialist session. ${continuationCommandGuidance}; this tool does not wait for or retrieve a final result. Continuable launches reject role, category, parent, or effective fallback-candidate maxTokens settings because DSH RC2 does not preserve them across cold resume. Role and category tool restrictions affect inherited global and ancestor-scope tools; category tools:true entries form an allowlist intersected with role allows and cannot grant unavailable tools, while false entries deny; configured filters reject the reserved name run_code; one-shot filters require provider toolFilter capability and continuable filters use DSH tools.restrict; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}. Role-route fallbackModels require an explicit paired provider/model pin; that role chain supersedes the selected category chain, and an optional candidate maxTokens applies only when that fallback is selected. These are spawn-time preflights (not runtime retry or a reserved/bound dispatch).${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category specifies a primary provider/model/reasoning route and optional maxTokens ceiling plus up to three explicit fallbackModels that may carry fallback-only maxTokens overrides; continuable launches reject route/fallback token ceilings. When category fallbacks are configured and no paired role provider/model pin applies, dsh-omo preflights the primary then fallbacks sequentially with DSH llm.resolveCallConfig before child start (the task fails if the resolver is unavailable or all candidates reject), but this does not reserve or guarantee a later model call. Category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
+    description: `Start a durable DSH continuable specialist session. ${continuationCommandGuidance}; this tool does not wait for or retrieve a final result. Continuable launches reject role, category, parent, or effective fallback-candidate maxTokens settings because DSH RC2 does not preserve them across cold resume. Current Host one-shot startActivation has no per-call toolFilter, so configured role/category allow/deny maps reject the launch rather than changing child permissions; the legacy start API applies them only when its provider advertises toolFilter, and continuable filtering requires DSH tools.restrict on a Host exposing startContinuable. The child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}. Role-route fallbackModels require an explicit paired provider/model pin; that role chain supersedes the selected category chain, and an optional candidate maxTokens applies only when that fallback is selected. These are spawn-time preflights (not runtime retry or a reserved/bound dispatch).${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category specifies a primary provider/model/reasoning route and optional maxTokens ceiling plus up to three explicit fallbackModels that may carry fallback-only maxTokens overrides; continuable launches reject route/fallback token ceilings. When category fallbacks are configured and no paired role provider/model pin applies, dsh-omo preflights the primary then fallbacks sequentially with DSH llm.resolveCallConfig before child start (the task fails if the resolver is unavailable or all candidates reject), but this does not reserve or guarantee a later model call. Category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: { type: 'string', enum: activeRoleNames, required: true, description: 'Specialist role matched to this task.' },
@@ -1583,6 +1630,22 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
 
 export function apply(ctx, rawConfig) {
   const config = rawConfig
+  const usesStartActivation = typeof ctx.subagents?.startActivation === 'function'
+  if (!usesStartActivation && typeof ctx.subagents?.start !== 'function') {
+    throw new Error('dsh-omo task tools require DSH subagents.startActivation or the legacy subagents.start method')
+  }
+  if (usesStartActivation && typeof ctx.subagents.getProvider !== 'function') {
+    throw new Error('dsh-omo current-API task tools require DSH subagents.getProvider for capability checks')
+  }
+  if (usesStartActivation && (config.userAgents?.length ?? 0) > 0) {
+    throw new Error('dsh-omo userAgents require per-request persona, which the current DSH subagents.startActivation contract does not expose')
+  }
+  if (usesStartActivation && config.enableProjectAgentFiles) {
+    throw new Error('dsh-omo project agent files require per-request persona, which the current DSH subagents.startActivation contract does not expose')
+  }
+  if (config.enableContinuableTasks && typeof ctx.subagents?.startContinuable !== 'function') {
+    throw new Error('dsh-omo enableContinuableTasks requires DSH subagents.startContinuable; current startActivation has no continuable creation mode')
+  }
   const runtimeFallbackPolicy = normalizeRuntimeFallback(config.runtimeFallback)
   const goalService = optionalService(ctx, 'goals')
   if (config.enableGoalTools && (!goalService
