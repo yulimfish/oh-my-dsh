@@ -128,8 +128,8 @@ function getOverwriteValue(exec) {
 }
 
 function isOmoPath(filePath) {
-  // Preserve the upstream raw slash-segment bypass; do not normalize `..` first.
-  return filePath.split('/').includes('.omo')
+  // Apply the bypass to the effective POSIX lexical path, not a canceled raw segment.
+  return path.normalize(filePath).split('/').includes('.omo')
 }
 
 function getAgentContext(exec, agents, sessions) {

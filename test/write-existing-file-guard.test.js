@@ -360,20 +360,26 @@ test('new or out-of-cwd writes pass; in-cwd symlinks and directories fail closed
   assert.match(directory.decision.reason, /non-file/u)
 })
 
-test('preserves upstream .omo and overwrite bypasses without stripping Tool arguments', async () => {
+test('preserves effective .omo and explicit overwrite bypasses without stripping Tool arguments', async () => {
   const { guard } = makeHarness()
   const omo = await attemptWrite(guard, '.omo/config.json')
   assert.deepEqual(omo.decision, { kind: 'allow' })
   assert.equal(omo.final, undefined)
-  const rawOmoAlias = await attemptWrite(guard, 'src/.omo/../src/existing.txt')
-  assert.deepEqual(rawOmoAlias.decision, { kind: 'allow' })
-  assert.equal(rawOmoAlias.final, undefined, 'raw .omo path segments bypass before path normalization')
+
+  const normalizedAlias = await attemptWrite(guard, 'src/.omo/../existing.txt')
+  assert.equal(normalizedAlias.decision.kind, 'deny', 'a canceled raw .omo segment does not bypass an existing ordinary file')
+  assert.equal(normalizedAlias.decision.reason, 'File already exists. Use edit tool instead.')
+  assert.equal(normalizedAlias.final, normalizedAlias.decision.reason)
 
   const overwrite = makeExec('write', 'src/existing.txt', { overwrite: 'TRUE' })
   const decision = await guard.before(overwrite, allow)
   assert.deepEqual(decision, { kind: 'allow' })
   assert.equal(guard.guard(overwrite), undefined)
   assert.equal(overwrite.arguments.overwrite, 'TRUE')
+
+  const overwriteAlias = await attemptWrite(guard, 'src/.omo/../existing.txt', { overwrite: true })
+  assert.deepEqual(overwriteAlias.decision, { kind: 'allow' }, 'explicit overwrite remains an independent bypass')
+  assert.equal(overwriteAlias.final, undefined)
 })
 
 test('scopes grants by exact Agent and stable target identity across relative path aliases', async () => {

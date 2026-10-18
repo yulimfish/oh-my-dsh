@@ -1658,6 +1658,8 @@ test('mounts the opt-in existing-file guard only with full DSH contracts and dis
   }
   assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /writeExistingFileGuard=enabled/u)
   assert.match(enabled.commands.get('omo').handler().text, /Write-existing-file guard: enabled/u)
+  assert.match(enabled.commands.get('omo').handler().text, /case-sensitive \.omo segment on the POSIX-normalized path; canceled \.\. aliases do not bypass and symlink targets are not resolved/u)
+  assert.match(enabled.sections.find(section => section.name === 'dsh-omo:specialist-orchestration').text, /canceled `\.\.` aliases do not bypass, and symlink targets are not resolved by this lexical check/u)
   assert.match(enabled.sections.find(section => section.name === 'dsh-omo:specialist-orchestration').text, /preflight classified an in-cwd regular file/u)
   const guardEffect = enabled.effects.find(effect => effect.label === 'dsh-omo write-existing-file guard')
   assert.ok(guardEffect)
