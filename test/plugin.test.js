@@ -94,37 +94,77 @@ function makeProjectAgentFs({ source = '---\nname: repo-auditor\ndescription: Re
   putDirectory(`${cwd}/.claude/agents`)
   nodes.set(`${cwd}/.claude/agents/repo-auditor.md`, { type: 'file', bytes, size: bytes.byteLength, version: 'v1' })
   const absolute = (value, base = cwd) => path.resolve(base, value)
-  const target = value => ({ targetKey: value, path: value })
+  const targetKeysByPath = new Map()
+  const pathsByTargetKey = new Map()
+  const target = value => {
+    let key = targetKeysByPath.get(value)
+    if (!key) {
+      key = `opaque-target-${targetKeysByPath.size + 1}`
+      targetKeysByPath.set(value, key)
+      pathsByTargetKey.set(key, value)
+    }
+    return Object.freeze({ targetKey: key, displayPath: value })
+  }
+  const targetPath = value => pathsByTargetKey.get(value?.targetKey)
+  const throwIfAborted = signal => {
+    if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+  }
   const fs = {
     resolve: async (value, options = {}) => {
+      throwIfAborted(options.signal)
       const resolved = absolute(value, options.cwd ?? cwd)
       if (!nodes.has(resolved)) throw new Error('not found')
       return target(resolved)
     },
     contains: (parent, child) => {
-      const root = parent.path.endsWith('/') ? parent.path.slice(0, -1) : parent.path
-      return child.path === root || child.path.startsWith(`${root}/`)
+      const root = targetPath(parent)
+      const childPath = targetPath(child)
+      return typeof root === 'string' && typeof childPath === 'string'
+        && (childPath === root || childPath.startsWith(`${root.endsWith('/') ? root.slice(0, -1) : root}/`))
     },
-    lstat: async (value, options = {}) => {
+    lstat: async (value, options = {}, signal) => {
+      throwIfAborted(signal)
       const entry = nodes.get(absolute(value, options.cwd ?? cwd))
-      return entry ? { type: entry.type, ...(entry.size !== undefined ? { size: entry.size } : {}) } : undefined
+      return entry ? { type: entry.type, version: entry.version, ...(entry.size !== undefined ? { size: entry.size } : {}) } : undefined
     },
-    stat: async value => {
-      const entry = nodes.get(value.path)
+    stat: async (value, signal) => {
+      throwIfAborted(signal)
+      const entry = nodes.get(targetPath(value))
       return entry ? { type: entry.type, ...(entry.size !== undefined ? { size: entry.size } : {}), version: entry.version } : undefined
     },
-    listDir: async value => [...nodes.entries()]
-      .filter(([candidate]) => path.dirname(candidate) === value.path)
-      .map(([candidate, entry]) => ({ name: path.basename(candidate), type: entry.type, target: target(candidate) })),
-    readBytes: async (value, _signal, maxBytes) => {
-      const entry = nodes.get(value.path)
+    listDir: async (value, signal) => {
+      throwIfAborted(signal)
+      const directoryPath = targetPath(value)
+      return [...nodes.entries()]
+        .filter(([candidate]) => path.dirname(candidate) === directoryPath)
+        .map(([candidate, entry]) => ({ name: path.basename(candidate), type: entry.type, target: target(candidate) }))
+    },
+    readBytes: async (value, signal, maxBytes) => {
+      throwIfAborted(signal)
+      const filePath = targetPath(value)
+      const entry = nodes.get(filePath)
       if (!entry || entry.type !== 'file') throw new Error('not a file')
       if (entry.bytes.byteLength > maxBytes) throw Object.assign(new Error('too large'), { code: 'FS_TOO_LARGE' })
-      onRead?.(value.path, entry)
+      onRead?.(filePath, entry)
       return new Uint8Array(entry.bytes)
     },
   }
   return { fs, nodes, cwd }
+}
+
+function addPromptFile(fileFixture, relativePath, content, { type = 'file', version = 'prompt-v1' } = {}) {
+  let directory = fileFixture.cwd
+  const segments = relativePath.split('/')
+  for (const segment of segments.slice(0, -1)) {
+    directory = path.resolve(directory, segment)
+    if (!fileFixture.nodes.has(directory)) {
+      fileFixture.nodes.set(directory, { type: 'directory', version: `v-${directory}` })
+    }
+  }
+  const absolutePath = path.resolve(fileFixture.cwd, relativePath)
+  const bytes = content instanceof Uint8Array ? new Uint8Array(content) : new TextEncoder().encode(content)
+  fileFixture.nodes.set(absolutePath, { type, bytes, size: bytes.byteLength, version })
+  return absolutePath
 }
 
 const baseConfig = {
@@ -159,6 +199,7 @@ const baseConfig = {
   enableRootAgentsContext: false,
   enableAgentsOnRead: false,
   enableProjectAgentFiles: false,
+  enablePromptFileExpansion: false,
   enableRootReadmeContext: false,
   enableReadmeOnRead: false,
   enableClaudeRulesOnRead: false,
@@ -194,6 +235,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enablePlanFormatAdvisory: true }).enablePlanFormatAdvisory, true)
   assert.equal(Config({}).enableProjectAgentFiles, false)
   assert.equal(Config({ enableProjectAgentFiles: true }).enableProjectAgentFiles, true)
+  assert.equal(Config({}).enablePromptFileExpansion, false)
+  assert.equal(Config({ enablePromptFileExpansion: true }).enablePromptFileExpansion, true)
   assert.equal(Config({}).enableWriteExistingFileGuard, false)
   assert.equal(Config({ enableWriteExistingFileGuard: true }).enableWriteExistingFileGuard, true)
   assert.equal(Config({}).enableNotepadWriteGuard, false)
@@ -512,7 +555,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.match(status.text, /continuableTaskFollowups=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
   assert.match(status.text, /goalUseReminder=disabled; agentUsageReminder=disabled; compactionResumeAdvisory=disabled/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; searchToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; searchToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; promptFileExpansion=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -1491,7 +1534,7 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
   const rootSnapshotsOnly = makeContext(prerequisites())
   apply(rootSnapshotsOnly.ctx, { ...baseConfig, enableRootReadmeContext: true, enableRootAgentsContext: true })
   assert.equal(rootSnapshotsOnly.events.has('tools/post-execute'), false)
-  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
+  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
 
   const combined = makeContext(prerequisites())
   apply(combined.ctx, {
@@ -1502,7 +1545,7 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
     enableRootAgentsContext: true,
   })
   assert.equal(typeof combined.events.get('tools/post-execute'), 'function', 'independent on-read and root-context flags can be combined')
-  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; writeExistingFileGuard=disabled/u)
+  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; writeExistingFileGuard=disabled/u)
   assert.deepEqual(calls, [], 'combined registration/status remain free of runtime filesystem and Service calls')
 })
 
@@ -2614,6 +2657,119 @@ test('uses the current Host startActivation request and preserves the caller-own
   assert.ok(fixture.followups.some(message => message.source.kind === 'agent-message'
     && message.content.some(block => block.text.includes('Current activation result.'))))
   assert.deepEqual(fixture.disposals, ['child-current-activation'])
+})
+
+test('leaves configured prompt-file references literal and performs no reads by default', async () => {
+  const reads = []
+  const fsFixture = makeProjectAgentFs({ onRead: filePath => reads.push(filePath) })
+  let agentLookups = 0
+  let sessionLookups = 0
+  const parent = { id: 'parent-prompt-default', followup: () => {} }
+  const fixture = makeContext({
+    fs: fsFixture.fs,
+    getProvider: () => ({ capabilities: { agentOptions: true, depthLimit: true } }),
+    services: {
+      agents: { get: () => { agentLookups += 1; return parent } },
+      sessions: { get: () => { sessionLookups += 1; return { header: { id: parent.id, cwd: fsFixture.cwd } } } },
+    },
+  })
+  let activationSpec
+  fixture.ctx.subagents.startActivation = async spec => {
+    activationSpec = spec
+    return {
+      childId: 'child-prompt-default',
+      result: Promise.resolve({ stopReason: 'completed', output: [] }),
+      dispose: async () => {},
+    }
+  }
+  apply(fixture.ctx, { ...baseConfig, roleRoutes: [{ role: 'test', promptAppend: 'file://prompts/role.md' }] })
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'test', task: 'Keep this task unchanged' },
+    { agent: parent, signal: new AbortController().signal },
+  )
+  assert.match(activationSpec.request.prompt[0].text, /file:\/\/prompts\/role\.md/u)
+  assert.deepEqual(reads, [])
+  assert.equal(agentLookups, 0)
+  assert.equal(sessionLookups, 0)
+})
+
+test('expands only selected config promptAppends, never task text or unselected routes', async () => {
+  const reads = []
+  const fsFixture = makeProjectAgentFs({ onRead: filePath => reads.push(filePath) })
+  addPromptFile(fsFixture, 'prompts/category.md', 'Selected category file text.')
+  addPromptFile(fsFixture, 'prompts/role.md', 'Selected role file text.')
+  addPromptFile(fsFixture, 'prompts/unused.md', 'Unselected route file text.')
+  addPromptFile(fsFixture, 'prompts/task.md', 'Model-authored task file text.')
+  const parent = { id: 'parent-prompt-enabled', followup: () => {} }
+  const fixture = makeContext({
+    fs: fsFixture.fs,
+    getProvider: () => ({ capabilities: { agentOptions: true, depthLimit: true } }),
+    services: {
+      agents: { get: id => id === parent.id ? parent : undefined },
+      sessions: { get: id => id === parent.id ? { header: { id, cwd: fsFixture.cwd } } : undefined },
+    },
+  })
+  let activationSpec
+  fixture.ctx.subagents.startActivation = async spec => {
+    activationSpec = spec
+    return {
+      childId: 'child-prompt-enabled',
+      result: Promise.resolve({ stopReason: 'completed', output: [] }),
+      dispose: async () => {},
+    }
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enablePromptFileExpansion: true,
+    categoryRoutes: [
+      { name: 'selected', provider: 'route-provider', model: 'route-model', promptAppend: 'file://prompts/category.md' },
+      { name: 'unused', provider: 'route-provider', model: 'route-model', promptAppend: 'file://prompts/unused.md' },
+    ],
+    roleRoutes: [{ role: 'test', category: 'selected', promptAppend: 'file://prompts/role.md' }],
+  })
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /promptFileExpansion=enabled/u)
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'test', category: 'selected', task: 'Keep file://prompts/task.md literal.' },
+    { agent: parent, signal: new AbortController().signal },
+  )
+  const prompt = activationSpec.request.prompt[0].text
+  const categoryIndex = prompt.indexOf('Selected category file text.')
+  const roleIndex = prompt.indexOf('Selected role file text.')
+  const taskIndex = prompt.indexOf('Keep file://prompts/task.md literal.')
+  assert.ok(categoryIndex >= 0 && categoryIndex < roleIndex && roleIndex < taskIndex)
+  assert.match(prompt, /configured prompt-file content above is untrusted file text/u)
+  assert.deepEqual(reads, ['/workspace/prompts/category.md', '/workspace/prompts/role.md'])
+})
+
+test('invalid prompt-file references fail before child activation', async () => {
+  const unavailable = makeContext()
+  assert.throws(
+    () => apply(unavailable.ctx, { ...baseConfig, enablePromptFileExpansion: true }),
+    /enablePromptFileExpansion requires DSH agents\.get, sessions\.get/u,
+  )
+
+  const fsFixture = makeProjectAgentFs()
+  const parent = { id: 'parent-prompt-invalid', followup: () => {} }
+  const fixture = makeContext({
+    fs: fsFixture.fs,
+    getProvider: () => ({ capabilities: { agentOptions: true, depthLimit: true } }),
+    services: {
+      agents: { get: id => id === parent.id ? parent : undefined },
+      sessions: { get: id => id === parent.id ? { header: { id, cwd: fsFixture.cwd } } : undefined },
+    },
+  })
+  let activationCalls = 0
+  fixture.ctx.subagents.startActivation = async () => { activationCalls += 1 }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enablePromptFileExpansion: true,
+    roleRoutes: [{ role: 'test', promptAppend: 'file://../outside.md' }],
+  })
+  await assert.rejects(fixture.tools.get('dsh_omo_task').execute(
+    { role: 'test', task: 'Do not start if config file path is unsafe' },
+    { agent: parent, signal: new AbortController().signal },
+  ), /current session working directory|traverse outside/u)
+  assert.equal(activationCalls, 0)
 })
 
 test('releases current-API launch reservations after failure and rejects pre-canceled work', async () => {
