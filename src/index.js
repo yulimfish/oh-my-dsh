@@ -508,6 +508,14 @@ function queueChildRelay(parent, childId, content) {
   }))
 }
 
+function onceAsync(operation) {
+  let pending
+  return () => {
+    if (pending === undefined) pending = Promise.resolve().then(operation)
+    return pending
+  }
+}
+
 function safeErrorName(error) {
   try {
     return error instanceof Error && typeof error.name === 'string' ? error.name.slice(0, 80) : 'UnknownError'
@@ -1061,9 +1069,9 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, act
             try { await activation?.dispose?.() } catch {}
             throw new TypeError('DSH returned an invalid subagent activation.')
           }
-          run = { id: activation.childId, result: activation.result, dispose: () => activation.dispose() }
+          run = { id: activation.childId, result: activation.result, dispose: onceAsync(() => activation.dispose()) }
         } else {
-          run = await ctx.subagents.start(providerName, {
+          const legacyRun = await ctx.subagents.start(providerName, {
             label,
             parent: exec.agent,
             prompt,
@@ -1073,6 +1081,11 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, act
             ...(toolFilter ? { toolFilter } : {}),
             maxDepth: config.maxDepth,
           })
+          run = {
+            id: legacyRun.id,
+            result: legacyRun.result,
+            dispose: onceAsync(() => legacyRun.dispose()),
+          }
         }
       } catch (error) {
         releaseRouteConcurrency?.()

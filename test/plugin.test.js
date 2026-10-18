@@ -2597,6 +2597,8 @@ test('uses the current Host startActivation request and preserves the caller-own
   assert.equal(activationSpecs.length, 1)
   const spec = activationSpecs[0]
   assert.equal(spec.provider, 'spawn')
+  assert.deepEqual(Object.keys(spec).sort(), ['delivery', 'label', 'provider', 'request', 'signal'])
+  assert.deepEqual(Object.keys(spec.request).sort(), ['agentOptions', 'maxDepth', 'parent', 'prompt'])
   assert.equal(spec.label, 'test: Use the current Host activation API')
   assert.equal(spec.signal, signal)
   assert.equal(spec.delivery, 'caller')
@@ -4914,6 +4916,37 @@ test('route caps do not infer the inherited model or conflate the DSH subagent p
   assert.ok(fixture.starts.every(start => start.provider === 'spawn' && start.request.agentOptions === undefined))
   for (const resolve of pendingResults) resolve({ stopReason: 'completed', output: [] })
   await new Promise(resolve => setImmediate(resolve))
+})
+
+test('current startActivation disposal cancels active children without queuing stale results', async () => {
+  let resolveResult
+  let disposeCalls = 0
+  const fixture = makeContext({
+    getProvider: () => ({ capabilities: { agentOptions: true, depthLimit: true } }),
+  })
+  fixture.ctx.subagents.startActivation = async () => ({
+    childId: 'child-current-shutdown',
+    result: new Promise(resolve => { resolveResult = resolve }),
+    dispose: async () => {
+      disposeCalls += 1
+      resolveResult({ stopReason: 'aborted', output: [] })
+    },
+  })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    providerConcurrency: { 'llm-provider': 1 },
+    roleRoutes: [{ role: 'explore', provider: 'llm-provider', model: 'model-a' }],
+  })
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'Inspect one path' },
+    { agent: { id: 'parent-current-shutdown', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal },
+  )
+  const workerEffect = fixture.effects.find(effect => effect.label === 'dsh-omo background workers')
+  assert.ok(workerEffect)
+  await workerEffect.dispose()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(disposeCalls, 1, 'concurrent shutdown and settlement cleanup dispose the exact activation once')
+  assert.equal(fixture.followups.length, 0)
 })
 
 test('plugin disposal cancels active workers without queuing stale results', async () => {
