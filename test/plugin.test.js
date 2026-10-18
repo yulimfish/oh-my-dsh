@@ -182,6 +182,7 @@ const baseConfig = {
   enableCompactionResumeAdvisory: false,
   enableTeamTools: false,
   enableTeamModeContext: false,
+  enableTeamStatusContext: false,
   enableTeamTaskUseReminder: false,
   enableSessionSearch: false,
   enableSessionEventSearch: false,
@@ -303,6 +304,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
   assert.equal(Config({}).enableTeamModeContext, false)
   assert.equal(Config({ enableTeamModeContext: true }).enableTeamModeContext, true)
+  assert.equal(Config({}).enableTeamStatusContext, false)
+  assert.equal(Config({ enableTeamStatusContext: true }).enableTeamStatusContext, true)
   assert.equal(Config({}).enableTeamTaskUseReminder, false)
   assert.equal(Config({ enableTeamTaskUseReminder: true }).enableTeamTaskUseReminder, true)
   assert.equal(Config({}).enableSessionSearch, false)
@@ -563,7 +566,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.match(status.text, /continuableTaskFollowups=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
   assert.match(status.text, /goalUseReminder=disabled; agentUsageReminder=disabled; compactionResumeAdvisory=disabled/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamModeContext=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; searchToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; promptFileExpansion=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamModeContext=disabled; teamStatusContext=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; searchToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; promptFileExpansion=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -2559,6 +2562,128 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   assert.ok(teamEffect)
   await teamEffect.dispose()
   assert.equal([...teamFixture.tools.keys()].some(toolName => toolName.startsWith('team_')), false)
+})
+
+test('Team status context is opt-in, fail-closed on missing prerequisites, and Tool-schema neutral', async () => {
+  const missingTeamService = makeContext()
+  assert.throws(() => apply(missingTeamService.ctx, {
+    ...baseConfig, enableTeamStatusContext: true,
+  }), /enableTeamStatusContext requires DSH agentTeams\.tryMembership, listMembers, and listTasks/u)
+  assert.equal(missingTeamService.tools.size, 0)
+  for (const incompleteTeamApi of [
+    { tryMembership() {}, listTasks() {} },
+    { tryMembership() {}, listMembers() {} },
+    { listMembers() {}, listTasks() {} },
+  ]) {
+    const incompleteTeamService = makeContext({ services: { agentTeams: incompleteTeamApi } })
+    assert.throws(() => apply(incompleteTeamService.ctx, {
+      ...baseConfig, enableTeamStatusContext: true,
+    }), /enableTeamStatusContext requires DSH agentTeams\.tryMembership, listMembers, and listTasks/u)
+    assert.equal(incompleteTeamService.tools.size, 0)
+  }
+
+  const teamService = {
+    tryMembership() { return { role: 'lead' } },
+    listMembers() { return [] },
+    listTasks() { return [] },
+  }
+  const missingAgents = makeContext({ services: { agentTeams: teamService } })
+  assert.throws(() => apply(missingAgents.ctx, {
+    ...baseConfig, enableTeamStatusContext: true,
+  }), /enableTeamStatusContext requires DSH agents\.get/u)
+  assert.equal(missingAgents.tools.size, 0)
+
+  const missingPrompt = makeContext({ services: { agentTeams: teamService, agents: { get() {} } } })
+  assert.throws(() => apply(missingPrompt.ctx, {
+    ...baseConfig, enableTeamStatusContext: true,
+  }), /enableTeamStatusContext requires DSH systemPrompt\.context/u)
+  assert.equal(missingPrompt.tools.size, 0)
+
+  const missingEvents = makeContext({ services: {
+    agentTeams: teamService, agents: { get() {} }, systemPrompt: { context() {} },
+  } })
+  missingEvents.ctx.on = undefined
+  assert.throws(() => apply(missingEvents.ctx, {
+    ...baseConfig, enableTeamStatusContext: true,
+  }), /enableTeamStatusContext requires Cordis ctx\.on and ctx\.effect/u)
+  assert.equal(missingEvents.tools.size, 0)
+
+  const missingEffects = makeContext({ services: {
+    agentTeams: teamService, agents: { get() {} }, systemPrompt: { context() {} },
+  } })
+  missingEffects.ctx.effect = undefined
+  assert.throws(() => apply(missingEffects.ctx, {
+    ...baseConfig, enableTeamStatusContext: true,
+  }), /enableTeamStatusContext requires Cordis ctx\.on and ctx\.effect/u)
+  assert.equal(missingEffects.tools.size, 0)
+
+  const agent = { id: 'team-status-agent' }
+  const serviceCalls = []
+  const contextEntries = []
+  let contextDisposals = 0
+  agent.ctx = {
+    systemPrompt: { context: entry => {
+      contextEntries.push(entry)
+      return () => { contextDisposals += 1 }
+    } },
+    effect: execute => {
+      const cleanup = execute()
+      return () => cleanup?.()
+    },
+  }
+  const liveTeamService = {
+    tryMembership: caller => { serviceCalls.push(['tryMembership', caller]); return { role: 'lead' } },
+    listMembers: caller => { serviceCalls.push(['listMembers', caller]); return [] },
+    listTasks: caller => { serviceCalls.push(['listTasks', caller]); return [] },
+  }
+  const baseline = makeContext()
+  apply(baseline.ctx, baseConfig)
+  const disabledWithTeam = makeContext({ services: {
+    agentTeams: liveTeamService,
+    agents: { get: id => id === agent.id ? agent : undefined },
+    systemPrompt: { context() {} },
+  } })
+  apply(disabledWithTeam.ctx, baseConfig)
+  assert.equal(disabledWithTeam.effects.some(item => item.label === 'dsh-omo Team-status prompt context'), false)
+  assert.deepEqual(serviceCalls, [], 'a mounted Team service does not activate the feature by itself')
+  const enabled = makeContext({ services: {
+    agentTeams: liveTeamService,
+    agents: { get: id => id === agent.id ? agent : undefined },
+    systemPrompt: { context() {} },
+  } })
+  apply(enabled.ctx, { ...baseConfig, enableTeamStatusContext: true })
+  const status = enabled.commands.get('omo').handler({ rawInput: 'status' })
+  assert.match(status.text, /teamStatusContext=enabled/u)
+  assert.deepEqual(serviceCalls, [], '/omo status reports the flag without calling Team business methods')
+
+  const toolView = fixture => [...fixture.tools].map(([name, tool]) => ({
+    name, description: tool.description, parameters: tool.parameters, output: tool.output?.schema,
+  }))
+  assert.deepEqual(toolView(enabled), toolView(baseline))
+  assert.equal(enabled.tools.has('team_status'), false, 'status context is independent from Team Tool registration')
+  assert.deepEqual(serviceCalls, [], 'setup performs no Team reads')
+  const effect = enabled.effects.find(item => item.label === 'dsh-omo Team-status prompt context')
+  assert.ok(effect)
+  const listener = enabled.events.get('agent/created')
+  assert.equal(typeof listener, 'function')
+  await listener({ agent, source: 'startup' })
+  assert.deepEqual(serviceCalls, [['tryMembership', agent]], 'creation only checks exact membership')
+  assert.equal(contextEntries.length, 1)
+  assert.deepEqual({ name: contextEntries[0].name, order: contextEntries[0].order }, {
+    name: 'dsh-omo:team-status', order: 161,
+  })
+  assert.equal(typeof contextEntries[0].text, 'function')
+  const summary = contextEntries[0].text({ signal: new AbortController().signal })
+  assert.match(summary, /DSH Team status snapshot/u)
+  assert.equal(serviceCalls[1][0], 'tryMembership')
+  assert.equal(serviceCalls[2][0], 'listMembers')
+  assert.equal(serviceCalls[3][0], 'listTasks')
+  assert.equal(serviceCalls[1][1], agent)
+  assert.equal(serviceCalls[2][1], agent)
+  assert.equal(serviceCalls[3][1], agent)
+  await effect.dispose()
+  assert.equal(contextDisposals, 1)
+  assert.equal(contextEntries[0].text({}), '', 'plugin cleanup removes dynamic output')
 })
 
 test('registers native DSH model diagnostics when the LLM service is mounted', async () => {

@@ -36,6 +36,7 @@ import { createJsonErrorRecoveryListener } from './json-error-recovery.js'
 import { createDelegateTaskErrorGuidanceListener } from './delegate-task-error-guidance.js'
 import { createTeamTaskUseReminder } from './team-task-use-reminder.js'
 import { createTeamModeContext } from './team-mode-context.js'
+import { createTeamStatusContext } from './team-status-context.js'
 import { createGoalUseReminder } from './goal-use-reminder.js'
 import { createAgentUsageReminder } from './agent-usage-reminder.js'
 import { createCompactionResumeAdvisory } from './compaction-resume-advisory.js'
@@ -90,6 +91,7 @@ export const Config = z.object({
   enableCompactionResumeAdvisory: z.boolean().default(false),
   enableTeamTools: z.boolean().default(false),
   enableTeamModeContext: z.boolean().default(false),
+  enableTeamStatusContext: z.boolean().default(false),
   enableTeamTaskUseReminder: z.boolean().default(false),
   enableSessionSearch: z.boolean().default(false),
   enableSessionEventSearch: z.boolean().default(false),
@@ -1661,7 +1663,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; continuableTaskFollowups=${enabled(statusSnapshot.flags.continuableTaskFollowups)}; goalTools=${enabled(statusSnapshot.flags.goalTools)}; goalUseReminder=${enabled(statusSnapshot.flags.goalUseReminder)}; agentUsageReminder=${enabled(statusSnapshot.flags.agentUsageReminder)}; compactionResumeAdvisory=${enabled(statusSnapshot.flags.compactionResumeAdvisory)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; teamModeContext=${enabled(statusSnapshot.flags.teamModeContext)}; teamTaskUseReminder=${enabled(statusSnapshot.flags.teamTaskUseReminder)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; imageQueryTool=${enabled(statusSnapshot.flags.imageQueryTool)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; searchToolResultPruning=${enabled(statusSnapshot.flags.searchToolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; planFormatAdvisory=${enabled(statusSnapshot.flags.planFormatAdvisory)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; webSearchCommand=${enabled(statusSnapshot.flags.webSearchCommand)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; promptFileExpansion=${enabled(statusSnapshot.flags.promptFileExpansion)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; notepadWriteGuard=${enabled(statusSnapshot.flags.notepadWriteGuard)}; editErrorRecovery=${enabled(statusSnapshot.flags.editErrorRecovery)}; jsonErrorRecovery=${enabled(statusSnapshot.flags.jsonErrorRecovery)}; delegateTaskErrorGuidance=${enabled(statusSnapshot.flags.delegateTaskErrorGuidance)}; bashFileReadGuidance=${enabled(statusSnapshot.flags.bashFileReadGuidance)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionEventSearch=${enabled(statusSnapshot.flags.sessionEventSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; continuableTaskFollowups=${enabled(statusSnapshot.flags.continuableTaskFollowups)}; goalTools=${enabled(statusSnapshot.flags.goalTools)}; goalUseReminder=${enabled(statusSnapshot.flags.goalUseReminder)}; agentUsageReminder=${enabled(statusSnapshot.flags.agentUsageReminder)}; compactionResumeAdvisory=${enabled(statusSnapshot.flags.compactionResumeAdvisory)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; teamModeContext=${enabled(statusSnapshot.flags.teamModeContext)}; teamStatusContext=${enabled(statusSnapshot.flags.teamStatusContext)}; teamTaskUseReminder=${enabled(statusSnapshot.flags.teamTaskUseReminder)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; imageQueryTool=${enabled(statusSnapshot.flags.imageQueryTool)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; searchToolResultPruning=${enabled(statusSnapshot.flags.searchToolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; planFormatAdvisory=${enabled(statusSnapshot.flags.planFormatAdvisory)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; webSearchCommand=${enabled(statusSnapshot.flags.webSearchCommand)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; promptFileExpansion=${enabled(statusSnapshot.flags.promptFileExpansion)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; notepadWriteGuard=${enabled(statusSnapshot.flags.notepadWriteGuard)}; editErrorRecovery=${enabled(statusSnapshot.flags.editErrorRecovery)}; jsonErrorRecovery=${enabled(statusSnapshot.flags.jsonErrorRecovery)}; delegateTaskErrorGuidance=${enabled(statusSnapshot.flags.delegateTaskErrorGuidance)}; bashFileReadGuidance=${enabled(statusSnapshot.flags.bashFileReadGuidance)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionEventSearch=${enabled(statusSnapshot.flags.sessionEventSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
               `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; web=${presence('web')}; agentTeams=${presence('agentTeams')}; agents=${presence('agents')}; jobController=${presence('jobController')}; toolResultPruner=${presence('toolResultPruner')}; terminals=${presence('terminals')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
               'Presence does not prove readiness or health. This status path does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
@@ -1830,6 +1832,21 @@ export function apply(ctx, rawConfig) {
   }
   if (config.enableTeamModeContext && (typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
     throw new Error('dsh-omo: enableTeamModeContext requires Cordis ctx.on and ctx.effect')
+  }
+  if (config.enableTeamStatusContext && (!teamService
+    || typeof teamService.tryMembership !== 'function'
+    || typeof teamService.listMembers !== 'function'
+    || typeof teamService.listTasks !== 'function')) {
+    throw new Error('dsh-omo: enableTeamStatusContext requires DSH agentTeams.tryMembership, listMembers, and listTasks')
+  }
+  if (config.enableTeamStatusContext && typeof agentsService?.get !== 'function') {
+    throw new Error('dsh-omo: enableTeamStatusContext requires DSH agents.get')
+  }
+  if (config.enableTeamStatusContext && typeof systemPromptService?.context !== 'function') {
+    throw new Error('dsh-omo: enableTeamStatusContext requires DSH systemPrompt.context')
+  }
+  if (config.enableTeamStatusContext && (typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
+    throw new Error('dsh-omo: enableTeamStatusContext requires Cordis ctx.on and ctx.effect')
   }
   if (config.enableTeamTaskUseReminder && !config.enableTeamTools) {
     throw new Error('dsh-omo: enableTeamTaskUseReminder requires enableTeamTools')
@@ -2002,6 +2019,7 @@ export function apply(ctx, rawConfig) {
       runtimeFallback: runtimeFallbackPolicy.enabled,
       teamTools: config.enableTeamTools === true,
       teamModeContext: config.enableTeamModeContext === true,
+      teamStatusContext: config.enableTeamStatusContext === true,
       teamTaskUseReminder: config.enableTeamTaskUseReminder === true,
       jobTools: config.enableJobTools === true,
       imageQueryTool: config.enableImageQueryTool === true,
@@ -2185,6 +2203,11 @@ export function apply(ctx, rawConfig) {
     const context = createTeamModeContext(teamService, agentsService)
     ctx.on('agent/created', context.listener)
     ctx.effect(() => context.dispose, 'dsh-omo Team-mode prompt context')
+  }
+  if (config.enableTeamStatusContext) {
+    const context = createTeamStatusContext(teamService, agentsService)
+    ctx.on('agent/created', context.listener)
+    ctx.effect(() => context.dispose, 'dsh-omo Team-status prompt context')
   }
   if (config.enableTeamTaskUseReminder) {
     const reminder = createTeamTaskUseReminder(teamService)
