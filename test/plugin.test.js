@@ -5271,6 +5271,66 @@ test('continuable follow-up sends bounded text only to a tracked direct child an
   assert.equal(sent.length, 1)
 })
 
+test('same-ID parent replacement cannot follow stale children and late old disposal preserves new records', async () => {
+  const fixture = makeContext()
+  let childSequence = 0
+  const visibleChildren = new Set()
+  const sent = []
+  fixture.ctx.subagents.startContinuable = async () => {
+    childSequence += 1
+    const childId = `reuse-child-${childSequence}`
+    visibleChildren.add(childId)
+    return { childId, messageId: `accepted-${childSequence}` }
+  }
+  fixture.ctx.subagents.listChildren = async () => [...visibleChildren]
+    .map(id => ({ id, mode: 'continuable' }))
+  fixture.ctx.subagents.sendMessage = async (_sender, childId) => {
+    sent.push(childId)
+    return `followup-${childId}`
+  }
+  apply(fixture.ctx, {
+    ...baseConfig, enableContinuableTasks: true, enableContinuableTaskFollowups: true,
+  })
+  const oldParent = { id: 'reused-parent' }
+  const replacement = { id: oldParent.id }
+  const oldExec = { agent: oldParent, signal: new AbortController().signal }
+  const replacementExec = { agent: replacement, signal: new AbortController().signal }
+  const startTool = fixture.tools.get('dsh_omo_task_continuable')
+  const followupTool = fixture.tools.get('dsh_omo_task_followup')
+  const oldStart = await startTool.execute({ role: 'quick', task: 'Start the old Agent child.' }, oldExec)
+  assert.equal(oldStart.followupTracked, true)
+
+  let listCalls = 0
+  const listChildren = fixture.ctx.subagents.listChildren
+  fixture.ctx.subagents.listChildren = async (...args) => {
+    listCalls += 1
+    return listChildren(...args)
+  }
+  await assert.rejects(
+    followupTool.execute({ childId: oldStart.childId, message: 'Do not follow the old Agent child.' }, replacementExec),
+    /not started by dsh-omo/u,
+  )
+  assert.equal(listCalls, 0, 'replacement is rejected at exact-Agent reservation before child lookup')
+
+  const replacementStart = await startTool.execute(
+    { role: 'quick', task: 'Start the replacement Agent child.' }, replacementExec,
+  )
+  assert.equal(replacementStart.followupTracked, true)
+  assert.equal(typeof fixture.events.get('agent/disposed'), 'function')
+  fixture.events.get('agent/disposed')({ agent: oldParent })
+
+  await assert.rejects(
+    followupTool.execute({ childId: oldStart.childId, message: 'The old child stays unavailable.' }, replacementExec),
+    /not started by dsh-omo/u,
+  )
+  const accepted = await followupTool.execute(
+    { childId: replacementStart.childId, message: 'Continue the replacement child.' }, replacementExec,
+  )
+  assert.equal(accepted.childId, replacementStart.childId)
+  assert.equal(listCalls, 1)
+  assert.deepEqual(sent, [replacementStart.childId], 'late disposal cannot erase or redirect the replacement follow-up record')
+})
+
 test('follow-up revalidates direct-child mode and clears records on parent/plugin disposal', async () => {
   const fixture = makeContext()
   let visible = false

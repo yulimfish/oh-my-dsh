@@ -1274,7 +1274,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, user
         },
         signal: exec.signal,
       })
-      const followupTracked = continuableTaskRegistry?.record(exec.agent.id, accepted.childId)
+      const followupTracked = continuableTaskRegistry?.record(exec.agent, accepted.childId)
       return {
         childId: accepted.childId,
         role: args.role,
@@ -1329,7 +1329,7 @@ function continuableTaskFollowupTool(ctx, registry, lifecycle) {
         throw new Error('message must be non-empty and at most 4,096 UTF-16 code units.')
       }
       assertActive()
-      const reservation = registry.reserveSend(agent.id, childId)
+      const reservation = registry.reserveSend(exec.agent, childId)
       if (reservation.status !== 'reserved') {
         const reason = reservation.status === 'quota'
           ? 'The bounded per-child, per-parent, or plugin-instance-wide follow-up quota is exhausted.'
@@ -1346,7 +1346,7 @@ function continuableTaskFollowupTool(ctx, registry, lifecycle) {
       const directContinuableChild = Array.isArray(children)
         && children.some(child => child?.id === childId && child?.mode === 'continuable')
       if (!directContinuableChild) {
-        registry.remove(agent.id, childId)
+        registry.remove(exec.agent, childId)
         throw new Error('The tracked session is no longer a direct continuable child of this agent.')
       }
       assertActive()

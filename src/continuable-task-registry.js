@@ -10,12 +10,24 @@ function isValidId(value) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= MAX_ID_LENGTH
 }
 
+function parentIdentity(agent) {
+  if (!agent || typeof agent !== 'object') return undefined
+  let id
+  try {
+    id = agent.id
+  } catch {
+    return undefined
+  }
+  return isValidId(id) ? { agent, id } : undefined
+}
+
 /**
  * Create a bounded, in-memory registry for plugin-started continuable children.
  * Call record only after startContinuable has successfully returned the child ID.
  */
 export function createContinuableTaskRegistry() {
   const parents = new Map()
+  const disposedAgents = new WeakSet()
   // Insertion order is global child LRU order; entries are also stored per parent.
   const childLru = new Map()
   let disposed = false
@@ -61,13 +73,19 @@ export function createContinuableTaskRegistry() {
     if (parent) removeChild(parent, oldestChild)
   }
 
-  function record(parentId, childId) {
-    if (disposed || !isValidId(parentId) || !isValidId(childId)) return false
+  function record(parentAgent, childId) {
+    const identity = parentIdentity(parentAgent)
+    if (disposed || !identity || !isValidId(childId) || disposedAgents.has(parentAgent)) return false
+    const { id: parentId } = identity
 
     let parent = parents.get(parentId)
+    if (parent && parent.agent !== parentAgent) {
+      removeParent(parentId, parent)
+      parent = undefined
+    }
     if (!parent) {
       if (parents.size >= MAX_PARENTS) evictOldestParent()
-      parent = { children: new Map(), sends: 0 }
+      parent = { agent: parentAgent, children: new Map(), sends: 0 }
       parents.set(parentId, parent)
     } else {
       touchParent(parentId, parent)
@@ -94,13 +112,16 @@ export function createContinuableTaskRegistry() {
     return true
   }
 
-  function reserveSend(parentId, childId) {
-    if (!isValidId(parentId) || !isValidId(childId)) return { status: 'invalid' }
+  function reserveSend(parentAgent, childId) {
+    const identity = parentIdentity(parentAgent)
+    if (!identity || !isValidId(childId)) return { status: 'invalid' }
     if (disposed) return { status: 'disposed' }
+    if (disposedAgents.has(parentAgent)) return { status: 'untracked' }
 
+    const { id: parentId } = identity
     const parent = parents.get(parentId)
-    const child = parent?.children.get(childId)
-    if (!parent || !child) return { status: 'untracked' }
+    const child = parent?.agent === parentAgent ? parent.children.get(childId) : undefined
+    if (!parent || parent.agent !== parentAgent || !child) return { status: 'untracked' }
 
     touchParent(parentId, parent)
     touchChild(parent, child)
@@ -115,18 +136,22 @@ export function createContinuableTaskRegistry() {
     return { status: 'reserved' }
   }
 
-  function remove(parentId, childId) {
-    if (!isValidId(parentId) || !isValidId(childId)) return false
+  function remove(parentAgent, childId) {
+    const identity = parentIdentity(parentAgent)
+    if (!identity || !isValidId(childId) || disposedAgents.has(parentAgent)) return false
+    const { id: parentId } = identity
     const parent = parents.get(parentId)
-    const child = parent?.children.get(childId)
-    return Boolean(parent && child && removeChild(parent, child))
+    const child = parent?.agent === parentAgent ? parent.children.get(childId) : undefined
+    return Boolean(parent && parent.agent === parentAgent && child && removeChild(parent, child))
   }
 
   function clearAgent(agent) {
-    const parentId = agent?.id
-    if (!isValidId(parentId)) return false
+    if (agent && typeof agent === 'object') disposedAgents.add(agent)
+    const identity = parentIdentity(agent)
+    if (!identity) return false
+    const { id: parentId } = identity
     const parent = parents.get(parentId)
-    return Boolean(parent && removeParent(parentId, parent))
+    return Boolean(parent && parent.agent === agent && removeParent(parentId, parent))
   }
 
   function dispose() {
