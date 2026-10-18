@@ -5,10 +5,11 @@ const MAX_USER_AGENT_NAME_CHARS = 64
 const MAX_USER_AGENT_DESCRIPTION_BYTES = 512
 const MAX_USER_AGENT_PROMPT_BYTES = 16_384
 const MAX_TOTAL_USER_AGENT_PROMPT_BYTES = 65_536
+const MAX_USER_AGENT_PRESET_BYTES = 256
 const USER_AGENT_NAME = /^[a-z][a-z0-9-]{0,63}$/u
 const DISALLOWED_PROMPT_CONTROLS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
 const DISALLOWED_DESCRIPTION_CONTROLS = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/u
-const ALLOWED_FIELDS = new Set(['name', 'description', 'prompt', 'mode'])
+const ALLOWED_FIELDS = new Set(['name', 'description', 'prompt', 'agentPreset', 'mode'])
 const BUILTIN_ROLES = new Set(ROLE_NAMES)
 const encoder = new TextEncoder()
 
@@ -64,7 +65,21 @@ function normalizePrompt(value, name) {
   return { prompt, rawBytes }
 }
 
-/** Normalize explicit config-defined subagent personas; file-based agent discovery is intentionally separate. */
+function normalizeAgentPreset(value, name) {
+  const label = `userAgents[${name}].agentPreset`
+  if (typeof value !== 'string' || value.length > MAX_USER_AGENT_PRESET_BYTES
+    || encoder.encode(value).byteLength > MAX_USER_AGENT_PRESET_BYTES) {
+    throw new TypeError(`${label} must be a non-empty registered preset reference of at most ${MAX_USER_AGENT_PRESET_BYTES} UTF-8 bytes`)
+  }
+  if (DISALLOWED_DESCRIPTION_CONTROLS.test(value)) {
+    throw new TypeError(`${label} must not contain control or bidi characters`)
+  }
+  const agentPreset = value.trim()
+  if (!agentPreset) throw new TypeError(`${label} must be a non-empty registered preset reference`)
+  return agentPreset
+}
+
+/** Normalize explicit config-defined subagent personas or registered presets; file-based discovery is intentionally separate. */
 export function normalizeUserAgents(value = []) {
   if (!Array.isArray(value)) throw new TypeError('dsh-omo: userAgents must be an array')
   if (value.length > MAX_USER_AGENTS) {
@@ -100,15 +115,26 @@ export function normalizeUserAgents(value = []) {
       throw new TypeError(`dsh-omo: userAgents[${name}].mode only supports "subagent"`)
     }
     const description = normalizeDescription(ownDataValue(entry, 'description'), name)
-    const { prompt, rawBytes } = normalizePrompt(ownDataValue(entry, 'prompt'), name)
-    totalRawPromptBytes += rawBytes
-    if (totalRawPromptBytes > MAX_TOTAL_USER_AGENT_PROMPT_BYTES) {
-      throw new TypeError(`dsh-omo: userAgents prompts may not exceed ${MAX_TOTAL_USER_AGENT_PROMPT_BYTES} UTF-8 bytes in total`)
+    const promptValue = ownDataValue(entry, 'prompt')
+    const agentPresetValue = ownDataValue(entry, 'agentPreset')
+    if ((promptValue === undefined) === (agentPresetValue === undefined)) {
+      throw new TypeError(`dsh-omo: userAgents[${name}] must define exactly one of prompt or agentPreset`)
+    }
+    let definition
+    if (promptValue !== undefined) {
+      const { prompt, rawBytes } = normalizePrompt(promptValue, name)
+      totalRawPromptBytes += rawBytes
+      if (totalRawPromptBytes > MAX_TOTAL_USER_AGENT_PROMPT_BYTES) {
+        throw new TypeError(`dsh-omo: userAgents prompts may not exceed ${MAX_TOTAL_USER_AGENT_PROMPT_BYTES} UTF-8 bytes in total`)
+      }
+      definition = { prompt }
+    } else {
+      definition = { agentPreset: normalizeAgentPreset(agentPresetValue, name) }
     }
     agents.set(name, Object.freeze({
       name,
       ...(description !== undefined ? { description } : {}),
-      prompt,
+      ...definition,
       mode: 'subagent',
     }))
   }

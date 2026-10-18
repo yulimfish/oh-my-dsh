@@ -131,7 +131,8 @@ export const Config = z.object({
   userAgents: z.array(z.object({
     name: z.string().required(),
     description: z.string(),
-    prompt: z.string().required(),
+    prompt: z.string(),
+    agentPreset: z.string(),
     mode: z.string(),
   })).default([]),
   categoryRoutes: z.array(z.object({
@@ -850,7 +851,7 @@ function roleLabels(activeRoleNames, userAgents) {
 }
 
 function requireUserAgentPersona(ctx, userAgent, providerName, knownProvider) {
-  if (!userAgent) return undefined
+  if (!userAgent?.prompt) return undefined
   if (typeof ctx.subagents.startActivation === 'function') {
     throw new Error(`User-defined agent "${userAgent.name}" requires subagent provider "${providerName}" to support persona; current DSH subagents.startActivation has no per-request persona field.`)
   }
@@ -861,6 +862,17 @@ function requireUserAgentPersona(ctx, userAgent, providerName, knownProvider) {
     throw new Error(`User-defined agent "${userAgent.name}" requires subagent provider "${providerName}" to support persona.`)
   }
   return userAgent.prompt
+}
+
+function requireUserAgentPreset(ctx, userAgent, providerName, knownProvider) {
+  if (!userAgent?.agentPreset) return undefined
+  const provider = knownProvider ?? (typeof ctx.subagents.getProvider === 'function'
+    ? ctx.subagents.getProvider(providerName)
+    : undefined)
+  if (provider?.capabilities?.agentPreset !== true) {
+    throw new Error(`User-defined agent "${userAgent.name}" requires subagent provider "${providerName}" to support agentPreset.`)
+  }
+  return userAgent.agentPreset
 }
 
 function requireProjectAgentPersona(ctx, providerName) {
@@ -1075,6 +1087,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, act
           if (!provider || typeof provider !== 'object') {
             throw new Error(`DSH subagent provider "${providerName}" is not registered.`)
           }
+          const agentPreset = requireUserAgentPreset(ctx, userAgent, providerName, provider)
           if (provider.capabilities?.depthLimit !== true) {
             throw new Error(`DSH subagent provider "${providerName}" does not support the configured maxDepth.`)
           }
@@ -1088,6 +1101,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, act
               parent: exec.agent,
               prompt,
               maxDepth: config.maxDepth,
+              ...(agentPreset !== undefined ? { agentPreset } : {}),
               ...(agentOptions ? { agentOptions } : {}),
             },
             signal: exec.signal,
@@ -1101,12 +1115,14 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, act
           }
           run = { id: activation.childId, result: activation.result, dispose: onceAsync(() => activation.dispose()) }
         } else {
+          const agentPreset = requireUserAgentPreset(ctx, userAgent, providerName)
           const legacyRun = await ctx.subagents.start(providerName, {
             label,
             parent: exec.agent,
             prompt,
             signal: exec.signal,
             ...(persona !== undefined ? { persona } : {}),
+            ...(agentPreset !== undefined ? { agentPreset } : {}),
             ...(agentOptions ? { agentOptions } : {}),
             ...(toolFilter ? { toolFilter } : {}),
             maxDepth: config.maxDepth,
@@ -1205,6 +1221,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, user
         throw new Error(`DSH subagent provider "${providerName}" does not support continuable tasks; use one-shot mode or choose a capable provider.`)
       }
       const persona = requireUserAgentPersona(ctx, userAgent, providerName, provider)
+      const agentPreset = requireUserAgentPreset(ctx, userAgent, providerName, provider)
       const selectedRoute = await resolveSelectedFallbackRoute(ctx, route, roleRoute, exec.signal)
       const agentOptions = agentOptionsForRoute(selectedRoute, { includeMaxTokens: false })
       const toolFilter = toolFilterForRoute(selectedRoute)
@@ -1224,6 +1241,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, user
             exec,
           }),
           ...(persona !== undefined ? { persona } : {}),
+          ...(agentPreset !== undefined ? { agentPreset } : {}),
           ...(agentOptions ? { agentOptions } : {}),
           ...(toolFilter ? { toolFilter } : {}),
           maxDepth: config.maxDepth,
@@ -1681,6 +1699,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
 
 export function apply(ctx, rawConfig) {
   const config = rawConfig
+  const userAgents = normalizeUserAgents(config.userAgents ?? [])
   const usesStartActivation = typeof ctx.subagents?.startActivation === 'function'
   if (!usesStartActivation && typeof ctx.subagents?.start !== 'function') {
     throw new Error('dsh-omo task tools require DSH subagents.startActivation or the legacy subagents.start method')
@@ -1688,8 +1707,8 @@ export function apply(ctx, rawConfig) {
   if (usesStartActivation && typeof ctx.subagents.getProvider !== 'function') {
     throw new Error('dsh-omo current-API task tools require DSH subagents.getProvider for capability checks')
   }
-  if (usesStartActivation && (config.userAgents?.length ?? 0) > 0) {
-    throw new Error('dsh-omo userAgents require per-request persona, which the current DSH subagents.startActivation contract does not expose')
+  if (usesStartActivation && [...userAgents.values()].some(agent => agent.prompt !== undefined)) {
+    throw new Error('dsh-omo userAgents with prompt personas require a per-request persona, which the current DSH subagents.startActivation contract does not expose; use a trusted registered agentPreset instead')
   }
   if (usesStartActivation && config.enableProjectAgentFiles) {
     throw new Error('dsh-omo project agent files require per-request persona, which the current DSH subagents.startActivation contract does not expose')
@@ -1994,7 +2013,6 @@ export function apply(ctx, rawConfig) {
   assertPositiveInteger('maxResultChars', config.maxResultChars)
   const providerName = normalizeProvider(config.provider)
   const categoryRoutes = normalizeCategoryRoutes(config.categoryRoutes ?? [])
-  const userAgents = normalizeUserAgents(config.userAgents ?? [])
   const roleNames = [...ROLE_NAMES, ...userAgents.keys()]
   const disabledOmoRoles = normalizeDisabledOmoRoles(config.disabledOmoRoles ?? [], roleNames)
   const activeRoleNames = roleNames.filter(role => !disabledOmoRoles.has(role))

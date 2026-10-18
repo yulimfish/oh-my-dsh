@@ -44,7 +44,7 @@ function makeContext(options = {}) {
           dispose: async () => { disposals.push(id) },
         }
       },
-      getProvider: options.getProvider ?? (provider => provider === 'spawn' ? { name: 'spawn', capabilities: { persona: true, agentOptions: true, toolFilter: true }, prepareContinuable: async () => ({}) } : undefined),
+      getProvider: options.getProvider ?? (provider => provider === 'spawn' ? { name: 'spawn', capabilities: { persona: true, agentPreset: true, agentOptions: true, toolFilter: true }, prepareContinuable: async () => ({}) } : undefined),
       startContinuable: async spec => {
         continuableStarts.push(spec)
         return { childId: `continuable-child-${continuableStarts.length}`, messageId: `accepted-${continuableStarts.length}` }
@@ -251,6 +251,9 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableBashFileReadGuidance: true }).enableBashFileReadGuidance, true)
   assert.deepEqual(Config({ userAgents: [{ name: 'docs-auditor', description: 'Review docs.', prompt: 'Check for gaps.', mode: 'subagent' }] }).userAgents, [
     { name: 'docs-auditor', description: 'Review docs.', prompt: 'Check for gaps.', mode: 'subagent' },
+  ])
+  assert.deepEqual(Config({ userAgents: [{ name: 'preset-auditor', agentPreset: 'trusted-reviewer-v2' }] }).userAgents, [
+    { name: 'preset-auditor', agentPreset: 'trusted-reviewer-v2' },
   ])
   assert.equal(Config({}).enabledProjectSkills, undefined)
   assert.equal(Config({ enabledProjectSkills: null }).enabledProjectSkills, null)
@@ -2659,6 +2662,70 @@ test('uses the current Host startActivation request and preserves the caller-own
   assert.deepEqual(fixture.disposals, ['child-current-activation'])
 })
 
+test('passes registered custom agent presets only as request.agentPreset on current Host activations', async () => {
+  const activationSpecs = []
+  const fixture = makeContext({
+    getProvider: () => ({
+      name: 'spawn',
+      capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true },
+    }),
+  })
+  fixture.ctx.subagents.startActivation = async spec => {
+    activationSpecs.push(spec)
+    return {
+      childId: 'child-preset-activation',
+      result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'Preset result.' }] }),
+      dispose: async () => {},
+    }
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    userAgents: [{ name: 'preset-auditor', description: 'Use the selected trusted preset.', agentPreset: 'trusted-reviewer-v2' }],
+  })
+
+  const parent = { id: 'parent-preset-activation', followup: () => {} }
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'preset-auditor', task: 'Review this change.' },
+    { agent: parent, signal: new AbortController().signal },
+  )
+
+  assert.equal(activationSpecs.length, 1)
+  const spec = activationSpecs[0]
+  assert.equal(spec.provider, 'spawn')
+  assert.equal(Object.hasOwn(spec, 'agentPreset'), false)
+  assert.equal(spec.request.agentPreset, 'trusted-reviewer-v2')
+  assert.deepEqual(Object.keys(spec.request).sort(), ['agentPreset', 'maxDepth', 'parent', 'prompt'])
+  assert.equal(Object.hasOwn(spec.request, 'persona'), false)
+  assert.equal(Object.hasOwn(spec.request, 'toolFilter'), false)
+  assert.ok(spec.request.prompt[0].text.includes('Use the selected trusted preset.'))
+  assert.ok(spec.request.prompt[0].text.includes('Review this change.'))
+})
+
+test('rejects a registered custom preset before activation when the provider lacks capability', async () => {
+  let activationCalls = 0
+  const fixture = makeContext({
+    getProvider: () => ({
+      name: 'spawn',
+      capabilities: { agentOptions: true, agentPreset: false, outputSchema: true, depthLimit: true },
+    }),
+  })
+  fixture.ctx.subagents.startActivation = async () => { activationCalls += 1 }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    userAgents: [{ name: 'preset-auditor', agentPreset: 'trusted-reviewer-v2' }],
+  })
+
+  await assert.rejects(
+    fixture.tools.get('dsh_omo_task').execute(
+      { role: 'preset-auditor', task: 'Review this change.' },
+      { agent: { id: 'parent-preset-capability' }, signal: new AbortController().signal },
+    ),
+    /requires subagent provider "spawn" to support agentPreset/u,
+  )
+  assert.equal(activationCalls, 0)
+  assert.equal(fixture.starts.length, 0)
+})
+
 test('leaves configured prompt-file references literal and performs no reads by default', async () => {
   const reads = []
   const fsFixture = makeProjectAgentFs({ onRead: filePath => reads.push(filePath) })
@@ -2866,9 +2933,16 @@ test('rejects current-API persona and continuable configurations before registra
 
   assert.throws(
     () => apply(current.ctx, { ...baseConfig, userAgents: [{ name: 'custom-reviewer', prompt: 'Review carefully.' }] }),
-    /userAgents require per-request persona/u,
+    /userAgents with prompt personas require a per-request persona/u,
   )
   assert.equal(current.tools.size, 0)
+
+  const currentPreset = makeContext({
+    getProvider: () => ({ capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true } }),
+  })
+  currentPreset.ctx.subagents.startActivation = async () => ({})
+  apply(currentPreset.ctx, { ...baseConfig, userAgents: [{ name: 'custom-preset', agentPreset: 'trusted-reviewer-v2' }] })
+  assert.deepEqual(currentPreset.tools.get('dsh_omo_task').parameters.properties.role.enum.slice(-1), ['custom-preset'])
 
   assert.throws(
     () => apply(current.ctx, { ...baseConfig, enableProjectAgentFiles: true }),
@@ -3114,6 +3188,50 @@ test('dispatches config-defined user agents through provider persona and existin
     disabledOmoRoles: ROLE_NAMES,
   })
   assert.deepEqual(onlyUserAgent.tools.get('dsh_omo_task').parameters.properties.role.enum, ['docs-auditor'])
+})
+
+test('passes registered user-agent presets through legacy one-shot and continuable requests', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    userAgents: [{ name: 'preset-auditor', agentPreset: 'trusted-reviewer-v2' }],
+  })
+  const parent = { id: 'parent-legacy-preset', followup() {} }
+  const signal = new AbortController().signal
+
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'preset-auditor', task: 'Run the one-shot task.' }, { agent: parent, signal },
+  )
+  await fixture.tools.get('dsh_omo_task_continuable').execute(
+    { role: 'preset-auditor', task: 'Run the durable task.' }, { agent: parent, signal },
+  )
+
+  assert.equal(fixture.starts[0].request.agentPreset, 'trusted-reviewer-v2')
+  assert.equal(fixture.starts[0].request.persona, undefined)
+  assert.equal(fixture.continuableStarts[0].request.agentPreset, 'trusted-reviewer-v2')
+  assert.equal(fixture.continuableStarts[0].request.persona, undefined)
+})
+
+test('fails closed when a legacy provider lacks the registered agentPreset capability', async () => {
+  const fixture = makeContext({
+    getProvider: provider => provider === 'spawn'
+      ? { name: 'spawn', capabilities: { agentPreset: false } }
+      : undefined,
+  })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    userAgents: [{ name: 'preset-auditor', agentPreset: 'trusted-reviewer-v2' }],
+  })
+
+  await assert.rejects(
+    fixture.tools.get('dsh_omo_task').execute(
+      { role: 'preset-auditor', task: 'Review this patch.' },
+      { agent: { id: 'parent-legacy-preset-capability' }, signal: new AbortController().signal },
+    ),
+    /requires subagent provider "spawn" to support agentPreset/u,
+  )
+  assert.equal(fixture.starts.length, 0)
 })
 
 test('fails closed when a configured user-agent persona is unsupported by its provider', async () => {
