@@ -144,14 +144,14 @@ export async function currentWorkspaceFilter(sessionQuery, agent, signal) {
       throw new TypeError('DSH returned an invalid session observation')
     }
     const cwd = observation.header.cwd
-    if (cwd !== undefined && cwd !== null
-      && (typeof cwd !== 'string' || cwd.length > MAX_CWD_CHARS || /[\u0000-\u001f\u007f-\u009f]/u.test(cwd))) {
+    if (typeof cwd !== 'string' || cwd.trim().length === 0
+      || cwd.length > MAX_CWD_CHARS || /[\u0000-\u001f\u007f-\u009f]/u.test(cwd)) {
       throw new TypeError('DSH returned an invalid current workspace path')
     }
-    filter = [{ kind: 'cwd', values: [cwd ?? null] }]
+    filter = [{ kind: 'cwd', values: [cwd] }]
   } catch {
     if (signal?.aborted) throw new Error('session workspace lookup was cancelled.')
-    throw new Error('Could not determine the current session workspace; no query was run.')
+    throw new Error('Could not determine the current session workspace: no workspace cwd or valid observation; no scoped request was run.')
   } finally {
     try {
       if (disposeObservation) disposeObservation.call(observation)

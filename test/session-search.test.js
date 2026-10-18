@@ -25,7 +25,7 @@ function makeSessionQuery(options = {}) {
     observeSession: async (sessionId, request) => {
       observations.push({ sessionId, request })
       return {
-        header: { id: sessionId, cwd: options.cwd === undefined ? '/workspace/project' : options.cwd },
+        header: { id: sessionId, cwd: Object.hasOwn(options, 'cwd') ? options.cwd : '/workspace/project' },
         [Symbol.dispose]() { observations.at(-1).disposed = true },
       }
     },
@@ -93,6 +93,17 @@ test('defaults to current-workspace filtering and fails closed without the curre
 
   await assert.rejects(tool.execute({ query: 'migration' }), /current Agent/u)
   assert.equal(fixture.searches.length, 1, 'missing Agent scope does not broaden to all projects')
+})
+
+test('fails closed for missing or blank current-session cwd before any search call', async () => {
+  for (const cwd of [undefined, null, '', '   ']) {
+    const fixture = makeSessionQuery({ cwd })
+    const tool = createSessionSearchTool(fixture.sessionQuery)
+    await assert.rejects(tool.execute({ query: 'migration' }, { agent: { id: 'current-agent' } }), /no workspace cwd or valid observation; no scoped request was run/u)
+    assert.equal(fixture.observations.length, 1, 'the current session observation supplies its optional header cwd')
+    assert.equal(fixture.observations[0].disposed, true, `observation lease is released for ${JSON.stringify(cwd)}`)
+    assert.deepEqual(fixture.searches, [], `no search request is made for ${JSON.stringify(cwd)}`)
+  }
 })
 
 test('uses the RC2 Disposable symbol and releases an invalid observation lease', async () => {

@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createSessionReadTool, registerSessionReadTool } from '../src/session-read.js'
 
-function sessionHeader(id, cwd = '/workspace/project') {
-  return { version: 4, id, createdAt: 1_710_000_000_000, cwd, isSeeded: false }
+function sessionHeader(id, cwd) {
+  return { version: 4, id, createdAt: 1_710_000_000_000, cwd: arguments.length < 2 ? '/workspace/project' : cwd, isSeeded: false }
 }
 
 function userEvent(seq, text, extraContent = [], source = { kind: 'user' }) {
@@ -49,7 +49,7 @@ function makeSessionQuery(options = {}) {
     observeSession: async (sessionId, request) => {
       calls.observations.push({ sessionId, request })
       return {
-        header: sessionHeader(sessionId, options.cwd === undefined ? '/workspace/project' : options.cwd),
+        header: sessionHeader(sessionId, Object.hasOwn(options, 'cwd') ? options.cwd : '/workspace/project'),
         [Symbol.dispose]() { calls.observations.at(-1).disposed = true }
       }
     },
@@ -139,7 +139,7 @@ test('defaults to current workspace, forwards exact request and cancellation, an
 })
 
 test('global access is explicit and bypasses local workspace metadata only when requested', async () => {
-  const fixture = makeSessionQuery()
+  const fixture = makeSessionQuery({ cwd: undefined })
   const tool = createSessionReadTool(fixture.sessionQuery)
   const result = await tool.execute({ ...baseArgs, includeOtherProjects: true })
   assert.equal(result.scope, 'all-projects')
@@ -168,6 +168,19 @@ test('rejects invalid inputs before service calls and fails closed without the c
   assert.deepEqual(fixture.calls.observations, [])
   assert.deepEqual(fixture.calls.filters, [])
   assert.deepEqual(fixture.calls.reads, [])
+})
+
+test('fails closed for missing or blank current-session cwd before filtering or reading', async () => {
+  for (const cwd of [undefined, null, '', '   ']) {
+    const fixture = makeSessionQuery({ cwd })
+    const tool = createSessionReadTool(fixture.sessionQuery)
+    await assert.rejects(tool.execute(baseArgs, { agent: { id: 'current-agent' } }), /no workspace cwd or valid observation; no scoped request was run/u)
+    assert.equal(fixture.calls.observations.length, 1, 'the current session observation supplies its optional header cwd')
+    assert.equal(fixture.calls.observations[0].disposed, true, `observation lease is released for ${JSON.stringify(cwd)}`)
+    assert.deepEqual(fixture.calls.filters, [], `no workspace filter query is made for ${JSON.stringify(cwd)}`)
+    assert.deepEqual(fixture.calls.reads, [], `no event read is made for ${JSON.stringify(cwd)}`)
+    assert.equal(fixture.calls.fullReads, 0)
+  }
 })
 
 test('does not read a session outside the current workspace', async () => {
