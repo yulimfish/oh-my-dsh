@@ -24,6 +24,9 @@ const CONTROL_OR_BIDI = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\p{
 const CONTROL_OR_BIDI_GLOBAL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\p{Bidi_Control}]/gu
 const ABORTED = Symbol('directory context injection cancelled')
 const DEDUPED = Symbol('directory context already injected')
+const DIRECTORY_COMMITTED = Symbol('directory context committed')
+const DIRECTORY_RELEASED = Symbol('directory context reservation released')
+const MAX_PENDING_DIRECTORY_RETRIES = 1
 
 function isObject(value) {
   return value !== null && typeof value === 'object'
@@ -200,6 +203,35 @@ function isContained(fs, rootTarget, target) {
   }
 }
 
+function createDirectoryReservation(directoryKey) {
+  let resolveSettled
+  let settled = false
+  return {
+    directoryKey,
+    settled: new Promise(resolve => { resolveSettled = resolve }),
+    settle(result) {
+      if (settled) return
+      settled = true
+      resolveSettled(result)
+    },
+  }
+}
+
+function releaseDirectoryReservation(state, reservation) {
+  if (state.directories.get(reservation.directoryKey) === reservation) {
+    state.directories.delete(reservation.directoryKey)
+  }
+  reservation.settle(DIRECTORY_RELEASED)
+}
+
+function resetDirectoryReservations(state) {
+  // Clear/compact invalidates pending work and must wake waiters before dropping the map.
+  for (const reservation of state.directories.values()) {
+    if (reservation !== DEDUPED) reservation.settle(DIRECTORY_RELEASED)
+  }
+  state.directories.clear()
+}
+
 async function statTarget(fs, target, signal) {
   return awaitWithSignal(() => fs.stat(target, signal), signal)
 }
@@ -208,7 +240,10 @@ async function resolveTarget(fs, relativePath, cwd, signal) {
   return awaitWithSignal(() => fs.resolve(relativePath, { cwd, signal }), signal)
 }
 
-async function readDirectoryContextFile(fs, cwd, rootTarget, readTargetKey, directory, state, signal, aggregateBytes, contextFile) {
+async function readDirectoryContextFile(
+  fs, cwd, rootTarget, readTargetKey, directory, state, generation, signal, aggregateBytes, contextFile,
+  retriesRemaining = MAX_PENDING_DIRECTORY_RETRIES,
+) {
   assertNotAborted(signal)
   let directoryTarget
   try {
@@ -219,23 +254,37 @@ async function readDirectoryContextFile(fs, cwd, rootTarget, readTargetKey, dire
     if (!directoryKey || !isContained(fs, rootTarget, directoryTarget)) return undefined
     const directoryInfo = directory.relative === '' ? { type: 'directory' } : await statTarget(fs, directoryTarget, signal)
     assertNotAborted(signal)
-    if (directoryInfo?.type !== 'directory') return undefined
-    if (state.directories.has(directoryKey)) return undefined
+    if (directoryInfo?.type !== 'directory' || state.generation !== generation) return undefined
+
+    const existing = state.directories.get(directoryKey)
+    if (existing === DEDUPED) return undefined
+    if (existing) {
+      // This call's linked signal bounds waiting; release permits one retry, commit dedupes.
+      const settled = await awaitWithSignal(() => existing.settled, signal)
+      assertNotAborted(signal)
+      if (state.generation !== generation || state.directories.get(directoryKey) === DEDUPED
+        || settled === DIRECTORY_COMMITTED) return undefined
+      if (settled !== DIRECTORY_RELEASED || retriesRemaining <= 0) return undefined
+      return readDirectoryContextFile(
+        fs, cwd, rootTarget, readTargetKey, directory, state, generation, signal,
+        aggregateBytes, contextFile, retriesRemaining - 1,
+      )
+    }
+
     while (state.directories.size >= MAX_DEDUPED_DIRECTORIES_PER_AGENT) {
       const oldestDeduped = [...state.directories].find(([, value]) => value === DEDUPED)
       if (!oldestDeduped) return undefined
       state.directories.delete(oldestDeduped[0])
     }
 
-    const token = Symbol('pending directory context')
-    state.directories.set(directoryKey, token)
-    const reservation = { directoryKey, token }
+    const reservation = createDirectoryReservation(directoryKey)
+    state.directories.set(directoryKey, reservation)
     try {
       const contextPath = directory.relative ? `${directory.relative}/${contextFile.fileName}` : contextFile.fileName
       const pathInfo = await awaitWithSignal(() => fs.lstat(contextPath, { cwd }, signal), signal)
       assertNotAborted(signal)
       if (pathInfo?.type !== 'file') {
-        if (state.directories.get(directoryKey) === token) state.directories.delete(directoryKey)
+        releaseDirectoryReservation(state, reservation)
         return undefined
       }
 
@@ -243,19 +292,19 @@ async function readDirectoryContextFile(fs, cwd, rootTarget, readTargetKey, dire
       assertNotAborted(signal)
       const fileKey = safeTargetKey(fileTarget)
       if (!fileKey || !isContained(fs, rootTarget, fileTarget) || fileKey === readTargetKey) {
-        if (state.directories.get(directoryKey) === token) state.directories.delete(directoryKey)
+        releaseDirectoryReservation(state, reservation)
         return undefined
       }
 
       const fileInfo = await statTarget(fs, fileTarget, signal)
       assertNotAborted(signal)
       if (fileInfo?.type !== 'file' || !validSize(fileInfo.size, MAX_CONTEXT_FILE_BYTES)) {
-        if (state.directories.get(directoryKey) === token) state.directories.delete(directoryKey)
+        releaseDirectoryReservation(state, reservation)
         return undefined
       }
       const remainingBytes = MAX_TOTAL_SOURCE_BYTES - aggregateBytes
       if (remainingBytes <= 0) {
-        if (state.directories.get(directoryKey) === token) state.directories.delete(directoryKey)
+        releaseDirectoryReservation(state, reservation)
         return undefined
       }
       const readLimit = Math.min(MAX_CONTEXT_FILE_BYTES, remainingBytes)
@@ -263,21 +312,21 @@ async function readDirectoryContextFile(fs, cwd, rootTarget, readTargetKey, dire
       assertNotAborted(signal)
       if (!(bytes instanceof Uint8Array) || bytes.byteLength > readLimit
         || (fileInfo.size !== undefined && bytes.byteLength !== fileInfo.size)) {
-        if (state.directories.get(directoryKey) === token) state.directories.delete(directoryKey)
+        releaseDirectoryReservation(state, reservation)
         return undefined
       }
 
       const afterPathInfo = await awaitWithSignal(() => fs.lstat(contextPath, { cwd }, signal), signal)
       assertNotAborted(signal)
       if (afterPathInfo?.type !== 'file') {
-        if (state.directories.get(directoryKey) === token) state.directories.delete(directoryKey)
+        releaseDirectoryReservation(state, reservation)
         return undefined
       }
       const afterTarget = await resolveTarget(fs, contextPath, cwd, signal)
       assertNotAborted(signal)
       const afterKey = safeTargetKey(afterTarget)
       if (!afterKey || afterKey !== fileKey || !isContained(fs, rootTarget, afterTarget)) {
-        if (state.directories.get(directoryKey) === token) state.directories.delete(directoryKey)
+        releaseDirectoryReservation(state, reservation)
         return undefined
       }
       const afterInfo = await statTarget(fs, afterTarget, signal)
@@ -287,7 +336,7 @@ async function readDirectoryContextFile(fs, cwd, rootTarget, readTargetKey, dire
         || (fileInfo.size !== undefined && afterInfo.size !== fileInfo.size)
         || !validSize(afterInfo.size, MAX_CONTEXT_FILE_BYTES)
         || (afterInfo.size !== undefined && bytes.byteLength !== afterInfo.size)) {
-        if (state.directories.get(directoryKey) === token) state.directories.delete(directoryKey)
+        releaseDirectoryReservation(state, reservation)
         return undefined
       }
 
@@ -295,7 +344,7 @@ async function readDirectoryContextFile(fs, cwd, rootTarget, readTargetKey, dire
       try {
         content = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
       } catch {
-        if (state.directories.get(directoryKey) === token) state.directories.delete(directoryKey)
+        releaseDirectoryReservation(state, reservation)
         return undefined
       }
       content = content.replace(CONTROL_OR_BIDI_GLOBAL, '?')
@@ -309,7 +358,7 @@ async function readDirectoryContextFile(fs, cwd, rootTarget, readTargetKey, dire
       })
       return { message, sourceBytes: bytes.byteLength, reservation }
     } catch (error) {
-      if (state.directories.get(directoryKey) === token) state.directories.delete(directoryKey)
+      releaseDirectoryReservation(state, reservation)
       if (signal.aborted) throw ABORTED
       return undefined
     }
@@ -344,7 +393,7 @@ async function collectDirectoryContexts({ fs, cwd, filePath, segments, state, ge
         releaseReservations(state, reservations)
         return { messages: [], reservations: [] }
       }
-      const outcome = await readDirectoryContextFile(fs, cwd, rootTarget, readTargetKey, directory, state, signal, aggregateBytes, contextFile)
+      const outcome = await readDirectoryContextFile(fs, cwd, rootTarget, readTargetKey, directory, state, generation, signal, aggregateBytes, contextFile)
       if (outcome) {
         messages.push(outcome.message)
         reservations.push(outcome.reservation)
@@ -360,14 +409,14 @@ async function collectDirectoryContexts({ fs, cwd, filePath, segments, state, ge
 }
 
 function releaseReservations(state, reservations) {
-  for (const { directoryKey, token } of reservations) {
-    if (state.directories.get(directoryKey) === token) state.directories.delete(directoryKey)
-  }
+  for (const reservation of reservations) releaseDirectoryReservation(state, reservation)
 }
 
 function commitReservations(state, reservations) {
-  for (const { directoryKey, token } of reservations) {
-    if (state.directories.get(directoryKey) === token) state.directories.set(directoryKey, DEDUPED)
+  for (const reservation of reservations) {
+    const ownsReservation = state.directories.get(reservation.directoryKey) === reservation
+    if (ownsReservation) state.directories.set(reservation.directoryKey, DEDUPED)
+    reservation.settle(ownsReservation ? DIRECTORY_COMMITTED : DIRECTORY_RELEASED)
   }
 }
 
@@ -428,7 +477,7 @@ function createDirectoryOnReadContextListener(agents, sessions, fs, options = {}
     const state = states.get(liveAgent)
     if (!state) return
     state.generation++
-    state.directories.clear()
+    resetDirectoryReservations(state)
   }
 
   const listener = async (exec, result, next) => {

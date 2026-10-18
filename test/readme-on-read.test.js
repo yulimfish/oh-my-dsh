@@ -26,12 +26,19 @@ function userContext(text) {
   return createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] })
 }
 
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
 function normalizeRecord(value) {
   if (typeof value === 'string') return { text: value, bytes: encoder.encode(value) }
   return { ...value, bytes: value.bytes instanceof Uint8Array ? value.bytes : encoder.encode(value.text ?? '') }
 }
 
-function makeFileSystem({ cwd = CWD, readmes = {}, outsideRead = false } = {}) {
+function makeFileSystem({ cwd = CWD, readmes = {}, outsideRead = false, onContains } = {}) {
   const calls = []
   const records = new Map(Object.entries(readmes).map(([relative, record]) => [relative, normalizeRecord(record)]))
   const targets = new WeakMap()
@@ -123,6 +130,7 @@ function makeFileSystem({ cwd = CWD, readmes = {}, outsideRead = false } = {}) {
       calls.push({ method: 'contains', parent, child })
       const parentInfo = targets.get(parent)
       const childInfo = targets.get(child)
+      onContains?.({ parentInfo, childInfo })
       if (!parentInfo || !childInfo || parentInfo.kind !== 'directory' || parentInfo.relative !== ''
         || childInfo.cwd !== cwd || childInfo.outside) return false
       if (childInfo.after && childInfo.record?.afterContains !== undefined) return childInfo.record.afterContains === true
@@ -182,7 +190,12 @@ async function makeHarness(options = {}) {
   const agents = ctx.agents
   const sessions = new Map()
   const sessionService = { get: id => sessions.get(id) }
-  const fileSystem = makeFileSystem({ cwd: options.cwd ?? CWD, readmes: options.readmes, outsideRead: options.outsideRead })
+  const fileSystem = makeFileSystem({
+    cwd: options.cwd ?? CWD,
+    readmes: options.readmes,
+    outsideRead: options.outsideRead,
+    onContains: options.onContains,
+  })
   const registerContext = options.contextType === 'agents' ? registerAgentsOnReadContext : registerReadmeOnReadContext
   const listenerOptions = {
     ...(options.skipRoot === undefined ? {} : { skipRoot: options.skipRoot }),
@@ -317,6 +330,93 @@ function readmeTexts(result) {
   return (result.additionalContexts ?? []).map(message => message.content.map(block => block.type === 'text' ? block.text : '').join('\n'))
 }
 
+async function runConcurrentDirectoryContextReads(contextType, firstReadFails) {
+  const firstReadStarted = deferred()
+  const firstReadGate = deferred()
+  const secondReadTargetContained = deferred()
+  const contextFileName = contextType === 'agents' ? 'AGENTS.md' : 'README.md'
+  let readCount = 0
+  let readTargetCount = 0
+  const harness = await makeHarness({
+    contextType,
+    readmes: {
+      [contextFileName]: {
+        text: `# shared ${contextType}`,
+        readBytes() {
+          readCount += 1
+          if (readCount === 1) {
+            firstReadStarted.resolve()
+            return firstReadGate.promise
+          }
+          return encoder.encode(`# shared ${contextType}`)
+        },
+      },
+    },
+    onContains: ({ childInfo }) => {
+      if (childInfo?.kind !== 'read-file') return
+      readTargetCount += 1
+      if (readTargetCount === 2) secondReadTargetContained.resolve()
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const first = harness.executeRead(agent)
+    await firstReadStarted.promise
+    const second = harness.executeRead(agent)
+    await secondReadTargetContained.promise
+    if (firstReadFails) firstReadGate.reject(new Error('transient first context read failure'))
+    else firstReadGate.resolve(encoder.encode(`# shared ${contextType}`))
+    const results = await Promise.all([first, second])
+    const after = await harness.executeRead(agent)
+    return { results, after, readCount }
+  } finally {
+    await harness.dispose()
+  }
+}
+
+async function beginConcurrentPendingDirectoryReads({ contextType = 'readme', secondSignal } = {}) {
+  const firstReadStarted = deferred()
+  const firstReadGate = deferred()
+  const secondReadTargetContained = deferred()
+  const contextFileName = contextType === 'agents' ? 'AGENTS.md' : 'README.md'
+  let readCount = 0
+  let readTargetCount = 0
+  const harness = await makeHarness({
+    contextType,
+    readmes: {
+      [contextFileName]: {
+        text: `# shared ${contextType}`,
+        readBytes() {
+          readCount += 1
+          if (readCount === 1) {
+            firstReadStarted.resolve()
+            return firstReadGate.promise
+          }
+          return encoder.encode(`# shared ${contextType}`)
+        },
+      },
+    },
+    onContains: ({ childInfo }) => {
+      if (childInfo?.kind !== 'read-file') return
+      readTargetCount += 1
+      if (readTargetCount === 2) secondReadTargetContained.resolve()
+    },
+  })
+  const agent = await harness.createAgent()
+  const first = harness.executeRead(agent)
+  await firstReadStarted.promise
+  const second = harness.executeRead(agent, undefined, { signal: secondSignal })
+  await secondReadTargetContained.promise
+  return {
+    harness,
+    agent,
+    first,
+    second,
+    firstReadGate,
+    readCount: () => readCount,
+  }
+}
+
 test('appends root-to-nested README contexts after existing contexts and preserves canonical output through finalizeContent', async () => {
   const harness = await makeHarness({
     readmes: {
@@ -408,6 +508,92 @@ test('injects root-to-nested AGENTS.md contexts after successful reads as untrus
     assert.equal((await harness.executeRead(agent)).additionalContexts.length, 5, 'compact resets per-Agent/directory dedupe')
   } finally {
     await harness.dispose()
+  }
+})
+
+test('a failed pending README/AGENTS read lets one concurrent waiter retry', async () => {
+  for (const contextType of ['readme', 'agents']) {
+    const { results, after, readCount } = await runConcurrentDirectoryContextReads(contextType, true)
+    assert.deepEqual(results.map(result => readmeTexts(result).length), [0, 1], `${contextType}: only the retrying read receives context`)
+    assert.equal(results.every(result => result.isError === false), true)
+    assert.match(readmeTexts(results[1])[0], contextType === 'agents' ? /Project AGENTS\.md/u : /Project README/u)
+    assert.deepEqual(readmeTexts(after), [], `${contextType}: successful retry commits the dedupe entry`)
+    assert.equal(readCount, 2, `${contextType}: failed owner plus one bounded retry`)
+  }
+})
+
+test('a successful pending README/AGENTS read dedupes concurrent results', async () => {
+  for (const contextType of ['readme', 'agents']) {
+    const { results, after, readCount } = await runConcurrentDirectoryContextReads(contextType, false)
+    assert.deepEqual(results.map(result => readmeTexts(result).length), [1, 0], `${contextType}: the owner injects exactly once`)
+    assert.deepEqual(readmeTexts(after), [], `${contextType}: a committed directory remains deduped`)
+    assert.equal(readCount, 1, `${contextType}: followers share the pending outcome instead of rereading`)
+  }
+})
+
+test('a pending directory waiter honors its own cancellation without canceling the owner', async () => {
+  const controller = new AbortController()
+  const pair = await beginConcurrentPendingDirectoryReads({ secondSignal: controller.signal })
+  try {
+    controller.abort()
+    const secondOutcome = await Promise.race([
+      pair.second.then(value => ({ kind: 'result', value }), error => ({ kind: 'error', error })),
+      new Promise(resolve => setImmediate(() => resolve({ kind: 'pending' }))),
+    ])
+    assert.notEqual(secondOutcome.kind, 'pending', 'the waiter settles on its own abort before the owner finishes')
+    if (secondOutcome.kind === 'result') assert.deepEqual(readmeTexts(secondOutcome.value), [])
+
+    pair.firstReadGate.resolve(encoder.encode('# shared readme'))
+    const firstResult = await pair.first
+    assert.equal(readmeTexts(firstResult).length, 1, 'one waiter cancellation does not cancel the shared owner')
+    assert.equal(pair.readCount(), 1, 'canceling a waiter does not start another context read')
+  } finally {
+    pair.firstReadGate.resolve(encoder.encode('# shared readme'))
+    await pair.harness.dispose()
+  }
+})
+
+test('clear and compact wake pending directory waiters and fence stale results', async () => {
+  for (const source of ['clear', 'compact']) {
+    const pair = await beginConcurrentPendingDirectoryReads()
+    try {
+      await pair.harness.reannounce(pair.agent, source)
+      const secondOutcome = await Promise.race([
+        pair.second.then(value => ({ kind: 'result', value }), error => ({ kind: 'error', error })),
+        new Promise(resolve => setImmediate(() => resolve({ kind: 'pending' }))),
+      ])
+      assert.notEqual(secondOutcome.kind, 'pending', `${source} settles old-generation waiters before the owner finishes`)
+      if (secondOutcome.kind === 'result') assert.deepEqual(readmeTexts(secondOutcome.value), [])
+
+      pair.firstReadGate.resolve(encoder.encode('# shared readme'))
+      const firstResult = await pair.first
+      assert.deepEqual(readmeTexts(firstResult), [], `${source} prevents an old pending read from injecting`)
+      const after = await pair.harness.executeRead(pair.agent)
+      assert.equal(readmeTexts(after).length, 1, `${source} permits a fresh-generation context`)
+      assert.equal(pair.readCount(), 2, `${source} discards the stale attempt and reads the fresh generation once`)
+    } finally {
+      pair.firstReadGate.resolve(encoder.encode('# shared readme'))
+      await pair.harness.dispose()
+    }
+  }
+})
+
+test('plugin disposal aborts waiters on a pending directory reservation', async () => {
+  const pair = await beginConcurrentPendingDirectoryReads()
+  try {
+    await pair.harness.disposeFeature()
+    const outcomes = await Promise.race([
+      Promise.all([pair.first, pair.second]).then(results => ({ kind: 'results', results }), error => ({ kind: 'error', error })),
+      new Promise(resolve => setImmediate(() => resolve({ kind: 'pending' }))),
+    ])
+    assert.notEqual(outcomes.kind, 'pending', 'plugin unload settles owner and waiters without waiting for the backend')
+    if (outcomes.kind === 'results') {
+      assert.deepEqual(outcomes.results.map(result => readmeTexts(result).length), [0, 0])
+    }
+    assert.equal(pair.readCount(), 1, 'plugin unload cancels the pending owner without spawning a retry')
+  } finally {
+    pair.firstReadGate.resolve(encoder.encode('# shared readme'))
+    await pair.harness.dispose()
   }
 })
 
