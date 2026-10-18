@@ -279,6 +279,7 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(categoryConfig.categoryRoutes[0].description, 'A short chooser description.')
   assert.deepEqual(categoryConfig.categoryRoutes[0].tools, { read: false, bash: true })
   assert.deepEqual(Config({ roleRoutes: [{ role: 'reviewer', denyTools: ['bash'] }] }).roleRoutes[0].denyTools, ['bash'])
+  assert.equal(Config({ roleRoutes: [{ role: 'reviewer', agentPreset: 'trusted-reviewer-v2' }] }).roleRoutes[0].agentPreset, 'trusted-reviewer-v2')
   assert.deepEqual(Config({ roleRoutes: [{
     role: 'reviewer', provider: 'primary', model: 'primary-model',
     fallbackModels: [{ provider: 'backup', model: 'backup-model', reasoningEffort: 'low', maxTokens: 2048 }],
@@ -2811,6 +2812,149 @@ test('rejects a registered custom preset before activation when the provider lac
   )
   assert.equal(activationCalls, 0)
   assert.equal(fixture.starts.length, 0)
+})
+
+test('passes built-in role-route presets through the current request without changing Tool schema', async () => {
+  const baseline = makeContext()
+  apply(baseline.ctx, baseConfig)
+  const activationSpecs = []
+  const fixture = makeContext({
+    getProvider: () => ({
+      name: 'spawn',
+      capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true },
+    }),
+  })
+  fixture.ctx.subagents.startActivation = async spec => {
+    activationSpecs.push(spec)
+    return {
+      childId: 'child-role-route-preset',
+      result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'Preset specialist result.' }] }),
+      dispose: async () => {},
+    }
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'reviewer', agentPreset: ' trusted-reviewer-v2 ' }],
+  })
+
+  const baselineTool = baseline.tools.get('dsh_omo_task')
+  const routedTool = fixture.tools.get('dsh_omo_task')
+  assert.equal(routedTool.name, baselineTool.name)
+  assert.equal(routedTool.description, baselineTool.description)
+  assert.deepEqual(routedTool.parameters, baselineTool.parameters)
+  assert.deepEqual(routedTool.output.schema, baselineTool.output.schema)
+
+  await routedTool.execute(
+    { role: 'reviewer', task: 'Review this change.' },
+    { agent: { id: 'parent-role-route-preset', followup() {} }, signal: new AbortController().signal },
+  )
+
+  assert.equal(activationSpecs.length, 1)
+  const spec = activationSpecs[0]
+  assert.equal(spec.provider, 'spawn')
+  assert.equal(Object.hasOwn(spec, 'agentPreset'), false)
+  assert.equal(spec.request.agentPreset, 'trusted-reviewer-v2')
+  assert.deepEqual(Object.keys(spec.request).sort(), ['agentPreset', 'maxDepth', 'parent', 'prompt'])
+  assert.equal(Object.hasOwn(spec.request, 'persona'), false)
+  assert.equal(Object.hasOwn(spec.request, 'toolFilter'), false)
+})
+
+test('rejects built-in role-route presets before activation when the provider lacks capability', async () => {
+  let activationCalls = 0
+  const fixture = makeContext({
+    getProvider: () => ({
+      name: 'spawn',
+      capabilities: { agentOptions: true, agentPreset: false, outputSchema: true, depthLimit: true },
+    }),
+  })
+  fixture.ctx.subagents.startActivation = async () => { activationCalls += 1 }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'reviewer', agentPreset: 'trusted-reviewer-v2' }],
+  })
+
+  await assert.rejects(
+    fixture.tools.get('dsh_omo_task').execute(
+      { role: 'reviewer', task: 'Review this change.' },
+      { agent: { id: 'parent-role-preset-capability' }, signal: new AbortController().signal },
+    ),
+    /Built-in role route "reviewer" requires subagent provider "spawn" to support agentPreset/u,
+  )
+  assert.equal(activationCalls, 0)
+  assert.equal(fixture.starts.length, 0)
+})
+
+test('rejects built-in role-route presets before legacy start when provider capability is absent', async () => {
+  const fixture = makeContext({
+    getProvider: () => ({
+      name: 'spawn',
+      capabilities: { agentOptions: true, agentPreset: false, persona: true, toolFilter: true, depthLimit: true },
+    }),
+  })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'reviewer', agentPreset: 'trusted-reviewer-v2' }],
+  })
+
+  await assert.rejects(
+    fixture.tools.get('dsh_omo_task').execute(
+      { role: 'reviewer', task: 'Review this change.' },
+      { agent: { id: 'parent-legacy-role-preset-capability' }, signal: new AbortController().signal },
+    ),
+    /Built-in role route "reviewer" requires subagent provider "spawn" to support agentPreset/u,
+  )
+  assert.equal(fixture.starts.length, 0)
+})
+
+test('passes built-in role-route presets to legacy one-shot and continuable requests', async () => {
+  const legacy = makeContext()
+  apply(legacy.ctx, {
+    ...baseConfig,
+    roleRoutes: [{ role: 'reviewer', agentPreset: 'trusted-reviewer-v2' }],
+  })
+  await legacy.tools.get('dsh_omo_task').execute(
+    { role: 'reviewer', task: 'Review this change.' },
+    { agent: { id: 'parent-legacy-role-preset', followup() {} }, signal: new AbortController().signal },
+  )
+  assert.equal(legacy.starts[0].request.agentPreset, 'trusted-reviewer-v2')
+  assert.equal(Object.hasOwn(legacy.starts[0].request, 'persona'), false)
+
+  const continuable = makeContext()
+  apply(continuable.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    roleRoutes: [{ role: 'reviewer', agentPreset: 'trusted-reviewer-v2' }],
+  })
+  await continuable.tools.get('dsh_omo_task_continuable').execute(
+    { role: 'reviewer', task: 'Continue review as a durable child.' },
+    { agent: { id: 'parent-continuable-role-preset' }, signal: new AbortController().signal },
+  )
+  assert.equal(continuable.continuableStarts[0].request.agentPreset, 'trusted-reviewer-v2')
+  assert.equal(Object.hasOwn(continuable.continuableStarts[0].request, 'persona'), false)
+})
+
+test('bounds role-route preset references and restricts them to built-in roles', () => {
+  for (const agentPreset of ['', ' '.repeat(257), 'x'.repeat(257), ' ' + 'x'.repeat(256) + ' ', 'é'.repeat(129), `bad${String.fromCodePoint(0)}id`, `bad${String.fromCodePoint(0x202e)}id`]) {
+    const fixture = makeContext()
+    assert.throws(() => apply(fixture.ctx, {
+      ...baseConfig,
+      roleRoutes: [{ role: 'reviewer', agentPreset }],
+    }), /roleRoutes\[reviewer\]\.agentPreset/u)
+    assert.equal(fixture.tools.size, 0)
+  }
+
+  const customRole = makeContext()
+  assert.throws(() => apply(customRole.ctx, {
+    ...baseConfig,
+    userAgents: [{ name: 'custom-reviewer', prompt: 'Review carefully.' }],
+    roleRoutes: [{ role: 'custom-reviewer', agentPreset: 'trusted-reviewer-v2' }],
+  }), /agentPreset is supported only for built-in specialist roles/u)
+  assert.equal(customRole.tools.size, 0)
+
+  const exactUtf8Bound = 'é'.repeat(128)
+  const accepted = makeContext()
+  apply(accepted.ctx, { ...baseConfig, roleRoutes: [{ role: 'reviewer', agentPreset: exactUtf8Bound }] })
+  assert.equal(accepted.tools.has('dsh_omo_task'), true)
 })
 
 test('leaves configured prompt-file references literal and performs no reads by default', async () => {

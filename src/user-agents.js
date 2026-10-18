@@ -65,8 +65,7 @@ function normalizePrompt(value, name) {
   return { prompt, rawBytes }
 }
 
-function normalizeAgentPreset(value, name) {
-  const label = `userAgents[${name}].agentPreset`
+export function normalizeAgentPreset(value, label = 'agentPreset') {
   if (typeof value !== 'string' || value.length > MAX_USER_AGENT_PRESET_BYTES
     || encoder.encode(value).byteLength > MAX_USER_AGENT_PRESET_BYTES) {
     throw new TypeError(`${label} must be a non-empty registered preset reference of at most ${MAX_USER_AGENT_PRESET_BYTES} UTF-8 bytes`)
@@ -129,7 +128,7 @@ export function normalizeUserAgents(value = []) {
       }
       definition = { prompt }
     } else {
-      definition = { agentPreset: normalizeAgentPreset(agentPresetValue, name) }
+      definition = { agentPreset: normalizeAgentPreset(agentPresetValue, `userAgents[${name}].agentPreset`) }
     }
     agents.set(name, Object.freeze({
       name,

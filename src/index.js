@@ -28,7 +28,7 @@ import { normalizeCategoryRoutes, normalizeExplicitFallbackModels, resolveCatego
 import { normalizeRuntimeFallback, registerRuntimeFallback } from './runtime-fallback.js'
 import { buildRefactorDirective, parseRefactorInput, REFACTOR_COMMAND_HINT } from './refactor-command.js'
 import { buildUlwExecuteDirective, parseUlwExecuteInput, ULW_EXECUTE_COMMAND_HINT } from './ulw-execute-command.js'
-import { normalizeUserAgents } from './user-agents.js'
+import { normalizeAgentPreset, normalizeUserAgents } from './user-agents.js'
 import { registerWriteExistingFileGuard } from './write-existing-file-guard.js'
 import { registerNotepadWriteGuard } from './notepad-write-guard.js'
 import { createEditErrorRecoveryListener } from './edit-error-recovery.js'
@@ -157,6 +157,7 @@ export const Config = z.object({
   roleRoutes: z.array(z.object({
     role: z.string().required(),
     category: z.string(),
+    agentPreset: z.string(),
     provider: z.string(),
     model: z.string(),
     reasoningEffort: z.string(),
@@ -432,6 +433,12 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
       throw new Error(`dsh-omo: role route "${entry.role}" references a disabled specialist role`)
     }
     if (result.has(entry.role)) throw new Error(`dsh-omo: duplicate role route "${entry.role}"`)
+    if (entry.agentPreset !== undefined && !ROLE_NAMES.includes(entry.role)) {
+      throw new Error(`dsh-omo: role route "${entry.role}" agentPreset is supported only for built-in specialist roles`)
+    }
+    const agentPreset = entry.agentPreset === undefined
+      ? undefined
+      : normalizeAgentPreset(entry.agentPreset, `roleRoutes[${entry.role}].agentPreset`)
     const category = entry.category === undefined ? undefined : typeof entry.category === 'string' ? entry.category.trim() : ''
     if (entry.category !== undefined && !category) {
       throw new Error(`dsh-omo: role route "${entry.role}" category must not be blank`)
@@ -474,11 +481,13 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     const denyTools = normalizeToolNames(entry.denyTools, entry.role, 'denyTools')
     const promptAppend = normalizeRolePromptAppend(entry.promptAppend, entry.role)
     const routeEntry = { ...entry }
+    delete routeEntry.agentPreset
     delete routeEntry.promptAppend
     delete routeEntry.fallbackModels
     result.set(entry.role, Object.freeze({
       ...routeEntry,
       ...(category !== undefined ? { category } : {}),
+      ...(agentPreset !== undefined ? { agentPreset } : {}),
       ...(provider ? { provider, model } : {}),
       ...(fallbackModels !== undefined ? { fallbackModels } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
@@ -866,15 +875,25 @@ function requireUserAgentPersona(ctx, userAgent, providerName, knownProvider) {
   return userAgent.prompt
 }
 
-function requireUserAgentPreset(ctx, userAgent, providerName, knownProvider) {
-  if (!userAgent?.agentPreset) return undefined
+function requireAgentPreset(ctx, agentPreset, owner, providerName, knownProvider) {
+  if (!agentPreset) return undefined
   const provider = knownProvider ?? (typeof ctx.subagents.getProvider === 'function'
     ? ctx.subagents.getProvider(providerName)
     : undefined)
   if (provider?.capabilities?.agentPreset !== true) {
-    throw new Error(`User-defined agent "${userAgent.name}" requires subagent provider "${providerName}" to support agentPreset.`)
+    throw new Error(`${owner} requires subagent provider "${providerName}" to support agentPreset.`)
   }
-  return userAgent.agentPreset
+  return agentPreset
+}
+
+function requireUserAgentPreset(ctx, userAgent, providerName, knownProvider) {
+  if (!userAgent?.agentPreset) return undefined
+  return requireAgentPreset(ctx, userAgent.agentPreset, `User-defined agent "${userAgent.name}"`, providerName, knownProvider)
+}
+
+function requireRoleRoutePreset(ctx, roleRoute, roleName, providerName, knownProvider) {
+  if (!roleRoute?.agentPreset) return undefined
+  return requireAgentPreset(ctx, roleRoute.agentPreset, `Built-in role route "${roleName}"`, providerName, knownProvider)
 }
 
 function requireProjectAgentPersona(ctx, providerName) {
@@ -1090,6 +1109,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, act
             throw new Error(`DSH subagent provider "${providerName}" is not registered.`)
           }
           const agentPreset = requireUserAgentPreset(ctx, userAgent, providerName, provider)
+            ?? requireRoleRoutePreset(ctx, roleRoute, roleName, providerName, provider)
           if (provider.capabilities?.depthLimit !== true) {
             throw new Error(`DSH subagent provider "${providerName}" does not support the configured maxDepth.`)
           }
@@ -1118,6 +1138,7 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, act
           run = { id: activation.childId, result: activation.result, dispose: onceAsync(() => activation.dispose()) }
         } else {
           const agentPreset = requireUserAgentPreset(ctx, userAgent, providerName)
+            ?? requireRoleRoutePreset(ctx, roleRoute, roleName, providerName)
           const legacyRun = await ctx.subagents.start(providerName, {
             label,
             parent: exec.agent,
@@ -1224,6 +1245,7 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, user
       }
       const persona = requireUserAgentPersona(ctx, userAgent, providerName, provider)
       const agentPreset = requireUserAgentPreset(ctx, userAgent, providerName, provider)
+        ?? requireRoleRoutePreset(ctx, roleRoute, args.role, providerName, provider)
       const selectedRoute = await resolveSelectedFallbackRoute(ctx, route, roleRoute, exec.signal)
       const agentOptions = agentOptionsForRoute(selectedRoute, { includeMaxTokens: false })
       const toolFilter = toolFilterForRoute(selectedRoute)
