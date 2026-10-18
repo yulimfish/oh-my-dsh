@@ -372,22 +372,29 @@ function commitReservations(state, reservations) {
 }
 
 function validateOptions(options) {
-  if (options === undefined) return { skipRoot: false }
+  if (options === undefined) return { skipRoot: false, rootSnapshotAvailable: undefined }
   if (!isPlainRecord(options)) throw new TypeError('directory context injection options must be a plain object')
   let descriptor
+  let snapshotDescriptor
   try {
     descriptor = Object.getOwnPropertyDescriptor(options, 'skipRoot')
+    snapshotDescriptor = Object.getOwnPropertyDescriptor(options, 'rootSnapshotAvailable')
   } catch {
-    throw new TypeError('directory context injection skipRoot must be a data property')
+    throw new TypeError('directory context injection options must use data properties')
   }
-  if (descriptor && !Object.hasOwn(descriptor, 'value')) {
-    throw new TypeError('directory context injection skipRoot must be a data property')
+  if ((descriptor && !Object.hasOwn(descriptor, 'value'))
+    || (snapshotDescriptor && !Object.hasOwn(snapshotDescriptor, 'value'))) {
+    throw new TypeError('directory context injection options must use data properties')
   }
   const skipRoot = descriptor?.value
   if (skipRoot !== undefined && typeof skipRoot !== 'boolean') {
     throw new TypeError('directory context injection skipRoot must be a boolean')
   }
-  return { skipRoot: skipRoot === true }
+  const rootSnapshotAvailable = snapshotDescriptor?.value
+  if (rootSnapshotAvailable !== undefined && typeof rootSnapshotAvailable !== 'function') {
+    throw new TypeError('directory context injection rootSnapshotAvailable must be a function')
+  }
+  return { skipRoot: skipRoot === true, rootSnapshotAvailable }
 }
 
 function createDirectoryOnReadContextListener(agents, sessions, fs, options = {}, contextFile) {
@@ -397,7 +404,7 @@ function createDirectoryOnReadContextListener(agents, sessions, fs, options = {}
     || typeof fs.lstat !== 'function' || typeof fs.stat !== 'function' || typeof fs.readBytes !== 'function') {
     throw new TypeError('directory context injection requires DSH fs.resolve, contains, lstat, stat, and readBytes')
   }
-  const { skipRoot } = validateOptions(options)
+  const { skipRoot, rootSnapshotAvailable } = validateOptions(options)
   const states = new WeakMap()
   const lifecycle = new AbortController()
   let disposed = false
@@ -443,6 +450,14 @@ function createDirectoryOnReadContextListener(agents, sessions, fs, options = {}
     }
     const cwd = session?.header?.cwd
     if (session?.header?.id !== liveAgent.id || !validateCwd(cwd)) return decision
+    let skipRootForAgent = skipRoot
+    if (skipRoot && rootSnapshotAvailable) {
+      try {
+        skipRootForAgent = rootSnapshotAvailable(liveAgent) === true
+      } catch {
+        skipRootForAgent = false
+      }
+    }
     const validatedPath = validateReadPath(exec.arguments, cwd)
     if (!validatedPath) return decision
 
@@ -461,7 +476,7 @@ function createDirectoryOnReadContextListener(agents, sessions, fs, options = {}
     let outcome
     try {
       outcome = await collectDirectoryContexts({
-        fs, cwd, ...validatedPath, state, generation, signal: linked.signal, skipRoot, contextFile,
+        fs, cwd, ...validatedPath, state, generation, signal: linked.signal, skipRoot: skipRootForAgent, contextFile,
       })
     } catch {
       outcome = { messages: [], reservations: [] }

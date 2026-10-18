@@ -91,7 +91,11 @@ async function makeHarness(records) {
   const scopes = []
   const detachById = new Map()
   const { fs, calls } = makeFileSystem(records)
-  const featureFiber = await ctx.plugin(pluginCtx => registerRootAgentsContext(pluginCtx, agents, sessionService, fs))
+  let rootAgentsDispose
+  const featureFiber = await ctx.plugin(pluginCtx => {
+    rootAgentsDispose = registerRootAgentsContext(pluginCtx, agents, sessionService, fs)
+    return rootAgentsDispose
+  })
 
   async function createAgent(id, cwd) {
     const agent = { id, session: { id } }
@@ -129,6 +133,7 @@ async function makeHarness(records) {
     agents,
     createAgent,
     created,
+    hasSnapshot: agent => rootAgentsDispose?.hasSnapshot?.(agent) === true,
     disposeAgent,
     promptContexts,
     async disposeFeature() { await featureFiber.dispose() },
@@ -153,9 +158,13 @@ test('snapshots root AGENTS into isolated Agent systemPrompt scopes before the f
   const disposeVariable = harness.ctx.systemPrompt.variable('known', () => 'SHOULD_NOT_INTERPOLATE')
   try {
     assert.deepEqual(await harness.promptContexts(a.agent), [])
+    assert.equal(harness.hasSnapshot(a.agent), false, 'snapshot availability is false before awaited creation completes')
     await harness.created(a.agent)
     await harness.created(b.agent, { source: 'resume' })
     assert.strictEqual(harness.agents.get(a.agent.id).ctx, a.agent.ctx, 'the real DSH AgentRegistry exposes the live Agent scope used for prompt registration')
+    assert.equal(harness.hasSnapshot(a.agent), true, 'snapshot availability follows successful context and scope registration')
+    assert.equal(harness.hasSnapshot({ id: a.agent.id }), false, 'same-ID projections do not inherit exact-Agent snapshot status')
+    assert.equal(harness.hasSnapshot(b.agent), true)
 
     const contextsA = await harness.promptContexts(a.agent)
     const contextsB = await harness.promptContexts(b.agent)
@@ -177,6 +186,7 @@ test('snapshots root AGENTS into isolated Agent systemPrompt scopes before the f
 
     await a.scope.dispose()
     assert.deepEqual(await harness.promptContexts(a.agent), [], 'Agent-scope teardown removes its context')
+    assert.equal(harness.hasSnapshot(a.agent), false, 'Agent-scope teardown invalidates snapshot availability')
     harness.disposeAgent(a.agent)
     const replacement = await harness.createAgent('agent-a', CWD_A)
     await harness.created(replacement.agent, { source: 'compact' })
@@ -185,6 +195,8 @@ test('snapshots root AGENTS into isolated Agent systemPrompt scopes before the f
     await harness.disposeFeature()
     assert.deepEqual(await harness.promptContexts(b.agent), [], 'plugin unload removes contexts from still-live Agents')
     assert.deepEqual(await harness.promptContexts(replacement.agent), [], 'plugin unload also clears replacement Agent contexts')
+    assert.equal(harness.hasSnapshot(b.agent), false, 'plugin unload invalidates snapshot availability')
+    assert.equal(harness.hasSnapshot(replacement.agent), false)
   } finally {
     disposeVariable()
     await harness.dispose()

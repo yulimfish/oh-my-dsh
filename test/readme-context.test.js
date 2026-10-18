@@ -100,7 +100,11 @@ async function makeHarness(records) {
   const scopes = []
   const detachById = new Map()
   const { fs, calls } = makeFileSystem(records)
-  const featureFiber = await ctx.plugin(pluginCtx => registerRootReadmeContext(pluginCtx, agents, sessionService, fs))
+  let rootReadmeDispose
+  const featureFiber = await ctx.plugin(pluginCtx => {
+    rootReadmeDispose = registerRootReadmeContext(pluginCtx, agents, sessionService, fs)
+    return rootReadmeDispose
+  })
 
   async function createAgent(id, cwd, { headerId = id, headerCwd = cwd } = {}) {
     const agent = { id, session: { id } }
@@ -137,6 +141,7 @@ async function makeHarness(records) {
     agents,
     createAgent,
     created,
+    hasSnapshot: agent => rootReadmeDispose?.hasSnapshot?.(agent) === true,
     disposeAgent,
     promptContexts,
     async disposeFeature() { await featureFiber.dispose() },
@@ -238,11 +243,15 @@ test('snapshots root README into isolated Agent systemPrompt scopes before first
   const disposeAgentsContext = a.agent.ctx.systemPrompt.context({ name: AGENTS_CONTEXT_NAME, order: 130, text: 'AGENTS context precedes the README snapshot.' })
   try {
     assert.deepEqual(await harness.promptContexts(a.agent), [], 'before awaited agent/created there is no README context')
+    assert.equal(harness.hasSnapshot(a.agent), false, 'snapshot availability is false before successful Agent initialization')
     assert.equal(harness.calls.length, 0, 'there is no backfill or prompt-assembly filesystem read')
 
     await harness.created(a.agent)
     await harness.created(b.agent, { source: 'resume' })
     assert.strictEqual(harness.agents.get(a.agent.id).ctx, a.agent.ctx, 'real AgentRegistry exposes the scoped Agent context')
+    assert.equal(harness.hasSnapshot(a.agent), true, 'availability follows both prompt and Agent-scope registration')
+    assert.equal(harness.hasSnapshot({ id: a.agent.id }), false, 'same-ID projections do not inherit exact-Agent snapshot status')
+    assert.equal(harness.hasSnapshot(b.agent), true)
 
     const contextsA = await harness.promptContexts(a.agent)
     const contextsB = await harness.promptContexts(b.agent)
@@ -271,6 +280,7 @@ test('snapshots root README into isolated Agent systemPrompt scopes before first
 
     await a.scope.dispose()
     assert.deepEqual(await harness.promptContexts(a.agent), [], 'Agent-scope teardown removes its README context')
+    assert.equal(harness.hasSnapshot(a.agent), false, 'Agent-scope teardown invalidates snapshot availability')
     harness.disposeAgent(a.agent)
     const replacement = await harness.createAgent('agent-a', CWD_A)
     await harness.created(replacement.agent, { source: 'compact' })
@@ -279,11 +289,50 @@ test('snapshots root README into isolated Agent systemPrompt scopes before first
     await harness.disposeFeature()
     assert.deepEqual(await harness.promptContexts(b.agent), [], 'plugin unload clears contexts from still-live Agents')
     assert.deepEqual(await harness.promptContexts(replacement.agent), [], 'plugin unload also clears replacement Agent contexts')
+    assert.equal(harness.hasSnapshot(b.agent), false, 'plugin unload invalidates snapshot availability')
+    assert.equal(harness.hasSnapshot(replacement.agent), false)
   } finally {
     disposeAgentsContext()
     disposeVariable()
     await harness.dispose()
   }
+})
+
+test('snapshot availability requires successful context and Agent-scope registrations', async () => {
+  const { fs } = makeFileSystem(new Map([[CWD_A, { text: '# README' }]]))
+  const agents = new Map()
+  const sessions = { get: id => ({ header: { id, cwd: CWD_A } }) }
+  const listener = createRootReadmeContextListener({ get: id => agents.get(id) }, sessions, fs)
+
+  const contextFailure = {
+    id: 'context-failure',
+    ctx: { effect: execute => execute(), systemPrompt: { context: () => undefined } },
+  }
+  agents.set(contextFailure.id, contextFailure)
+  await listener({ agent: contextFailure })
+  assert.equal(listener.hasSnapshot(contextFailure), false)
+
+  let contextDisposals = 0
+  const scopeFailure = {
+    id: 'scope-failure',
+    ctx: { effect: () => undefined, systemPrompt: { context: () => () => { contextDisposals += 1 } } },
+  }
+  agents.set(scopeFailure.id, scopeFailure)
+  await listener({ agent: scopeFailure })
+  assert.equal(listener.hasSnapshot(scopeFailure), false)
+  assert.equal(contextDisposals, 1, 'failed Agent-scope tracking disposes the prompt context')
+
+  const success = {
+    id: 'successful-snapshot',
+    ctx: { effect: execute => execute(), systemPrompt: { context: () => () => { contextDisposals += 1 } } },
+  }
+  agents.set(success.id, success)
+  await listener({ agent: success })
+  assert.equal(listener.hasSnapshot(success), true)
+  agents.set(success.id, { id: success.id })
+  assert.equal(listener.hasSnapshot(success), false, 'a replaced same-ID Agent cannot inherit snapshot state')
+  await listener.dispose()
+  assert.equal(listener.hasSnapshot(success), false, 'plugin cleanup clears snapshot availability')
 })
 
 test('README snapshot stays stale until a newly created Agent refreshes it', async () => {

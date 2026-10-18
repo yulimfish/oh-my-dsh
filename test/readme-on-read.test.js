@@ -6,6 +6,8 @@ import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createRootAgentsContextListener } from '../src/agents-context.js'
+import { createRootReadmeContextListener } from '../src/readme-context.js'
 import {
   createReadmeOnReadContextListener,
   registerAgentsOnReadContext,
@@ -179,14 +181,19 @@ async function makeHarness(options = {}) {
   const toolsFiber = await ctx.plugin(ToolRuntime)
   const agents = ctx.agents
   const sessions = new Map()
+  const sessionService = { get: id => sessions.get(id) }
   const fileSystem = makeFileSystem({ cwd: options.cwd ?? CWD, readmes: options.readmes, outsideRead: options.outsideRead })
   const registerContext = options.contextType === 'agents' ? registerAgentsOnReadContext : registerReadmeOnReadContext
+  const listenerOptions = {
+    ...(options.skipRoot === undefined ? {} : { skipRoot: options.skipRoot }),
+    ...(options.rootSnapshotAvailable === undefined ? {} : { rootSnapshotAvailable: options.rootSnapshotAvailable }),
+  }
   const featureFiber = await ctx.plugin(pluginCtx => registerContext(
     pluginCtx,
     agents,
-    { get: id => sessions.get(id) },
+    sessionService,
     fileSystem.fs,
-    options.skipRoot === undefined ? {} : { skipRoot: options.skipRoot },
+    listenerOptions,
   ))
   const downstreamContext = options.downstreamContext ? userContext('downstream policy context') : undefined
   let policyFiber
@@ -292,6 +299,8 @@ async function makeHarness(options = {}) {
   return {
     ctx,
     agents,
+    sessions,
+    sessionService,
     fileSystem,
     finalizerCalls,
     createAgent,
@@ -438,6 +447,125 @@ test('skipRoot avoids the root README, and the exact file being read is never in
 
     const self = await harness.executeRead(agent, { file_path: 'src/README.md' })
     assert.deepEqual(readmeTexts(self), [])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('skips root README only for a successfully registered snapshot on the exact Agent, else falls back', async () => {
+  let successfulSnapshot
+  const successful = await makeHarness({
+    skipRoot: true,
+    rootSnapshotAvailable: agent => successfulSnapshot?.hasSnapshot(agent) === true,
+    readmes: { 'README.md': '# root snapshot', 'src/README.md': '# nested' },
+  })
+  successfulSnapshot = createRootReadmeContextListener(successful.agents, successful.sessionService, successful.fileSystem.fs)
+  try {
+    const agent = await successful.createAgent()
+    await successfulSnapshot({ agent, signal: new AbortController().signal })
+    assert.equal(successfulSnapshot.hasSnapshot(agent), true)
+    const readStart = successful.fileSystem.calls.length
+    const result = await successful.executeRead(agent)
+    assert.deepEqual(readmeTexts(result).map(text => text.match(/\[Project README: ([^;]+)/u)?.[1]), ['src/README.md'])
+    const readPaths = successful.fileSystem.calls.slice(readStart)
+      .filter(call => call.method === 'lstat').map(call => call.path)
+    assert.equal(readPaths.includes('README.md'), false, 'a successful exact-Agent snapshot avoids root duplication')
+  } finally {
+    await successfulSnapshot.dispose()
+    await successful.dispose()
+  }
+
+  let failedSnapshot
+  const failed = await makeHarness({
+    skipRoot: true,
+    rootSnapshotAvailable: agent => failedSnapshot?.hasSnapshot(agent) === true,
+    readmes: {
+      'README.md': {
+        text: '# root fallback',
+        onRead: ({ record }) => { if (record.readCalls === 1) throw new Error('transient snapshot read failure') },
+      },
+      'src/README.md': '# nested',
+    },
+  })
+  failedSnapshot = createRootReadmeContextListener(failed.agents, failed.sessionService, failed.fileSystem.fs)
+  try {
+    const agent = await failed.createAgent()
+    await failedSnapshot({ agent, signal: new AbortController().signal })
+    assert.equal(failedSnapshot.hasSnapshot(agent), false)
+    const result = await failed.executeRead(agent)
+    assert.deepEqual(readmeTexts(result).map(text => text.match(/\[Project README: ([^;]+)/u)?.[1]), [
+      'README.md', 'src/README.md',
+    ], 'a failed snapshot leaves the bounded root-to-nested post-read fallback available')
+  } finally {
+    await failedSnapshot.dispose()
+    await failed.dispose()
+  }
+})
+
+test('skips root AGENTS only for a successfully registered snapshot on the exact Agent, else falls back', async () => {
+  let successfulSnapshot
+  const successful = await makeHarness({
+    contextType: 'agents',
+    skipRoot: true,
+    rootSnapshotAvailable: agent => successfulSnapshot?.hasSnapshot(agent) === true,
+    readmes: { 'AGENTS.md': '# root snapshot', 'src/AGENTS.md': '# nested' },
+  })
+  successfulSnapshot = createRootAgentsContextListener(successful.agents, successful.sessionService, successful.fileSystem.fs)
+  try {
+    const agent = await successful.createAgent()
+    await successfulSnapshot({ agent, signal: new AbortController().signal })
+    assert.equal(successfulSnapshot.hasSnapshot(agent), true)
+    const readStart = successful.fileSystem.calls.length
+    const result = await successful.executeRead(agent)
+    assert.deepEqual(readmeTexts(result).map(text => text.match(/\[Project AGENTS\.md: ([^;]+)/u)?.[1]), ['src/AGENTS.md'])
+    const readPaths = successful.fileSystem.calls.slice(readStart)
+      .filter(call => call.method === 'lstat').map(call => call.path)
+    assert.equal(readPaths.includes('AGENTS.md'), false, 'a successful exact-Agent snapshot avoids root duplication')
+  } finally {
+    await successfulSnapshot.dispose()
+    await successful.dispose()
+  }
+
+  let failedSnapshot
+  const failed = await makeHarness({
+    contextType: 'agents',
+    skipRoot: true,
+    rootSnapshotAvailable: agent => failedSnapshot?.hasSnapshot(agent) === true,
+    readmes: {
+      'AGENTS.md': {
+        text: '# root fallback',
+        onRead: ({ record }) => { if (record.readCalls === 1) throw new Error('transient snapshot read failure') },
+      },
+      'src/AGENTS.md': '# nested',
+    },
+  })
+  failedSnapshot = createRootAgentsContextListener(failed.agents, failed.sessionService, failed.fileSystem.fs)
+  try {
+    const agent = await failed.createAgent()
+    await failedSnapshot({ agent, signal: new AbortController().signal })
+    assert.equal(failedSnapshot.hasSnapshot(agent), false)
+    const result = await failed.executeRead(agent)
+    assert.deepEqual(readmeTexts(result).map(text => text.match(/\[Project AGENTS\.md: ([^;]+)/u)?.[1]), [
+      'AGENTS.md', 'src/AGENTS.md',
+    ], 'a failed snapshot leaves the bounded root-to-nested post-read fallback available')
+  } finally {
+    await failedSnapshot.dispose()
+    await failed.dispose()
+  }
+})
+
+test('snapshot status checker failure is fail-open to bounded root README context', async () => {
+  const harness = await makeHarness({
+    skipRoot: true,
+    rootSnapshotAvailable() { throw new Error('status unavailable') },
+    readmes: { 'README.md': '# root', 'src/README.md': '# nested' },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent)
+    assert.deepEqual(readmeTexts(result).map(text => text.match(/\[Project README: ([^;]+)/u)?.[1]), [
+      'README.md', 'src/README.md',
+    ])
   } finally {
     await harness.dispose()
   }
@@ -702,6 +830,7 @@ test('validates DSH dependencies and options, and feature disposal removes both 
   assert.throws(() => createReadmeOnReadContextListener({ get() {} }, {}, {}), /sessions\.get/u)
   assert.throws(() => createReadmeOnReadContextListener({ get() {} }, { get() {} }, {}), /fs\.resolve/u)
   assert.throws(() => createReadmeOnReadContextListener({ get() {} }, { get() {} }, makeFileSystem().fs, { skipRoot: 'yes' }), /skipRoot.*boolean/u)
+  assert.throws(() => createReadmeOnReadContextListener({ get() {} }, { get() {} }, makeFileSystem().fs, { rootSnapshotAvailable: true }), /rootSnapshotAvailable.*function/u)
 
   const harness = await makeHarness({ readmes: { 'README.md': '# root' } })
   try {

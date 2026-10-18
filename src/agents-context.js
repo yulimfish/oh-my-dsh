@@ -257,13 +257,14 @@ export function createRootAgentsContextListener(agents, sessions, fs) {
       return
     }
     if (typeof contextDispose !== 'function') return
-    const registration = { contextDispose, trackingDispose: undefined }
+    const registration = { agent: liveAgent, contextDispose, trackingDispose: undefined, ready: false }
     contextDisposers.set(agent.id, registration)
     try {
       registration.trackingDispose = agentContext.effect(() => () => {
         if (contextDisposers.get(agent.id) === registration) contextDisposers.delete(agent.id)
       }, 'dsh-omo root AGENTS prompt context tracking')
       if (typeof registration.trackingDispose !== 'function') throw new TypeError('Agent scope did not return an effect disposer')
+      registration.ready = true
     } catch {
       if (contextDisposers.get(agent.id) === registration) contextDisposers.delete(agent.id)
       try {
@@ -275,6 +276,23 @@ export function createRootAgentsContextListener(agents, sessions, fs) {
     }
   }
 
+  listener.hasSnapshot = agent => {
+    if (disposed || !isObject(agent)) return false
+    let id
+    try {
+      id = agent.id
+    } catch {
+      return false
+    }
+    if (typeof id !== 'string' || id.length === 0) return false
+    const registration = contextDisposers.get(id)
+    if (!registration || registration.agent !== agent || registration.ready !== true) return false
+    try {
+      return agents.get(id) === agent
+    } catch {
+      return false
+    }
+  }
   listener.dispose = () => {
     if (disposalPromise) return disposalPromise
     disposed = true
@@ -296,7 +314,9 @@ export function registerRootAgentsContext(ctx, agents, sessions, fs) {
     throw new TypeError('registerRootAgentsContext requires Cordis ctx.on and ctx.effect')
   }
   const listener = createRootAgentsContextListener(agents, sessions, fs)
+  const dispose = listener.dispose
+  Object.defineProperty(dispose, 'hasSnapshot', { value: listener.hasSnapshot })
   ctx.on('agent/created', listener)
-  ctx.effect(() => listener.dispose, 'dsh-omo root AGENTS prompt context')
-  return listener.dispose
+  ctx.effect(() => dispose, 'dsh-omo root AGENTS prompt context')
+  return dispose
 }

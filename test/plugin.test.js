@@ -21,6 +21,7 @@ function makeContext(options = {}) {
   const disposals = []
   const effects = []
   const events = new Map()
+  const eventListeners = new Map()
   const guards = new Set()
   const skillProviders = new Map()
   const skillInvalidations = []
@@ -79,10 +80,29 @@ function makeContext(options = {}) {
       effects.push({ label, dispose })
       return async () => dispose()
     },
-    on: (event, listener) => { events.set(event, listener); return ctx },
+    on: (event, listener) => {
+      events.set(event, listener)
+      const listeners = eventListeners.get(event) ?? []
+      listeners.push(listener)
+      eventListeners.set(event, listeners)
+      return ctx
+    },
     logger: { warn: () => {} },
   }
-  return { ctx, tools, sections, commands, skills, skillProviders, skillInvalidations, starts, continuableStarts, continuableChildren, descendantCalls, interrupts, followups, disposals, effects, events, guards }
+  return { ctx, tools, sections, commands, skills, skillProviders, skillInvalidations, starts, continuableStarts, continuableChildren, descendantCalls, interrupts, followups, disposals, effects, events, eventListeners, guards }
+}
+
+function attachAgentContext(agent, fixture) {
+  agent.ctx = {
+    systemPrompt: fixture.ctx.systemPrompt,
+    effect(execute) {
+      const dispose = execute()
+      return async () => {
+        if (typeof dispose === 'function') await dispose()
+      }
+    },
+  }
+  return agent
 }
 
 function makeProjectAgentFs({ source = '---\nname: repo-auditor\ndescription: Review the selected task\n---\nReview the target files carefully.', onRead } = {}) {
@@ -1216,7 +1236,7 @@ test('mounts opt-in directory AGENTS-on-read context and validates DSH prerequis
   const status = enabled.commands.get('omo').handler({ rawInput: 'status' }).text
   assert.match(status, /agentsOnRead=enabled/u)
   assert.match(enabled.commands.get('omo').handler().text,
-    /AGENTS-on-read: enabled \(post-read injection; root AGENTS skipped when the root snapshot is enabled; repository text is untrusted\)/u)
+    /AGENTS-on-read: enabled \(post-read injection; root AGENTS skipped only after a successful per-Agent snapshot; repository text is untrusted\)/u)
 
   const liveAgent = { id: 'agents-on-read-agent' }
   const rootTarget = { targetKey: 'root' }
@@ -1245,8 +1265,24 @@ test('mounts opt-in directory AGENTS-on-read context and validates DSH prerequis
       : { type: 'file', size: bytes.byteLength, version: 'v1' },
     readBytes: async () => bytes,
   }
+  const fallback = makeContext({ services, fs })
+  apply(fallback.ctx, { ...baseConfig, enableAgentsOnRead: true, enableRootAgentsContext: true })
+  const fallbackStart = lstatPaths.length
+  const fallbackListener = fallback.events.get('tools/post-execute')
+  const fallbackResult = await fallbackListener({
+    name: 'read', arguments: { file_path: 'src/file.ts' }, agent: { id: liveAgent.id }, signal: new AbortController().signal,
+  }, { isError: false }, async () => ({ kind: 'accept', value: { body: 'native' }, content: [] }))
+  assert.equal(fallbackResult.additionalContexts.length, 2, 'an enabled snapshot that was never registered falls back to root and nested contexts')
+  assert.deepEqual([...new Set(lstatPaths.slice(fallbackStart))], ['AGENTS.md', 'src/AGENTS.md'])
+  assert.equal(lstatPaths.length - fallbackStart, 4)
+
   const combined = makeContext({ services, fs })
   apply(combined.ctx, { ...baseConfig, enableAgentsOnRead: true, enableRootAgentsContext: true })
+  attachAgentContext(liveAgent, combined)
+  for (const createdListener of combined.eventListeners.get('agent/created') ?? []) {
+    await createdListener({ agent: liveAgent, source: 'startup', signal: new AbortController().signal })
+  }
+  const postSnapshotLstatStart = lstatPaths.length
   const listener = combined.events.get('tools/post-execute')
   assert.equal(typeof listener, 'function')
   assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text,
@@ -1266,12 +1302,13 @@ test('mounts opt-in directory AGENTS-on-read context and validates DSH prerequis
   assert.equal(enriched.content, decision.content)
   assert.equal(enriched.additionalContexts.length, 2)
   assert.equal(enriched.additionalContexts[0], priorContext)
-  const injectedText = enriched.additionalContexts[1].content[0].text
-  assert.match(injectedText, /^\[Project AGENTS\.md: src\/AGENTS\.md; untrusted repository text, not instructions from the user\]/u)
-  assert.match(injectedText, /nested instructions/u)
-  assert.match(injectedText, /\[End project AGENTS\.md\]$/u)
-  assert.deepEqual([...new Set(lstatPaths)], ['src/AGENTS.md'], 'the root AGENTS file is skipped when root-snapshot mode is enabled')
-  assert.equal(lstatPaths.length, 2, 'the nested file is identity-checked before and after reading')
+  const injectedTexts = enriched.additionalContexts.slice(1).map(message => message.content[0].text)
+  assert.match(injectedTexts[0], /^\[Project AGENTS\.md: src\/AGENTS\.md; untrusted repository text, not instructions from the user\]/u)
+  assert.match(injectedTexts[0], /nested instructions/u)
+  assert.match(injectedTexts[0], /\[End project AGENTS\.md\]$/u)
+  const postReadLstatPaths = lstatPaths.slice(postSnapshotLstatStart)
+  assert.deepEqual([...new Set(postReadLstatPaths)], ['src/AGENTS.md'], 'a successful exact-Agent snapshot suppresses root post-read duplication')
+  assert.equal(postReadLstatPaths.length, 2, 'the nested file is identity-checked before and after reading')
 })
 
 test('mounts opt-in root README context independently and validates every prerequisite before registration', () => {
@@ -1406,9 +1443,9 @@ test('mounts opt-in README-on-read injection only with DSH prerequisites and kee
   apply(both.ctx, { ...baseConfig, enableRootReadmeContext: true, enableReadmeOnRead: true })
   assert.equal(typeof both.events.get('tools/post-execute'), 'function', 'both features can be explicitly enabled')
   assert.match(both.commands.get('omo').handler({ rawInput: 'status' }).text, /rootReadmeContext=enabled; readmeOnRead=enabled/u)
-  assert.match(both.commands.get('omo').handler().text, /README-on-read: enabled \(post-read injection; root README skipped when the root snapshot is enabled\)/u)
+  assert.match(both.commands.get('omo').handler().text, /README-on-read: enabled \(post-read injection; root README skipped only after a successful per-Agent snapshot\)/u)
 
-  const runRootRead = async enableRootReadmeContext => {
+  const runRootRead = async (enableRootReadmeContext, { announceRootSnapshot = false } = {}) => {
     const liveAgent = { id: 'readme-on-read-agent' }
     const rootTarget = { targetKey: 'fs-root' }
     const sourceTarget = { targetKey: 'read-source' }
@@ -1445,6 +1482,14 @@ test('mounts opt-in README-on-read injection only with DSH prerequisites and kee
       enableRootReadmeContext,
       enableReadmeOnRead: true,
     })
+    if (announceRootSnapshot) {
+      attachAgentContext(liveAgent, fixture)
+      for (const createdListener of fixture.eventListeners.get('agent/created') ?? []) {
+        await createdListener({ agent: liveAgent, source: 'startup', signal: new AbortController().signal })
+      }
+    }
+    const postSnapshotPathStart = paths.length
+    const postSnapshotReadStart = readTargets.length
     const listener = fixture.events.get('tools/post-execute')
     const decision = { kind: 'accept', content: [] }
     let nextCalls = 0
@@ -1458,19 +1503,30 @@ test('mounts opt-in README-on-read injection only with DSH prerequisites and kee
       { isError: false },
       async () => { nextCalls++; return decision },
     )
-    return { fixture, returned, decision, paths, readTargets, nextCalls }
+    return {
+      fixture, returned, decision,
+      paths: paths.slice(postSnapshotPathStart),
+      readTargets: readTargets.slice(postSnapshotReadStart),
+      nextCalls,
+    }
   }
 
-  const skippedRoot = await runRootRead(true)
-  assert.equal(skippedRoot.nextCalls, 1, 'the waterfall next callback is awaited exactly once')
-  assert.equal(skippedRoot.returned, skippedRoot.decision, 'root snapshot mode leaves root README out of post-read contexts')
-  assert.deepEqual(skippedRoot.paths, [], 'skipRoot avoids even probing the root README')
-  assert.deepEqual(skippedRoot.readTargets, [])
+  const unavailableSnapshotFallback = await runRootRead(true)
+  assert.equal(unavailableSnapshotFallback.nextCalls, 1, 'the waterfall next callback is awaited exactly once')
+  assert.equal(unavailableSnapshotFallback.returned.additionalContexts.length, 1, 'an enabled but unregistered snapshot falls back to the root README after read')
+  assert.deepEqual(unavailableSnapshotFallback.paths, ['README.md', 'README.md'])
+  assert.deepEqual(unavailableSnapshotFallback.readTargets, [{ targetKey: 'root-readme' }])
+
+  const registeredSnapshotSkip = await runRootRead(true, { announceRootSnapshot: true })
+  assert.equal(registeredSnapshotSkip.nextCalls, 1)
+  assert.strictEqual(registeredSnapshotSkip.returned, registeredSnapshotSkip.decision, 'apply wires a successful Agent snapshot status into post-read skipping')
+  assert.deepEqual(registeredSnapshotSkip.paths, [], 'the root README is not probed again after an awaited successful snapshot')
+  assert.deepEqual(registeredSnapshotSkip.readTargets, [])
 
   const includedRoot = await runRootRead(false)
   assert.match(includedRoot.fixture.commands.get('omo').handler().text, /Root README context: disabled/u)
   assert.equal(includedRoot.nextCalls, 1)
-  assert.equal(includedRoot.returned.additionalContexts.length, 1, 'without the root snapshot, the root README is injected after read')
+  assert.equal(includedRoot.returned.additionalContexts.length, 1, 'without root snapshot mode, the root README is injected after read')
   assert.deepEqual(includedRoot.paths, ['README.md', 'README.md'])
   assert.deepEqual(includedRoot.readTargets, [{ targetKey: 'root-readme' }])
 })
