@@ -11,17 +11,18 @@ export const GOAL_USE_REMINDER = `[DSH Goal-use reminder]
 If a user-requested multi-step outcome is not already tracked, check the current DSH Goal with dsh_omo_goal_get and use dsh_omo_goal_create or dsh_omo_goal_update only as explicitly appropriate. A DSH Goal tracks one durable objective, not a task list. Create a Goal only for an explicit user-requested outcome; this reminder itself never authorizes creating, editing, completing, pausing, or resuming a Goal.
 `
 
-function resetCadence(states, agentId) {
+function resetCadence(states, agentId, agent) {
   const state = states.get(agentId)
-  if (state) state.count = 0
+  if (state?.agent === agent) state.count = 0
 }
 
-function stateForAgent(states, agentId) {
+function stateForAgent(states, agentId, agent) {
   const existing = states.get(agentId)
-  if (existing) return existing
-  // Do not evict live state: an eviction could reset the per-Agent reminder cap.
-  if (states.size >= MAX_AGENT_STATES) return undefined
-  const state = { count: 0, remindersSent: 0 }
+  if (existing?.agent === agent) return existing
+  // Replace stale same-ID state in place without consuming another slot.
+  // Do not evict another live Agent: that could reset its reminder cap.
+  if (!existing && states.size >= MAX_AGENT_STATES) return undefined
+  const state = { agent, count: 0, remindersSent: 0 }
   states.set(agentId, state)
   return state
 }
@@ -34,7 +35,13 @@ export function createGoalUseReminder(teamService, agentsService) {
 
   function clearAgent(agent) {
     if (agent && typeof agent === 'object') disposedAgents.add(agent)
-    if (typeof agent?.id === 'string') states.delete(agent.id)
+    let agentId
+    try {
+      agentId = agent?.id
+    } catch {
+      return
+    }
+    if (typeof agentId === 'string' && states.get(agentId)?.agent === agent) states.delete(agentId)
   }
 
   function dispose() {
@@ -60,30 +67,30 @@ export function createGoalUseReminder(teamService, agentsService) {
     if (liveAgent !== exec.agent) return decision
 
     if (typeof teamService?.tryMembership !== 'function') {
-      resetCadence(states, agentId)
+      resetCadence(states, agentId, exec.agent)
       return decision
     }
     let membership
     try {
       membership = teamService.tryMembership(exec.agent)
     } catch {
-      resetCadence(states, agentId)
+      resetCadence(states, agentId, exec.agent)
       return decision
     }
     // Only undefined is an affirmative non-Team result; malformed or present membership fails closed.
     if (membership !== undefined) {
-      resetCadence(states, agentId)
+      resetCadence(states, agentId, exec.agent)
       return decision
     }
 
     // Goal-tool attempts reset cadence even if another listener ultimately blocks or the Tool errors.
     if (GOAL_TOOLS.has(exec.name)) {
-      resetCadence(states, agentId)
+      resetCadence(states, agentId, exec.agent)
       return decision
     }
     if (exec.signal.aborted || decision?.kind !== 'accept') return decision
 
-    const state = stateForAgent(states, agentId)
+    const state = stateForAgent(states, agentId, exec.agent)
     if (!state || state.remindersSent >= MAX_REMINDERS_PER_AGENT) return decision
     state.count += 1
     if (state.count < REMINDER_INTERVAL) return decision

@@ -181,6 +181,37 @@ test('Goal-call matching is exact, Agents are isolated, and disposal clears stat
   reminder.dispose()
 })
 
+test('same-ID replacement gets fresh cadence and cap; late old disposal preserves its state', async () => {
+  const reminder = createGoalUseReminder(teamService, agentsService)
+  const oldAgent = { id: 'reused-agent-id' }
+  let oldReminders = 0
+  for (let index = 0; index < 30; index += 1) {
+    if ((await createCall(reminder, 'fs_read', oldAgent)).result.additionalContexts) oldReminders += 1
+  }
+  assert.equal(oldReminders, 3, 'the original Agent reaches its existing reminder cap')
+
+  const replacement = { id: oldAgent.id }
+  let replacementReminders = 0
+  for (let index = 0; index < 5; index += 1) {
+    assert.equal((await createCall(reminder, 'fs_read', replacement)).result.additionalContexts, undefined)
+  }
+  reminder.clearAgent(oldAgent)
+  for (let index = 5; index < 30; index += 1) {
+    const result = await createCall(reminder, 'fs_read', replacement)
+    if (index === 9 || index === 19 || index === 29) {
+      assert.ok(result.result.additionalContexts, `replacement reminder ${replacementReminders + 1} should fire at its fresh cadence`)
+      replacementReminders += 1
+    } else {
+      assert.equal(result.result.additionalContexts, undefined)
+    }
+  }
+  assert.equal(replacementReminders, 3, 'replacement receives an independent three-reminder cap')
+  for (let index = 0; index < 10; index += 1) {
+    assert.equal((await createCall(reminder, 'fs_read', replacement)).result.additionalContexts, undefined)
+  }
+  reminder.dispose()
+})
+
 test('preserves content-only decisions and ignores overlong Agent IDs', async () => {
   const reminder = createGoalUseReminder(teamService, agentsService)
   const overlong = { id: 'x'.repeat(257) }
