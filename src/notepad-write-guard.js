@@ -2,6 +2,7 @@ import { normalize, sep } from 'node:path'
 
 const MAX_TOOL_NAME_CHARS = 128
 const MAX_NOTEPAD_PATH_CHARS = 4_096
+export const NOTEPAD_WRITE_PATH_LIMIT_REASON = `Refused: Write path exceeds ${MAX_NOTEPAD_PATH_CHARS} UTF-16 code units; cannot verify it is outside protected notepad roots.`
 const NOTEPAD_ROOTS = Object.freeze([
   Object.freeze(['.omo', 'notepads']),
   Object.freeze(['.sisyphus', 'notepads']),
@@ -62,7 +63,11 @@ export function createNotepadWriteGuard() {
     const name = ownDataValue(execution, 'name')
     if (typeof name !== 'string' || name.length > MAX_TOOL_NAME_CHARS || name.toLowerCase() !== 'write') return undefined
     const args = ownDataValue(execution, 'arguments')
-    return containsNotepadRoot(notepadPathArgument(args)) ? NOTEPAD_WRITE_GUARD_REASON : undefined
+    const selectedPath = notepadPathArgument(args)
+    if (typeof selectedPath === 'string' && selectedPath.length > MAX_NOTEPAD_PATH_CHARS) {
+      return NOTEPAD_WRITE_PATH_LIMIT_REASON
+    }
+    return containsNotepadRoot(selectedPath) ? NOTEPAD_WRITE_GUARD_REASON : undefined
   }
 }
 

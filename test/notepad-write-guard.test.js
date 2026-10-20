@@ -4,6 +4,7 @@ import { join, sep } from 'node:path'
 import {
   createNotepadWriteGuard,
   NOTEPAD_WRITE_GUARD_REASON,
+  NOTEPAD_WRITE_PATH_LIMIT_REASON,
   registerNotepadWriteGuard,
 } from '../src/notepad-write-guard.js'
 
@@ -43,26 +44,41 @@ test('allows Edit, unrelated Tools, and path segments that are not notepads', ()
   for (const input of nearMisses) assert.equal(guard(input), undefined)
 })
 
-test('caps lexical path inspection by JavaScript UTF-16 string length', () => {
+test('bounds lexical path inspection and fails closed beyond the UTF-16 length limit', () => {
   const guard = createNotepadWriteGuard()
   const prefix = join('.omo', 'notepads')
-  const exactlyAtCap = `${prefix}${sep}${'x'.repeat(4_096 - prefix.length - 1)}`
-  assert.equal(exactlyAtCap.length, 4_096)
-  assert.equal(guard(execution('write', { path: exactlyAtCap })), NOTEPAD_WRITE_GUARD_REASON)
-  assert.equal(guard(execution('write', { path: `${exactlyAtCap}x` })), undefined)
+  const protectedAtCap = `${prefix}${sep}${'x'.repeat(4_096 - prefix.length - 1)}`
+  const unrelatedAtCap = 'x'.repeat(4_096)
+  const protectedOverCap = `${protectedAtCap}x`
+  const unrelatedOverCap = `${unrelatedAtCap}x`
+  assert.equal(protectedAtCap.length, 4_096)
+  assert.equal(unrelatedAtCap.length, 4_096)
+  assert.equal(guard(execution('write', { path: protectedAtCap })), NOTEPAD_WRITE_GUARD_REASON)
+  assert.equal(guard(execution('write', { path: unrelatedAtCap })), undefined)
+  assert.equal(guard(execution('write', { path: protectedOverCap })), NOTEPAD_WRITE_PATH_LIMIT_REASON)
+  assert.equal(guard(execution('write', { path: unrelatedOverCap })), NOTEPAD_WRITE_PATH_LIMIT_REASON)
 
   const astralPath = `${prefix}${sep}${'🧪'.repeat(2_050)}`
   assert.ok([...astralPath].length < 4_096)
   assert.ok(astralPath.length > 4_096)
-  assert.equal(guard(execution('write', { path: astralPath })), undefined)
+  assert.equal(guard(execution('write', { path: astralPath })), NOTEPAD_WRITE_PATH_LIMIT_REASON)
 })
 
-test('honors upstream nullish path fallback and field precedence', () => {
+test('preserves upstream nullish path fallback and field precedence for bounded paths', () => {
   const guard = createNotepadWriteGuard()
   const notepadPath = join('.omo', 'notepads', 'state.md')
+  const oversized = 'x'.repeat(4_097)
   assert.equal(guard(execution('write', { filePath: null, path: notepadPath })), NOTEPAD_WRITE_GUARD_REASON)
+  assert.equal(guard(execution('write', { filePath: null, path: null, file_path: notepadPath })), NOTEPAD_WRITE_GUARD_REASON)
   assert.equal(guard(execution('write', { filePath: 'src/new.md', path: notepadPath })), undefined)
   assert.equal(guard(execution('write', { filePath: 42, path: notepadPath })), undefined)
+
+  assert.equal(guard(execution('write', { filePath: oversized, path: notepadPath })), NOTEPAD_WRITE_PATH_LIMIT_REASON)
+  assert.equal(guard(execution('write', { filePath: null, path: oversized, file_path: notepadPath })), NOTEPAD_WRITE_PATH_LIMIT_REASON)
+  assert.equal(guard(execution('write', { filePath: null, path: null, file_path: oversized })), NOTEPAD_WRITE_PATH_LIMIT_REASON)
+  assert.equal(guard(execution('write', { filePath: 42, path: oversized, file_path: notepadPath })), undefined)
+  assert.equal(guard(execution('write', { filePath: '', path: oversized })), undefined, 'empty string is selected because fallback is nullish, not falsy')
+  assert.equal(guard(execution('write', { filePath: null, path: '', file_path: oversized })), undefined)
 })
 
 test('registers a global monotonic Tool guard and disposes it idempotently', () => {
