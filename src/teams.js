@@ -404,14 +404,13 @@ const tools = [
   }),
   service => teamTool({
     name: 'team_send_message',
-    description: 'Queue a durable Host agentTeams peer message and surface the Host status exactly as reported (`accepted` or `queued`); neither status is reinterpreted as guaranteed delivery.',
+    description: 'Send a peer message to a durable teammate’s inbox and return its accepted message ID. Acceptance follows Agent persistence; it does not wait for the recipient to process the message.',
     parameters: {
       target: { type: 'string', required: true, description: 'Durable teammate name.' },
       content: { ...textContentBlocks, required: true, description: 'Message ContentBlock array.' },
     },
     outputSchema: objectSchema({
       messageId: { type: 'string', required: true },
-      status: { type: 'string', enum: ['accepted', 'queued'], required: true },
     }),
     execute: async (args, exec, caller) => {
       const request = {
@@ -420,10 +419,8 @@ const tools = [
         signal: requireSignal(exec),
       }
       const value = await service.sendMessage(caller, request)
-      if (!isRecord(value) || !['accepted', 'queued'].includes(value.status)) {
-        throw new TypeError('Team service returned an invalid message result')
-      }
-      return { messageId: boundedIdentifier(value.messageId, 'message id'), status: value.status }
+      if (!isRecord(value)) throw new TypeError('Team service returned an invalid message result')
+      return { messageId: boundedIdentifier(value.messageId, 'message id') }
     },
   }),
   service => teamTool({

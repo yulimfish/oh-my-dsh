@@ -48,7 +48,7 @@ function makeService(overrides = {}) {
     membership: () => ({ root: { id: 'agent-root' }, id: 'team-1', role: 'lead', name: 'lead' }),
     listMembers: () => [memberView()],
     spawnTeammate: async () => ({ member: memberView() }),
-    sendMessage: async () => ({ messageId: 'message-1', status: 'queued' }),
+    sendMessage: async () => ({ messageId: 'message-1' }),
     createTask: async () => taskView(),
     getTask: () => taskView(),
     listTasks: () => [taskView()],
@@ -125,6 +125,14 @@ test('registers eleven uniquely named team tools with bounded, strict output con
   assert.match(fixture.registered.get('team_create_task').description, /advisory.*not file locks or security boundaries/i)
   assert.match(fixture.registered.get('team_update_task').description, /advisory.*not file locks or security boundaries/i)
   assert.match(fixture.registered.get('team_interrupt').description, /only signals a turn.*does not guarantee termination/i)
+  const sendMessage = fixture.registered.get('team_send_message')
+  assert.deepEqual(sendMessage.output.schema.properties, {
+    messageId: { type: 'string' },
+  })
+  assert.deepEqual(sendMessage.output.schema.required, ['messageId'])
+  assert.equal('status' in sendMessage.output.schema.properties, false)
+  assert.match(sendMessage.description, /accepted message ID/u)
+  assert.doesNotMatch(sendMessage.description, /status|queued/u)
 
   const membership = fixture.registered.get('team_membership')
   const result = { teamId: 'team-1', rootAgentId: 'agent-root', role: 'lead', name: 'lead' }
@@ -200,7 +208,7 @@ test('forwards the exact caller, request fields, and execution cancellation to H
     },
     sendMessage: async (caller, request) => {
       calls.push({ method: 'send', caller, request })
-      return { messageId: 'message-2', status: 'accepted' }
+      return { messageId: 'message-2' }
     },
     waitForChange: async (caller, timeoutMs, receivedSignal) => {
       calls.push({ method: 'wait', caller, timeoutMs, signal: receivedSignal })
@@ -220,7 +228,7 @@ test('forwards the exact caller, request fields, and execution cancellation to H
 
   const content = [{ type: 'text', text: 'Please report status.' }]
   const sendResult = await fixture.registered.get('team_send_message').execute(input('team_send_message', { content }), exec)
-  assert.deepEqual(sendResult, { messageId: 'message-2', status: 'accepted' })
+  assert.deepEqual(sendResult, { messageId: 'message-2' })
   assert.equal(calls[1].caller, lead)
   assert.deepEqual(calls[1].request, { target: 'builder', content, signal })
   assert.equal(calls[1].request.signal, signal)
@@ -228,6 +236,29 @@ test('forwards the exact caller, request fields, and execution cancellation to H
   const waitResult = await fixture.registered.get('team_wait_for_change').execute(input('team_wait_for_change', { timeoutMs: 45_000 }), exec)
   assert.deepEqual(waitResult, { timedOut: true })
   assert.deepEqual(calls[2], { method: 'wait', caller: lead, timeoutMs: 45_000, signal })
+})
+
+test('team_send_message rejects missing or invalid Host message IDs', async () => {
+  const invalidResults = [
+    undefined,
+    null,
+    {},
+    { messageId: '' },
+    { messageId: '   ' },
+    { messageId: 123 },
+    { messageId: 'm'.repeat(129) },
+  ]
+  let resultIndex = 0
+  const fixture = makeContext(makeService({ sendMessage: async () => invalidResults[resultIndex++] }))
+  registerTeamTools(fixture.ctx)
+  const send = fixture.registered.get('team_send_message')
+  for (let index = 0; index < invalidResults.length; index += 1) {
+    await assert.rejects(
+      send.execute(input('team_send_message'), exec),
+      /invalid message result|message id/u,
+    )
+  }
+  assert.equal(resultIndex, invalidResults.length)
 })
 
 test('routes membership, roster, task reads/creation, and interruption through the Host service', async () => {
@@ -297,7 +328,7 @@ test('team_status aggregates only the exact caller Team through read-only Host m
       return [taskView()]
     },
     spawnTeammate: async () => { mutations += 1; return { member: memberView() } },
-    sendMessage: async () => { mutations += 1; return { messageId: 'message-1', status: 'queued' } },
+    sendMessage: async () => { mutations += 1; return { messageId: 'message-1' } },
     createTask: async () => { mutations += 1; return taskView() },
     updateTask: async () => { mutations += 1; return taskView() },
     interrupt: () => { mutations += 1; return { previousStatus: 'running' } },
@@ -535,7 +566,7 @@ test('validates obvious limits and required cancellation without invoking the se
   const fixture = makeContext(makeService({
     updateTask: async () => { calls += 1; return taskView() },
     waitForChange: async () => { calls += 1; return { timedOut: false } },
-    sendMessage: async () => { calls += 1; return { messageId: 'message-1', status: 'queued' } },
+    sendMessage: async () => { calls += 1; return { messageId: 'message-1' } },
   }))
   registerTeamTools(fixture.ctx)
   const update = fixture.registered.get('team_update_task')

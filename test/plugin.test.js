@@ -2574,7 +2574,7 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
     membership: agent => { teamCalls.push(agent); return { id: 'team-1', root: { id: 'lead-1' }, role: 'lead', name: 'lead' } },
     listMembers: () => [],
     spawnTeammate: async () => ({ member }),
-    sendMessage: async () => ({ messageId: 'message-1', status: 'queued' }),
+    sendMessage: async () => ({ messageId: 'message-1' }),
     createTask: async () => ({ id: 'task-1', revision: 1, subject: 'Task', description: '', status: 'pending', blockedBy: [], writeScopes: [], ready: true, writeScopeWarnings: [] }),
     getTask: () => ({ id: 'task-1', revision: 1, subject: 'Task', description: '', status: 'pending', blockedBy: [], writeScopes: [], ready: true, writeScopeWarnings: [] }),
     listTasks: () => [],
