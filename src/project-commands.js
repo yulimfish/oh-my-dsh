@@ -16,16 +16,16 @@ export function normalizeUserOpenCodeCommandRoots(value) {
   const roots = []
   const seen = new Set()
   for (let index = 0; index < value.length; index += 1) {
-    const root = value[index]
-    if (typeof root !== 'string' || !root || root.trim() !== root || root.length > 4_096
+    const inputRoot = value[index]
+    const root = typeof inputRoot === 'string' ? inputRoot.replace(/[\\/]+$/u, '') || inputRoot : inputRoot
+    if (typeof inputRoot !== 'string' || !inputRoot || inputRoot.trim() !== inputRoot || inputRoot.length > 4_096
       || !isAbsolute(root) || normalize(root) !== root
       || (basename(root) !== 'commands' && basename(root) !== 'command')
-      || CONTROL_OR_BIDI.test(root)) {
+      || CONTROL_OR_BIDI.test(inputRoot)) {
       throw new TypeError(`dsh-omo: userOpenCodeCommandRoots[${index}] must be a normalized absolute OpenCode command directory named command or commands`)
     }
-    const duplicateKey = root.replace(/[\\/]+$/u, '') || root
-    if (seen.has(duplicateKey)) throw new TypeError('dsh-omo: userOpenCodeCommandRoots must not contain duplicates')
-    seen.add(duplicateKey)
+    if (seen.has(root)) throw new TypeError('dsh-omo: userOpenCodeCommandRoots must not contain duplicates')
+    seen.add(root)
     roots.push(root)
   }
   return Object.freeze(roots)

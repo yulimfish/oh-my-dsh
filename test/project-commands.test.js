@@ -114,6 +114,7 @@ test('validates explicit user OpenCode roots and keeps the option default-off', 
   const roots = ['/Users/alice/.config/opencode/commands', '/Users/alice/.config/opencode/command']
   assert.deepEqual(normalizeUserOpenCodeCommandRoots(undefined), [])
   assert.deepEqual(normalizeUserOpenCodeCommandRoots(roots), roots)
+  assert.deepEqual(normalizeUserOpenCodeCommandRoots([`${roots[0]}/`]), [roots[0]], 'trailing separators are stripped before FS checks')
   assert.ok(Object.isFrozen(normalizeUserOpenCodeCommandRoots(roots)))
   assert.deepEqual(Config({}).userOpenCodeCommandRoots, [])
   assert.throws(() => normalizeUserOpenCodeCommandRoots('/Users/alice/.config/opencode/commands'), /must be an array/u)
@@ -264,6 +265,12 @@ test('rejects symlinked user roots and files resolving outside their configured 
   await assert.rejects(symlinked.adapter.list(symlinked.agent), /not a real directory/u)
   assert.equal(listedNames(symlinked).length, 0)
   assert.equal(readCalls(symlinked).length, 0)
+
+  const trailingSlash = fixture({ userOpenCodeCommandRoots: [`${root}/`] })
+  trailingSlash.addSymlink(root)
+  await assert.rejects(trailingSlash.adapter.list(trailingSlash.agent), /not a real directory/u)
+  assert.equal(listedNames(trailingSlash).length, 0, 'trailing slashes are removed before lstat')
+  assert.equal(readCalls(trailingSlash).length, 0)
 
   const file = `${root}/steal.md`
   const outside = '/outside/steal.md'
