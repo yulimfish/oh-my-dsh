@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { posix as path } from 'node:path'
+import { posix as path, sep } from 'node:path'
 import { apply, Config } from '../src/index.js'
 import {
   createProjectCommandAdapter,
@@ -117,6 +117,9 @@ test('validates explicit user OpenCode roots and keeps the option default-off', 
   assert.deepEqual(normalizeUserOpenCodeCommandRoots(undefined), [])
   assert.deepEqual(normalizeUserOpenCodeCommandRoots(roots), roots)
   assert.deepEqual(normalizeUserOpenCodeCommandRoots([`${roots[0]}/`]), [roots[0]], 'trailing separators are stripped before FS checks')
+  if (sep === '/') {
+    assert.throws(() => normalizeUserOpenCodeCommandRoots([`${roots[0]}\\`]), /named command or commands/u)
+  }
   assert.ok(Object.isFrozen(normalizeUserOpenCodeCommandRoots(roots)))
   assert.deepEqual(Config({}).userOpenCodeCommandRoots, [])
   assert.throws(() => normalizeUserOpenCodeCommandRoots('/Users/alice/.config/opencode/commands'), /must be an array/u)
@@ -137,6 +140,9 @@ test('validates only one explicit user Claude command root and keeps it default-
   assert.deepEqual(normalizeUserClaudeCommandRoots(undefined), [])
   assert.deepEqual(normalizeUserClaudeCommandRoots([root]), [root])
   assert.deepEqual(normalizeUserClaudeCommandRoots([`${root}/`]), [root], 'trailing separators are stripped before filesystem checks')
+  if (sep === '/') {
+    assert.throws(() => normalizeUserClaudeCommandRoots([`${root}\\`]), /named commands/u)
+  }
   assert.ok(Object.isFrozen(normalizeUserClaudeCommandRoots([root])))
   assert.throws(() => normalizeUserClaudeCommandRoots('/Users/alice/.claude/commands'), /must be an array/u)
   assert.throws(() => normalizeUserClaudeCommandRoots(['.claude/commands']), /normalized absolute/u)
@@ -712,16 +718,33 @@ test('integrates project and user-root commands in only the exact live Agent com
   assert.equal(queued[1].content[0].text, 'Review the selected files.\n')
 
   const secondAgent = { id: 'agent-2', followup() {}, ctx: agent.ctx }
-  services.agents.get = id => id === agent.id ? agent : id === secondAgent.id ? secondAgent : undefined
+  const claudeErrorAgent = { id: 'agent-3', followup() {}, ctx: agent.ctx }
+  const liveAgents = new Map([[agent.id, agent], [secondAgent.id, secondAgent], [claudeErrorAgent.id, claudeErrorAgent]])
+  services.agents.get = id => liveAgents.get(id)
   const originalSessionGet = state.sessions.get
-  state.sessions.get = id => id === secondAgent.id
+  state.sessions.get = id => id === secondAgent.id || id === claudeErrorAgent.id
     ? { header: { id, cwd: CWD } }
     : originalSessionGet(id)
   state.nodes.get(userRoot).type = 'symlink'
   const priorScopedCount = scopedCommands.size
   await Promise.all((listeners.get('agent/created') ?? []).map(listener => listener({ agent: secondAgent, signal: new AbortController().signal })))
-  assert.equal(scopedCommands.size, priorScopedCount, 'an invalid user root registers no Agent command')
+  assert.equal(scopedCommands.size, priorScopedCount, 'an invalid OpenCode user root registers no Agent command')
   assert.ok(warnings.length > 0, 'invalid roots fail closed and report through the existing warning path')
+
+  state.nodes.get(userRoot).type = 'directory'
+  const originalListDir = state.fs.listDir
+  state.fs.listDir = async (target, signal) => {
+    if (target?.path === userClaudeRoot) {
+      state.calls.push({ method: 'listDir', target, signal })
+      throw new Error('injected user Claude command listing failure')
+    }
+    return originalListDir(target, signal)
+  }
+  const warningsBeforeClaudeFailure = warnings.length
+  await Promise.all((listeners.get('agent/created') ?? []).map(listener => listener({ agent: claudeErrorAgent, signal: new AbortController().signal })))
+  assert.equal(scopedCommands.size, priorScopedCount, 'a user Claude root listing failure prevents partial project/OpenCode registration')
+  assert.ok(state.calls.some(call => call.method === 'listDir' && call.target?.path === userClaudeRoot), 'the configured user Claude root listing was attempted')
+  assert.ok(warnings.length > warningsBeforeClaudeFailure, 'a user Claude root listing failure reaches the Agent warning path')
 
   await Promise.all((listeners.get('agent/disposed') ?? []).map(listener => listener({ agent })))
   assert.equal(scopedCommands.size, 0, 'Agent disposal unregisters scoped commands')

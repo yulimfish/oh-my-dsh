@@ -1,4 +1,4 @@
-import { basename, isAbsolute, join, normalize } from 'node:path'
+import { basename, isAbsolute, join, normalize, sep } from 'node:path'
 import { isMap, isScalar, parseDocument } from 'yaml'
 
 export const PROJECT_COMMAND_DIRECTORY = '.opencode/commands'
@@ -7,6 +7,8 @@ export const PROJECT_COMMAND_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
 
 export const MAX_USER_OPENCODE_COMMAND_ROOTS = 2
 export const MAX_USER_CLAUDE_COMMAND_ROOTS = 1
+
+const TRAILING_PATH_SEPARATORS = sep === '\\' ? /[\\/]+$/u : /\/+$/u
 
 function normalizeUserCommandRoots(value, { field, maxRoots, allowedBasenames, provider }) {
   if (value === undefined) return Object.freeze([])
@@ -18,7 +20,7 @@ function normalizeUserCommandRoots(value, { field, maxRoots, allowedBasenames, p
   const seen = new Set()
   for (let index = 0; index < value.length; index += 1) {
     const inputRoot = value[index]
-    const root = typeof inputRoot === 'string' ? inputRoot.replace(/[\\/]+$/u, '') || inputRoot : inputRoot
+    const root = typeof inputRoot === 'string' ? inputRoot.replace(TRAILING_PATH_SEPARATORS, '') || inputRoot : inputRoot
     if (typeof inputRoot !== 'string' || !inputRoot || inputRoot.trim() !== inputRoot || inputRoot.length > 4_096
       || !isAbsolute(root) || normalize(root) !== root
       || !allowedBasenames.includes(basename(root))
