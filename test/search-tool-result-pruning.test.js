@@ -6,6 +6,7 @@ const caller = Object.freeze({ id: 'agent-1' })
 
 function makeExec(overrides = {}) {
   return {
+    token: Symbol('tool-execution'),
     name: 'grep',
     parent: undefined,
     agent: caller,
@@ -28,12 +29,25 @@ function makeDecision(overrides = {}) {
   }
 }
 
-function makeTools(get = () => ({ name: 'grep' })) {
+const defaultDefinition = Object.freeze({ name: 'grep' })
+
+function makeTools(get = () => defaultDefinition) {
   return { get }
 }
 
 function makePruner(pruneContent = blocks => blocks) {
   return { pruneContent }
+}
+
+async function passPreExecute(pruning, exec, decision = { kind: 'allow' }) {
+  let nextCalls = 0
+  const returned = await pruning.preExecute(exec, async () => {
+    nextCalls += 1
+    return decision
+  })
+  assert.strictEqual(returned, decision)
+  assert.equal(nextCalls, 1, 'the pre-execute waterfall is continued exactly once')
+  return returned
 }
 
 test('normalizes a bounded exact additional Tool-name allowlist', () => {
@@ -56,6 +70,7 @@ async function assertSkipped({ listenerFactory = createSearchToolResultPruningLi
       return pruner.pruneContent(...args)
     },
   })
+  await passPreExecute(pruning, exec)
   const returned = await pruning.listener(exec, result, async () => {
     nextCalls += 1
     return decision
@@ -74,11 +89,12 @@ test('general pruning accepts an unlisted exact visible Tool when enabled', asyn
   const replacementContent = Object.freeze([{ type: 'text', text: '[pruned]' }])
   const decision = Object.freeze({ kind: 'accept', content: originalContent, marker: 'preserve decision metadata' })
   const lookups = []
+  const definition = { name: 'custom_report_tool' }
   let prunedInput
   const pruning = createGeneralToolResultPruningListener({
     get(name, agent) {
       lookups.push([name, agent])
-      return { name }
+      return definition
     },
   }, {
     pruneContent(content) {
@@ -87,8 +103,10 @@ test('general pruning accepts an unlisted exact visible Tool when enabled', asyn
     },
   })
 
+  const exec = makeExec({ name: 'custom_report_tool' })
+  await passPreExecute(pruning, exec)
   const returned = await pruning.listener(
-    makeExec({ name: 'custom_report_tool' }),
+    exec,
     makeResult(),
     async () => decision,
   )
@@ -96,12 +114,18 @@ test('general pruning accepts an unlisted exact visible Tool when enabled', asyn
   assert.strictEqual(returned.content, replacementContent)
   assert.equal(returned.marker, 'preserve decision metadata')
   assert.strictEqual(prunedInput, originalContent)
-  assert.deepEqual(lookups, [['custom_report_tool', caller]])
+  assert.deepEqual(lookups, [
+    ['custom_report_tool', caller],
+    ['custom_report_tool', caller],
+    ['custom_report_tool', caller],
+    ['custom_report_tool', caller],
+  ])
   pruning.dispose()
 })
 
 test('general pruning leaves non-eligible and Tool-finalized outcomes unchanged', async () => {
-  const customDefinition = makeTools(() => ({ name: 'custom_tool' }))
+  const customDefinitionValue = Object.freeze({ name: 'custom_tool' })
+  const customDefinition = makeTools(() => customDefinitionValue)
   const aborted = new AbortController()
   aborted.abort()
   const cases = [
@@ -123,6 +147,55 @@ test('general pruning leaves non-eligible and Tool-finalized outcomes unchanged'
   }
 })
 
+test('fails open when the dispatched Tool definition changes during dispatch or downstream waterfall', async () => {
+  for (const changeMode of ['before-post', 'during-next-with-event', 'during-next-without-event']) {
+    const original = Object.freeze({ name: 'custom_tool' })
+    const replacement = Object.freeze({ name: 'custom_tool' })
+    let visibleDefinition = original
+    let pruneCalls = 0
+    const tools = { get: () => visibleDefinition }
+    const pruning = createGeneralToolResultPruningListener(tools, {
+      pruneContent() { pruneCalls += 1; return [] },
+    })
+    const exec = makeExec({ name: 'custom_tool' })
+    await passPreExecute(pruning, exec)
+    const decision = makeDecision()
+    let returned
+
+    if (changeMode === 'before-post') {
+      visibleDefinition = replacement
+      pruning.onToolsChange()
+      returned = await pruning.listener(exec, makeResult(), async () => decision)
+    } else {
+      returned = await pruning.listener(exec, makeResult(), async () => {
+        visibleDefinition = replacement
+        if (changeMode === 'during-next-with-event') pruning.onToolsChange()
+        return decision
+      })
+    }
+
+    assert.strictEqual(returned, decision, `${changeMode} preserves the exact downstream decision`)
+    assert.equal(pruneCalls, 0, `${changeMode} never prunes output from an uncertain Tool identity`)
+    pruning.dispose()
+  }
+})
+
+test('fails open when the pre/post execution token is absent or differs', async () => {
+  const pruning = createGeneralToolResultPruningListener(makeTools(), { pruneContent: blocks => blocks })
+  const decision = makeDecision()
+  const missingTokenExec = makeExec({ token: undefined })
+  await passPreExecute(pruning, missingTokenExec)
+  const missingTokenResult = await pruning.listener(missingTokenExec, makeResult(), async () => decision)
+  assert.strictEqual(missingTokenResult, decision)
+
+  const preExec = makeExec()
+  await passPreExecute(pruning, preExec)
+  const postExec = { ...preExec, token: Symbol('different-execution') }
+  const mismatchedTokenResult = await pruning.listener(postExec, makeResult(), async () => decision)
+  assert.strictEqual(mismatchedTokenResult, decision)
+  pruning.dispose()
+})
+
 test('prunes downstream mixed content for exact caller-scoped grep, glob, and web_fetch Tools without mutation', async () => {
   for (const name of ['grep', 'glob', 'web_fetch']) {
     const blocks = Object.freeze([
@@ -140,11 +213,12 @@ test('prunes downstream mixed content for exact caller-scoped grep, glob, and we
     const result = Object.freeze({ isError: false, content: resultContent })
     const output = Object.freeze([blocks[0], blocks[1], Object.freeze({ type: 'text', text: '[pruned]' }), blocks[3], blocks[4], blocks[5]])
     const toolLookups = []
+    const visibleDefinition = { name, projectContent: undefined, finalizeContent: undefined }
     let pruneCalls = 0
     const tools = {
       get(toolName, scope) {
         toolLookups.push([toolName, scope])
-        return { name: toolName, projectContent: undefined, finalizeContent: undefined }
+        return visibleDefinition
       },
     }
     const pruner = {
@@ -157,15 +231,17 @@ test('prunes downstream mixed content for exact caller-scoped grep, glob, and we
       },
     }
     const pruning = createSearchToolResultPruningListener(tools, pruner)
+    const exec = makeExec({ name })
+    await passPreExecute(pruning, exec)
     let nextCalls = 0
-    const returned = await pruning.listener(makeExec({ name }), result, async () => {
+    const returned = await pruning.listener(exec, result, async () => {
       nextCalls += 1
       return decision
     })
 
     assert.equal(nextCalls, 1)
     assert.equal(pruneCalls, 1)
-    assert.deepEqual(toolLookups, [[name, caller]])
+    assert.deepEqual(toolLookups, [[name, caller], [name, caller], [name, caller], [name, caller]])
     assert.notStrictEqual(returned, decision)
     assert.equal(returned.kind, decision.kind)
     assert.strictEqual(returned.content, output)
@@ -230,12 +306,7 @@ test('skips missing Agent/signal, abort, Tool errors, and non-accept decisions',
   ]
 
   for (const options of cases) {
-    let lookups = 0
-    const pruning = await assertSkipped({
-      ...options,
-      tools: makeTools(() => { lookups += 1; return { name: 'grep' } }),
-    })
-    assert.equal(lookups, 0)
+    const pruning = await assertSkipped({ ...options, tools: makeTools() })
     pruning.dispose()
   }
 })
@@ -243,13 +314,11 @@ test('skips missing Agent/signal, abort, Tool errors, and non-accept decisions',
 test('does not fall back to result.content when downstream content is missing or malformed', async () => {
   for (const content of [undefined, null, 'not-an-array']) {
     const decision = content === undefined ? { kind: 'accept' } : { kind: 'accept', content }
-    let lookups = 0
     const pruning = await assertSkipped({
       decision,
       result: makeResult({ content: [{ type: 'text', text: 'result content must not be used' }] }),
-      tools: makeTools(() => { lookups += 1; return { name: 'grep' } }),
+      tools: makeTools(),
     })
-    assert.equal(lookups, 0)
     pruning.dispose()
   }
 })
@@ -290,14 +359,14 @@ test('null, non-array, and throwing Host pruner results preserve the exact decis
   for (const pruneContent of [() => null, () => undefined, () => 'not-an-array', () => { throw new Error('private pruner failure') }]) {
     const pruning = await assertSkipped({
       pruner: { pruneContent },
-      tools: makeTools(() => ({ name: 'grep' })),
+      tools: makeTools(),
       expectedPruneCalls: 1,
     })
     pruning.dispose()
   }
   const missingMethod = await assertSkipped({
     pruner: {},
-    tools: makeTools(() => ({ name: 'grep' })),
+    tools: makeTools(),
     expectedPruneCalls: 1,
   })
   missingMethod.dispose()
@@ -316,9 +385,11 @@ test('cancellation and disposal during pruning fence returned arrays', async () 
         return [{ type: 'text', text: 'must not escape' }]
       },
     }
-    pruning = createSearchToolResultPruningListener(makeTools(() => ({ name: 'grep' })), pruner)
+    pruning = createSearchToolResultPruningListener(makeTools(), pruner)
+    const exec = makeExec({ signal })
+    await passPreExecute(pruning, exec)
     let nextCalls = 0
-    const returned = await pruning.listener(makeExec({ signal }), makeResult(), async () => {
+    const returned = await pruning.listener(exec, makeResult(), async () => {
       nextCalls += 1
       return decision
     })
@@ -336,8 +407,10 @@ test('disposal before execution still calls next exactly once and skips lookup/p
   )
   pruning.dispose()
   const decision = makeDecision()
+  const exec = makeExec()
+  await passPreExecute(pruning, exec)
   let nextCalls = 0
-  const returned = await pruning.listener(makeExec(), makeResult(), async () => {
+  const returned = await pruning.listener(exec, makeResult(), async () => {
     nextCalls += 1
     return decision
   })
@@ -367,10 +440,12 @@ test('malformed getters and service failures fail open to the exact downstream d
   for (const options of cases) {
     let nextCalls = 0
     const pruning = createSearchToolResultPruningListener(
-      options.tools ?? makeTools(() => ({ name: 'grep' })),
+      options.tools ?? makeTools(),
       options.pruner ?? makePruner(),
     )
-    const returned = await pruning.listener(options.exec ?? makeExec(), options.result ?? makeResult(), async () => {
+    const exec = options.exec ?? makeExec()
+    await passPreExecute(pruning, exec)
+    const returned = await pruning.listener(exec, options.result ?? makeResult(), async () => {
       nextCalls += 1
       return options.decision ?? decision
     })

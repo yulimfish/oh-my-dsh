@@ -2575,11 +2575,15 @@ export function apply(ctx, rawConfig) {
   if (config.enableBashFileReadGuidance) ctx.on('tools/post-execute', createBashFileReadGuidanceListener())
   if (config.enableSearchToolResultPruning) {
     const pruning = createSearchToolResultPruningListener(ctx.tools, activeSearchToolResultPruner, additionalSearchToolResultPruningTools)
+    ctx.on('tools/pre-execute', pruning.preExecute)
+    ctx.on('tools/change', pruning.onToolsChange)
     ctx.on('tools/post-execute', pruning.listener)
     ctx.effect(() => pruning.dispose, 'dsh-omo direct search Tool result pruning')
   }
   if (config.enableGeneralToolResultPruning) {
     const pruning = createGeneralToolResultPruningListener(ctx.tools, activeGeneralToolResultPruner)
+    ctx.on('tools/pre-execute', pruning.preExecute)
+    ctx.on('tools/change', pruning.onToolsChange)
     ctx.on('tools/post-execute', pruning.listener)
     ctx.effect(() => pruning.dispose, 'dsh-omo general Tool result pruning')
   }

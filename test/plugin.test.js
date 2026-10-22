@@ -95,6 +95,19 @@ function makeContext(options = {}) {
   return { ctx, tools, sections, commands, skills, skillProviders, skillInvalidations, starts, continuableStarts, continuableChildren, descendantCalls, interrupts, followups, disposals, effects, events, eventListeners, guards }
 }
 
+async function allowToolPreExecute(fixture, exec) {
+  const listener = fixture.events.get('tools/pre-execute')
+  assert.equal(typeof listener, 'function')
+  const decision = { kind: 'allow' }
+  let nextCalls = 0
+  const returned = await listener(exec, async () => {
+    nextCalls += 1
+    return decision
+  })
+  assert.strictEqual(returned, decision)
+  assert.equal(nextCalls, 1)
+}
+
 function attachAgentContext(agent, fixture) {
   agent.ctx = {
     systemPrompt: fixture.ctx.systemPrompt,
@@ -2522,6 +2535,7 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   const additionalContexts = Object.freeze([contextMessage])
   let prunedInput
   const searchToolLookups = []
+  const searchDefinitions = new Map()
   const searchPruningFixture = makeContext({
     services: {
       toolResultPruner: {
@@ -2533,7 +2547,8 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
     },
     getTool: (toolName, agent) => {
       searchToolLookups.push([toolName, agent])
-      return { name: toolName }
+      if (!searchDefinitions.has(toolName)) searchDefinitions.set(toolName, { name: toolName })
+      return searchDefinitions.get(toolName)
     },
   })
   apply(searchPruningFixture.ctx, {
@@ -2543,10 +2558,11 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   })
   const searchPostExecute = searchPruningFixture.events.get('tools/post-execute')
   assert.equal(typeof searchPostExecute, 'function')
+  assert.equal(typeof searchPruningFixture.events.get('tools/change'), 'function')
   const downstreamDecision = Object.freeze({ kind: 'accept', content: searchBlocks, additionalContexts, marker: 'preserved' })
-  const searchDecision = await searchPostExecute({
-    name: 'grep', agent: searchAgent, parent: undefined, signal: new AbortController().signal,
-  }, {
+  const grepExec = { token: Symbol('search-grep'), name: 'grep', agent: searchAgent, parent: undefined, signal: new AbortController().signal }
+  await allowToolPreExecute(searchPruningFixture, grepExec)
+  const searchDecision = await searchPostExecute(grepExec, {
     isError: false, value: { structured: 'leave untouched' }, content: resultBlocks,
   }, async () => downstreamDecision)
   assert.notStrictEqual(searchDecision, downstreamDecision)
@@ -2554,12 +2570,15 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   assert.strictEqual(searchDecision.additionalContexts, additionalContexts)
   assert.equal(searchDecision.marker, 'preserved')
   assert.strictEqual(prunedInput, searchBlocks, 'the downstream decision content is pruned, not result.content')
-  const customDecision = await searchPostExecute({
-    name: 'custom_text_tool', agent: searchAgent, parent: undefined, signal: new AbortController().signal,
-  }, { isError: false, content: resultBlocks }, async () => downstreamDecision)
+  const customExec = { token: Symbol('search-custom'), name: 'custom_text_tool', agent: searchAgent, parent: undefined, signal: new AbortController().signal }
+  await allowToolPreExecute(searchPruningFixture, customExec)
+  const customDecision = await searchPostExecute(customExec, { isError: false, content: resultBlocks }, async () => downstreamDecision)
   assert.notStrictEqual(customDecision, downstreamDecision, 'an explicitly configured content-only Tool name is eligible')
   assert.strictEqual(customDecision.content, replacementBlocks)
-  assert.deepEqual(searchToolLookups, [['grep', searchAgent], ['custom_text_tool', searchAgent]])
+  assert.deepEqual(searchToolLookups, [
+    ['grep', searchAgent], ['grep', searchAgent], ['grep', searchAgent], ['grep', searchAgent],
+    ['custom_text_tool', searchAgent], ['custom_text_tool', searchAgent], ['custom_text_tool', searchAgent], ['custom_text_tool', searchAgent],
+  ])
   assert.match(searchPruningFixture.commands.get('omo').handler({ rawInput: 'status' }).text, /searchToolResultPruning=enabled/u)
   assert.match(searchPruningFixture.commands.get('omo').handler().text, /Search Tool result pruning: enabled for default grep\/glob\/web_fetch plus configured exact Tool names/u)
   const searchPruningEffect = searchPruningFixture.effects.find(effect => effect.label === 'dsh-omo direct search Tool result pruning')
@@ -2607,6 +2626,7 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   const generalAgent = Object.freeze({ id: 'general-pruning-agent' })
   let generalPrunedInput
   const generalToolLookups = []
+  const generalDefinitions = new Map()
   const generalPruningFixture = makeContext({
     services: {
       toolResultPruner: {
@@ -2618,21 +2638,28 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
     },
     getTool: (toolName, agent) => {
       generalToolLookups.push([toolName, agent])
-      return { name: toolName }
+      if (!generalDefinitions.has(toolName)) generalDefinitions.set(toolName, { name: toolName })
+      return generalDefinitions.get(toolName)
     },
   })
   apply(generalPruningFixture.ctx, { ...baseConfig, enableGeneralToolResultPruning: true })
   const generalPostExecute = generalPruningFixture.events.get('tools/post-execute')
   assert.equal(typeof generalPostExecute, 'function')
+  assert.equal(typeof generalPruningFixture.events.get('tools/pre-execute'), 'function')
   const generalDecision = Object.freeze({ kind: 'accept', content: generalOriginal, marker: 'retain extras' })
-  const generalReturned = await generalPostExecute({
-    name: 'custom_large_output_tool', agent: generalAgent, parent: undefined, signal: new AbortController().signal,
-  }, { isError: false, value: { structured: 'do not use dispatch content' }, content: [{ type: 'text', text: 'dispatch value' }] }, async () => generalDecision)
+  const generalExec = { token: Symbol('general-output'), name: 'custom_large_output_tool', agent: generalAgent, parent: undefined, signal: new AbortController().signal }
+  await allowToolPreExecute(generalPruningFixture, generalExec)
+  const generalReturned = await generalPostExecute(generalExec, { isError: false, value: { structured: 'do not use dispatch content' }, content: [{ type: 'text', text: 'dispatch value' }] }, async () => generalDecision)
   assert.notStrictEqual(generalReturned, generalDecision)
   assert.strictEqual(generalReturned.content, generalReplacement)
   assert.equal(generalReturned.marker, 'retain extras')
   assert.strictEqual(generalPrunedInput, generalOriginal, 'general mode prunes downstream content, not dispatch result content')
-  assert.deepEqual(generalToolLookups, [['custom_large_output_tool', generalAgent]])
+  assert.deepEqual(generalToolLookups, [
+    ['custom_large_output_tool', generalAgent],
+    ['custom_large_output_tool', generalAgent],
+    ['custom_large_output_tool', generalAgent],
+    ['custom_large_output_tool', generalAgent],
+  ])
   const generalStatus = generalPruningFixture.commands.get('omo').handler({ rawInput: 'status' }).text
   assert.match(generalStatus, /generalToolResultPruning=enabled/u)
   assert.match(generalPruningFixture.commands.get('omo').handler().text, /General Tool result pruning: enabled for eligible top-level successful content-only Tool results/u)

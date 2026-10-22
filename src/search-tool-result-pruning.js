@@ -26,20 +26,130 @@ export function normalizeAdditionalToolResultPruningNames(value) {
   return Object.freeze(names)
 }
 
+const MAX_PENDING_TOOL_EXECUTIONS = 128
+
+function isEligibleDefinition(definition, name) {
+  return Boolean(definition && (typeof definition === 'object' || typeof definition === 'function')
+    && definition.name === name
+    && definition.projectContent === undefined
+    && definition.finalizeContent === undefined)
+}
+
 function createToolResultPruningListener(toolService, pruner, eligibleToolNames) {
   let disposed = false
+  let registryGeneration = {}
+  const pending = new Map()
 
-  const listener = async (exec, result, next) => {
-    // Deliberately leave next() outside the fail-open catch: its errors belong to the waterfall.
+  function clearPending(token) {
+    const entry = pending.get(token)
+    if (!entry) return
+    pending.delete(token)
+    try { entry.signal.removeEventListener('abort', entry.onAbort) } catch {}
+  }
+
+  function clearAllPending() {
+    for (const token of pending.keys()) clearPending(token)
+  }
+
+  const onToolsChange = () => {
+    if (disposed) return
+    registryGeneration = {}
+    clearAllPending()
+  }
+
+  const preExecute = async (exec, next) => {
+    let entry
+    try {
+      if (!disposed && exec && exec.parent === undefined) {
+        const name = exec.name
+        const token = exec.token
+        const agent = exec.agent
+        const signal = exec.signal
+        if (typeof token === 'symbol' && typeof name === 'string' && name !== 'run_code'
+          && (!eligibleToolNames || eligibleToolNames.has(name))
+          && agent && typeof agent === 'object'
+          && signal && signal.aborted === false
+          && typeof signal.addEventListener === 'function'
+          && typeof signal.removeEventListener === 'function'
+          && toolService && typeof toolService.get === 'function') {
+          const definition = toolService.get(name, agent)
+          if (isEligibleDefinition(definition, name)) {
+            entry = { token, name, agent, definition, signal, registryGeneration }
+          }
+        }
+      }
+    } catch {
+      // An unknown execution identity or visible definition is never a pruning authorization.
+    }
+
+    // This is a pre-dispatch waterfall: propagate its decision and errors unchanged.
     const decision = await next()
-    if (disposed) return decision
+    if (!entry || disposed) return decision
 
     try {
-      if (!exec || exec.parent !== undefined) return decision
-      const name = exec.name
-      if (name === 'run_code' || (eligibleToolNames && !eligibleToolNames.has(name))) return decision
-      const agent = exec.agent
-      if (!agent || typeof agent !== 'object') return decision
+      if (decision?.kind !== 'allow'
+        || entry.signal.aborted !== false
+        || registryGeneration !== entry.registryGeneration
+        || exec?.token !== entry.token
+        || exec?.name !== entry.name
+        || exec?.agent !== entry.agent
+        || exec?.parent !== undefined
+        || toolService.get(entry.name, entry.agent) !== entry.definition
+        || !isEligibleDefinition(entry.definition, entry.name)) return decision
+      if (pending.has(entry.token)) {
+        clearPending(entry.token)
+        return decision
+      }
+      entry.onAbort = () => clearPending(entry.token)
+      pending.set(entry.token, entry)
+      try { entry.signal.addEventListener('abort', entry.onAbort, { once: true }) } catch {
+        clearPending(entry.token)
+        return decision
+      }
+      if (entry.signal.aborted !== false) {
+        clearPending(entry.token)
+        return decision
+      }
+      while (pending.size > MAX_PENDING_TOOL_EXECUTIONS) {
+        clearPending(pending.keys().next().value)
+      }
+    } catch {
+      clearPending(entry.token)
+    }
+    return decision
+  }
+
+  const listener = async (exec, result, next) => {
+    let entry
+    let definitionMatchesBeforeNext = false
+    try {
+      const token = exec?.token
+      if (!disposed && typeof token === 'symbol') {
+        entry = pending.get(token)
+        if (entry) {
+          clearPending(token)
+          definitionMatchesBeforeNext = registryGeneration === entry.registryGeneration
+            && exec?.name === entry.name
+            && exec?.agent === entry.agent
+            && exec?.parent === undefined
+            && toolService?.get(entry.name, entry.agent) === entry.definition
+            && isEligibleDefinition(entry.definition, entry.name)
+        }
+      }
+    } catch {
+      entry = undefined
+    }
+
+    // Deliberately leave next() outside the fail-open catch: its errors belong to the waterfall.
+    const decision = await next()
+    if (disposed || !entry || !definitionMatchesBeforeNext) return decision
+
+    try {
+      if (registryGeneration !== entry.registryGeneration
+        || exec?.token !== entry.token
+        || exec?.name !== entry.name
+        || exec?.agent !== entry.agent
+        || exec?.parent !== undefined) return decision
       if (result?.isError !== false) return decision
 
       const signal = exec.signal
@@ -50,12 +160,9 @@ function createToolResultPruningListener(toolService, pruner, eligibleToolNames)
       const content = decision.content
       if (!Array.isArray(content) || disposed || signal.aborted !== false) return decision
 
-      if (!toolService || typeof toolService.get !== 'function') return decision
-      const definition = toolService.get(name, agent)
-      if (!definition || (typeof definition !== 'object' && typeof definition !== 'function')
-        || definition.name !== name
-        || definition.projectContent !== undefined
-        || definition.finalizeContent !== undefined) return decision
+      if (!toolService || typeof toolService.get !== 'function'
+        || toolService.get(entry.name, entry.agent) !== entry.definition
+        || !isEligibleDefinition(entry.definition, entry.name)) return decision
 
       if (disposed || signal.aborted !== false) return decision
       const pruned = pruner.pruneContent(content)
@@ -72,9 +179,12 @@ function createToolResultPruningListener(toolService, pruner, eligibleToolNames)
   }
 
   return {
+    preExecute,
     listener,
+    onToolsChange,
     dispose() {
       disposed = true
+      clearAllPending()
     },
   }
 }
