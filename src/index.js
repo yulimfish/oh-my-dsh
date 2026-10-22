@@ -48,7 +48,7 @@ import { createContinuableTaskRegistry } from './continuable-task-registry.js'
 import { createBashFileReadGuidanceListener } from './bash-file-read-guidance.js'
 import { createProjectAgentFilesAdapter, PROJECT_AGENT_FILE_NAME } from './project-agent-files.js'
 import { createPromptFileExpander } from './prompt-file-expansion.js'
-import { createProjectCommandAdapter, makeProjectCommandDefinition } from './project-commands.js'
+import { createProjectCommandAdapter, makeProjectCommandDefinition, normalizeUserOpenCodeCommandRoots } from './project-commands.js'
 import { createTaskResultRegistry, createTaskResultTool, TASK_RESULT_MAX_CHARS } from './task-result-tool.js'
 import { createTaskCancelTool } from './task-cancel-tool.js'
 import { createPersistentMemoryTool, disposePersistentMemoryTool, openPersistentMemoryDomain } from './persistent-memory-tools.js'
@@ -130,6 +130,7 @@ export const Config = z.object({
   enableAgentsOnRead: z.boolean().default(false),
   enableProjectAgentFiles: z.boolean().default(false),
   enableProjectCommands: z.boolean().default(false),
+  userOpenCodeCommandRoots: z.array(z.string()).default([]),
   enablePromptFileExpansion: z.boolean().default(false),
   enableRootReadmeContext: z.boolean().default(false),
   enableReadmeOnRead: z.boolean().default(false),
@@ -525,8 +526,8 @@ function queueParentMessage(parent, text, source = { kind: 'user' }) {
 
 const MAX_PROJECT_COMMAND_AGENT_SCOPES = 256
 const PROJECT_COMMAND_SCAN_TIMEOUT_MS = 5_000
-function createProjectCommandManager(ctx, sessionsService, agentsService, lifecycle) {
-  const adapter = createProjectCommandAdapter(ctx.fs, { sessions: sessionsService })
+function createProjectCommandManager(ctx, sessionsService, agentsService, lifecycle, userOpenCodeCommandRoots) {
+  const adapter = createProjectCommandAdapter(ctx.fs, { sessions: sessionsService, userOpenCodeCommandRoots })
   const scopes = new Map()
   let disposed = false
 
@@ -1898,6 +1899,10 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
 
 export function apply(ctx, rawConfig) {
   const config = rawConfig
+  const userOpenCodeCommandRoots = normalizeUserOpenCodeCommandRoots(config.userOpenCodeCommandRoots)
+  if (userOpenCodeCommandRoots.length > 0 && config.enableProjectCommands !== true) {
+    throw new Error('dsh-omo: userOpenCodeCommandRoots requires enableProjectCommands')
+  }
   const additionalSearchToolResultPruningTools = normalizeAdditionalToolResultPruningNames(config.additionalSearchToolResultPruningTools)
   if (additionalSearchToolResultPruningTools.length > 0 && !config.enableSearchToolResultPruning) {
     throw new Error('dsh-omo: additionalSearchToolResultPruningTools requires enableSearchToolResultPruning')
@@ -2534,7 +2539,7 @@ export function apply(ctx, rawConfig) {
     ctx.effect(() => continuableTaskRegistry.dispose, 'dsh-omo continuable task follow-up registry')
   }
   if (config.enableProjectCommands) {
-    const projectCommands = createProjectCommandManager(ctx, sessionsService, agentsService, lifecycle)
+    const projectCommands = createProjectCommandManager(ctx, sessionsService, agentsService, lifecycle, userOpenCodeCommandRoots)
     ctx.on('agent/created', projectCommands.listener)
     ctx.on('agent/disposed', projectCommands.clearAgent)
     ctx.effect(() => projectCommands.dispose, 'dsh-omo project command source')

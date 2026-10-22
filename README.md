@@ -364,7 +364,7 @@ The DSH skill registry now discovers project-local skills relative to each skill
 
 ## Project command files
 
-`enableProjectCommands` defaults to `false`. When enabled, dsh-omo scans flat `.opencode/commands/*.md`, `.opencode/command/*.md`, and `.claude/commands/*.md` files under the exact CWD of each newly created Agent and registers them in that Agent's scoped DSH command registry. The plural `.opencode/commands` root wins over `.opencode/command`, and either OpenCode root wins over `.claude/commands` for duplicate names. User-level OpenCode/Claude command roots are not scanned: the current Host contracts do not supply a home/config directory in the filesystem execution world, so dsh-omo does not infer `~` from a project CWD. The scope is disposed with the Agent or plugin. Both sources require YAML frontmatter with a `description` and a nonempty Markdown body. Claude-style files may also declare one optional display-only `argument-hint` (up to 160 safe single-line characters), which is passed to the DSH command composer; OpenCode files continue to accept only `description`. For example, in `.claude/commands/review.md`:
+`enableProjectCommands` defaults to `false`. When enabled, dsh-omo scans flat `.opencode/commands/*.md`, `.opencode/command/*.md`, and `.claude/commands/*.md` files under the exact CWD of each newly created Agent and registers them in that Agent's scoped DSH command registry. The plural `.opencode/commands` root wins over `.opencode/command`, and either OpenCode root wins over `.claude/commands` for duplicate names. Optional `userOpenCodeCommandRoots` can add up to two explicitly configured user-level OpenCode roots; each must be a normalized absolute DSH-FS path whose final directory is named `command` or `commands`. These roots are scanned only when `enableProjectCommands` is true, after all project roots; the array order sets precedence among user roots. There is no `~`/HOME inference, Node filesystem fallback, or automatic user-level Claude root. A configured root reported missing is skipped; errors resolving/listing a root, a configured root path whose final component is a symlink, or a non-directory fail the Agent's scan closed and are reported through the existing warning. Individual files that fail validation are skipped. The scope is disposed with the Agent or plugin. Both sources require YAML frontmatter with a `description` and a nonempty Markdown body. Claude-style files may also declare one optional display-only `argument-hint` (up to 160 safe single-line characters), which is passed to the DSH command composer; OpenCode files continue to accept only `description`. For example, in `.claude/commands/review.md`:
 
 ```markdown
 ---
@@ -380,6 +380,9 @@ Only the literal `$ARGUMENTS` placeholder is expanded, and its value is inserted
 - id: dsh-omo
   config:
     enableProjectCommands: true
+    userOpenCodeCommandRoots:
+      - /Users/alice/.config/opencode/commands
+      - /Users/alice/.config/opencode/command
 ```
 
 ## Try it
