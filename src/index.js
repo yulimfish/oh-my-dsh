@@ -16,7 +16,7 @@ import { registerLspNavigationTools } from './lsp-tools.js'
 import { registerRootAgentsContext } from './agents-context.js'
 import { registerRootReadmeContext } from './readme-context.js'
 import { registerAgentsOnReadContext, registerReadmeOnReadContext } from './readme-on-read.js'
-import { registerClaudeRulesOnReadContext } from './claude-rules-context.js'
+import { normalizeUserClaudeRulesRoots, registerClaudeRulesOnReadContext } from './claude-rules-context.js'
 import { createJobKillCommand } from './job-commands.js'
 import { registerJobTools } from './job-tools.js'
 import { readTerminalBackendTypes, registerAgentTerminalTools } from './terminal-tools.js'
@@ -136,6 +136,7 @@ export const Config = z.object({
   enableRootReadmeContext: z.boolean().default(false),
   enableReadmeOnRead: z.boolean().default(false),
   enableClaudeRulesOnRead: z.boolean().default(false),
+  userClaudeRulesRoots: z.array(z.string()).default([]),
   enableWriteExistingFileGuard: z.boolean().default(false),
   enableNotepadWriteGuard: z.boolean().default(false),
   enableEditErrorRecovery: z.boolean().default(false),
@@ -1902,6 +1903,10 @@ export function apply(ctx, rawConfig) {
   const config = rawConfig
   const userOpenCodeCommandRoots = normalizeUserOpenCodeCommandRoots(config.userOpenCodeCommandRoots)
   const userClaudeCommandRoots = normalizeUserClaudeCommandRoots(config.userClaudeCommandRoots)
+  const userClaudeRulesRoots = normalizeUserClaudeRulesRoots(config.userClaudeRulesRoots)
+  if (userClaudeRulesRoots.length > 0 && config.enableClaudeRulesOnRead !== true) {
+    throw new Error('dsh-omo: userClaudeRulesRoots requires enableClaudeRulesOnRead')
+  }
   if (userOpenCodeCommandRoots.length > 0 && config.enableProjectCommands !== true) {
     throw new Error('dsh-omo: userOpenCodeCommandRoots requires enableProjectCommands')
   }
@@ -2530,7 +2535,7 @@ export function apply(ctx, rawConfig) {
       ...(typeof rootSnapshotAvailable === 'function' ? { rootSnapshotAvailable } : {}),
     })
   }
-  if (config.enableClaudeRulesOnRead) registerClaudeRulesOnReadContext(ctx, agentsService, sessionsService, ctx.fs)
+  if (config.enableClaudeRulesOnRead) registerClaudeRulesOnReadContext(ctx, agentsService, sessionsService, ctx.fs, userClaudeRulesRoots)
   if (config.enablePlanFormatAdvisory) {
     ctx.on('tools/post-execute', createPlanFormatAdvisoryListener(
       sessionQueryService, ctx.fs, lifecycle.controller.signal,

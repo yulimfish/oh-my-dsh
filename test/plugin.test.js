@@ -250,6 +250,7 @@ const baseConfig = {
   enableRootReadmeContext: false,
   enableReadmeOnRead: false,
   enableClaudeRulesOnRead: false,
+  userClaudeRulesRoots: [],
   enableWriteExistingFileGuard: false,
   enableNotepadWriteGuard: false,
   enableEditErrorRecovery: false,
@@ -407,6 +408,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableReadmeOnRead: true }).enableReadmeOnRead, true)
   assert.equal(Config({}).enableClaudeRulesOnRead, false)
   assert.equal(Config({ enableClaudeRulesOnRead: true }).enableClaudeRulesOnRead, true)
+  assert.deepEqual(Config({}).userClaudeRulesRoots, [])
+  assert.deepEqual(Config({ userClaudeRulesRoots: ['/Users/alice/.claude/rules'] }).userClaudeRulesRoots, ['/Users/alice/.claude/rules'])
   assert.equal(Config({}).runtimeFallback.enabled, false)
   assert.deepEqual(Config({}).runtimeFallback.retryOnStatuses, [429, 500, 502, 503, 504])
   assert.deepEqual(Config({}).runtimeFallback.chains, [])
@@ -1597,6 +1600,13 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
   assert.match(disabled.commands.get('omo').handler().text, /Claude rules after read\/write\/edit: disabled/u)
   assert.deepEqual(calls, [], 'disabled setup and status do not call filesystem or Service methods')
 
+  const rootsWithoutFlag = makeContext(prerequisites())
+  assert.throws(
+    () => apply(rootsWithoutFlag.ctx, { ...baseConfig, userClaudeRulesRoots: ['/Users/alice/.claude/rules'] }),
+    /userClaudeRulesRoots requires enableClaudeRulesOnRead/u,
+  )
+  assert.equal(rootsWithoutFlag.events.size, 0, 'user roots cannot activate the adapter implicitly')
+
   const missingCases = [
     ['agents service', deps => { deps.services.agents = undefined }],
     ['agents.get', deps => { deps.services.agents = {} }],
@@ -1629,7 +1639,11 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
   }
 
   const enabled = makeContext(prerequisites())
-  apply(enabled.ctx, { ...baseConfig, enableClaudeRulesOnRead: true })
+  apply(enabled.ctx, {
+    ...baseConfig,
+    enableClaudeRulesOnRead: true,
+    userClaudeRulesRoots: ['/Users/alice/.claude/rules'],
+  })
   assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
   assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=enabled/u)
   assert.match(enabled.commands.get('omo').handler().text, /Claude rules after read\/write\/edit: enabled/u)

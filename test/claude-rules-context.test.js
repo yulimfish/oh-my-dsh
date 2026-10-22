@@ -6,7 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { createClaudeRulesOnReadContextListener, registerClaudeRulesOnReadContext } from '../src/claude-rules-context.js'
+import { createClaudeRulesOnReadContextListener, normalizeUserClaudeRulesRoots, registerClaudeRulesOnReadContext } from '../src/claude-rules-context.js'
 
 const systemPromptRequire = createRequire(import.meta.resolve('@deepseek-ai/dsh-system-prompt'))
 const { createScope } = await import(systemPromptRequire.resolve('@deepseek-ai/dsh-scope'))
@@ -14,6 +14,7 @@ const agentRequire = createRequire(import.meta.resolve('@deepseek-ai/dsh-subagen
 const { AgentRegistry } = await import(agentRequire.resolve('@deepseek-ai/dsh-agent'))
 
 const CWD = '/workspace/project'
+const USER_CLAUDE_RULES_ROOT = '/Users/alice/.claude/rules'
 const encoder = new TextEncoder()
 
 function rule(body, frontmatter = 'alwaysApply: true') {
@@ -31,11 +32,22 @@ function makeRecord(value) {
   return record
 }
 
-function makeFileSystem({ cwd = CWD, rules = {}, types = {}, failListDir = false, hangListDir = false } = {}) {
+function makeFileSystem({
+  cwd = CWD,
+  userClaudeRulesRoot = USER_CLAUDE_RULES_ROOT,
+  userRootTargetKey,
+  rules = {},
+  types = {},
+  failListDir = false,
+  failListDirPath,
+  missingUserRoot = false,
+  hangListDir = false,
+} = {}) {
   const calls = []
   const records = new Map(Object.entries(rules).map(([relative, value]) => [relative, makeRecord(value)]))
   const extraTypes = new Map(Object.entries(types))
   const directories = new Set(['', '.claude', '.claude/rules'])
+  if (!missingUserRoot) directories.add('@user')
   const targets = new WeakMap()
   const targetCache = new Map()
   let activeReadPath = 'src/app.ts'
@@ -65,6 +77,7 @@ function makeFileSystem({ cwd = CWD, rules = {}, types = {}, failListDir = false
 
   function currentTargetKey(relative, record, kind) {
     if (record?.replaced && record.afterTargetKey !== undefined) return record.afterTargetKey
+    if (relative === '@user' && typeof userRootTargetKey === 'string') return userRootTargetKey
     return record?.targetKey ?? `${kind}:${cwd}:${relative}`
   }
 
@@ -83,13 +96,23 @@ function makeFileSystem({ cwd = CWD, rules = {}, types = {}, failListDir = false
 
   const rootTarget = makeTarget('', 'directory', undefined, { key: `root:${cwd}` })
 
-  function relativeFromPath(value) {
+  function relativeFromPath(value, baseCwd = cwd) {
     if (typeof value !== 'string') return undefined
     if (value === cwd) return ''
-    if (!path.isAbsolute(value)) return value
-    const relative = path.relative(cwd, value)
-    if (relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return undefined
-    return relative
+    if (value === userClaudeRulesRoot) return '@user'
+    if (path.isAbsolute(value)) {
+      if (value.startsWith(`${userClaudeRulesRoot}/`)) return `@user/${path.relative(userClaudeRulesRoot, value)}`
+      const relative = path.relative(cwd, value)
+      if (relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return undefined
+      return relative
+    }
+    if (baseCwd === userClaudeRulesRoot) {
+      const relative = path.normalize(value)
+      if (relative === '.') return '@user'
+      if (relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return undefined
+      return `@user/${relative}`
+    }
+    return value
   }
 
   function typeAt(relative) {
@@ -142,10 +165,10 @@ function makeFileSystem({ cwd = CWD, rules = {}, types = {}, failListDir = false
   const fs = {
     async resolve(value, options = {}) {
       calls.push({ method: 'resolve', path: value, options })
-      if (options.cwd !== undefined && options.cwd !== cwd) {
+      if (options.cwd !== undefined && options.cwd !== cwd && options.cwd !== userClaudeRulesRoot) {
         return makeTarget(String(value), 'file', undefined, { outside: true, key: `outside:${String(value)}` })
       }
-      const relative = relativeFromPath(value)
+      const relative = relativeFromPath(value, options.cwd ?? cwd)
       if (relative === undefined) return makeTarget(String(value), 'file', undefined, { outside: true, key: `outside:${String(value)}` })
       const target = targetAt(relative)
       if (!target) throw new Error(`missing test target: ${String(value)}`)
@@ -168,14 +191,16 @@ function makeFileSystem({ cwd = CWD, rules = {}, types = {}, failListDir = false
     },
     async lstat(relative, options = {}, signal) {
       calls.push({ method: 'lstat', path: relative, options, signal })
-      const record = records.get(relative)
+      const resolvedPath = relativeFromPath(relative, options.cwd ?? cwd)
+      if (resolvedPath === undefined) return undefined
+      const record = records.get(resolvedPath)
       if (record) {
         record.lstatCalls = (record.lstatCalls ?? 0) + 1
         if (record.afterPathInfo !== undefined && record.replaced && record.lstatCalls > 1) return record.afterPathInfo
         if (record.pathInfo !== undefined) return record.pathInfo
         return { type: record.type, ...(record.bytes ? { size: record.bytes.byteLength } : {}), ...(record.version ? { version: record.version } : {}) }
       }
-      if (directories.has(relative) || relative === '') return { type: 'directory', version: 'dir-v1' }
+      if (directories.has(resolvedPath) || resolvedPath === '') return { type: 'directory', version: 'dir-v1' }
       return undefined
     },
     async stat(target, signal) {
@@ -192,7 +217,7 @@ function makeFileSystem({ cwd = CWD, rules = {}, types = {}, failListDir = false
       const info = targets.get(target)
       calls.push({ method: 'listDir', path: info?.relative, target, signal })
       if (!info || info.kind !== 'directory' || info.outside) throw new Error('invalid test directory target')
-      if (failListDir) throw new Error('simulated listDir failure')
+      if (failListDir || info?.relative === failListDirPath) throw new Error('simulated listDir failure')
       if (hangListDir) return new Promise(resolve => { releaseListing = () => resolve(childrenOf(info.relative)) })
       const record = info.record
       if (record?.listError) throw new Error('simulated directory-list error')
@@ -261,6 +286,7 @@ async function makeHarness(options = {}) {
     agents,
     { get: id => sessions.get(id) },
     fileSystem.fs,
+    options.userClaudeRulesRoots ?? [],
   ))
   let policyFiber
   const downstreamContext = options.downstreamContext ? userContext('downstream context') : undefined
@@ -403,6 +429,25 @@ function contextTexts(result) {
   return (result.additionalContexts ?? []).map(message => message.content.map(block => block.type === 'text' ? block.text : '').join('\n'))
 }
 
+test('validates one explicit normalized absolute user Claude rules root', () => {
+  assert.deepEqual(normalizeUserClaudeRulesRoots(undefined), [])
+  assert.deepEqual(normalizeUserClaudeRulesRoots([USER_CLAUDE_RULES_ROOT]), [USER_CLAUDE_RULES_ROOT])
+  assert.deepEqual(normalizeUserClaudeRulesRoots([`${USER_CLAUDE_RULES_ROOT}/`]), [USER_CLAUDE_RULES_ROOT])
+  assert.ok(Object.isFrozen(normalizeUserClaudeRulesRoots([USER_CLAUDE_RULES_ROOT])))
+  assert.throws(() => normalizeUserClaudeRulesRoots(USER_CLAUDE_RULES_ROOT), /must be an array/u)
+  assert.throws(() => normalizeUserClaudeRulesRoots([`${USER_CLAUDE_RULES_ROOT}`, `${USER_CLAUDE_RULES_ROOT}`]), /at most one/u)
+  for (const invalid of [
+    '.claude/rules',
+    '~/.claude/rules',
+    '/Users/alice/.claude/commands',
+    '/Users/alice/.claude/../.claude/rules',
+    `${USER_CLAUDE_RULES_ROOT}\\`,
+    ` ${USER_CLAUDE_RULES_ROOT}`,
+  ]) {
+    assert.throws(() => normalizeUserClaudeRulesRoots([invalid]), /normalized absolute path/u, invalid)
+  }
+})
+
 test('injects alwaysApply and matching .md/.mdc rules while preserving native value/content and UserMessage shape', async () => {
   const harness = await makeHarness({ rules: {
     '.claude/rules/always.md': rule('always guidance', 'alwaysApply: true'),
@@ -425,6 +470,227 @@ test('injects alwaysApply and matching .md/.mdc rules while preserving native va
     assert.match(texts[0], /always guidance/u)
     assert.match(texts[1], /Untrusted/u)
     assert.ok(result.additionalContexts.every(message => message.role === 'user' && message.source.kind === 'user'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('scans one explicit user Claude root after project rules and matches the session file path', async () => {
+  const harness = await makeHarness({
+    userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+    rules: {
+      '.claude/rules/project.md': rule('project rule first', 'alwaysApply: true'),
+      '@user/user.mdc': rule('explicit user rule second', 'globs: "**/*.ts"'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.equal(result.isError, false)
+    assert.deepEqual(result.value, { body: 'body:src/app.ts' })
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.claude/rules/project.md',
+      'user/.claude/rules/user.mdc',
+    ])
+    assert.ok(contextTexts(result)[0].includes('project rule first'))
+    assert.ok(contextTexts(result)[1].includes('explicit user rule second'))
+    assert.ok(contextTexts(result)[1].includes('glob:'))
+    assert.ok(result.additionalContexts.every(message => message.role === 'user' && message.source.kind === 'user'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('does not infer user rule roots and skips a missing explicit root', async () => {
+  const implicit = await makeHarness({ rules: { '@user/global.md': rule('must not be discovered implicitly', 'alwaysApply: true') } })
+  try {
+    const agent = await implicit.createAgent()
+    const result = await implicit.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(implicit.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@user'), false)
+  } finally {
+    await implicit.dispose()
+  }
+
+  const missing = await makeHarness({ userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT], missingUserRoot: true })
+  try {
+    const agent = await missing.createAgent()
+    const result = await missing.executeRead(agent, 'src/app.ts')
+    assert.equal(result.isError, false)
+    assert.deepEqual(result.value, { body: 'body:src/app.ts' })
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(missing.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@user'), false)
+  } finally {
+    await missing.dispose()
+  }
+})
+
+test('fails closed on a symlinked user root or an entry resolving outside its configured boundary', async t => {
+  await t.test('symlinked root', async () => {
+    const harness = await makeHarness({
+      userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+      types: { '@user': 'symlink' },
+      rules: { '@user/escape.md': rule('root symlink must not be followed', 'alwaysApply: true') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      const result = await harness.executeRead(agent, 'src/app.ts')
+      assert.deepEqual(contextTexts(result), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@user'), false)
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@user/escape.md'), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('outside entry alias', async () => {
+    const harness = await makeHarness({
+      userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+      rules: { '@user/escape.md': { text: rule('outside entry must not be read', 'alwaysApply: true'), resolveOutside: true } },
+    })
+    try {
+      const agent = await harness.createAgent()
+      const result = await harness.executeRead(agent, 'src/app.ts')
+      assert.deepEqual(contextTexts(result), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@user/escape.md'), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+})
+
+test('keeps scanning the explicit user root when the project .claude directory is unavailable', async () => {
+  const harness = await makeHarness({
+    userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+    types: { '.claude': 'file' },
+    rules: { '@user/global.md': rule('user root remains available', 'alwaysApply: true') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.equal(contextTexts(result).length, 1)
+    assert.ok(contextTexts(result)[0].includes('[Rule: user/.claude/rules/global.md]'))
+    assert.ok(contextTexts(result)[0].includes('user root remains available'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('skips duplicate root identities before charging the shared directory cap', async () => {
+  const projectRulesRoot = `${CWD}/.claude/rules`
+  const directories = []
+  for (let branch = 0; branch < 4; branch += 1) {
+    const branchPath = `.claude/rules/branch${branch}`
+    directories.push(branchPath)
+    for (let leaf = 0; leaf < 4; leaf += 1) directories.push(`${branchPath}/leaf${leaf}`)
+  }
+  for (let node = 0; node < 11; node += 1) directories.push('.claude/rules/branch0/leaf0/node' + node)
+  assert.equal(directories.length, 31)
+
+  const harness = await makeHarness({
+    userClaudeRulesRoots: [projectRulesRoot],
+    userClaudeRulesRoot: projectRulesRoot,
+    userRootTargetKey: `directory:${CWD}:.claude/rules`,
+    rules: {
+      '.claude/rules/root.md': rule('one project match', 'alwaysApply: true'),
+      ...Object.fromEntries(directories.map(directory => [`${directory}/ignore.txt`, 'ignored'])),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.equal(contextTexts(result).length, 1)
+    assert.ok(contextTexts(result)[0].includes('one project match'))
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'listDir').length, 32)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('uses shared per-invocation byte budgets across project and explicit user rule roots', async () => {
+  const body = 'x'.repeat(11_000)
+  const harness = await makeHarness({
+    userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+    rules: {
+      '.claude/rules/a.md': rule(body, 'alwaysApply: true'),
+      '.claude/rules/b.md': rule(body, 'alwaysApply: true'),
+      '@user/c.md': rule(body, 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.equal(result.isError, false)
+    assert.deepEqual(contextTexts(result), [], 'the root scans fail open without partially injecting earlier matches')
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'readBytes').length, 2)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@user/c.md'), false,
+      'project bytes reduce the user-root byte allowance')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('user-rule dedupe is Agent-local and resets only on clear/compact', async () => {
+  const harness = await makeHarness({
+    userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+    rules: { '@user/global.md': rule('agent-local user guidance', 'alwaysApply: true') },
+  })
+  try {
+    const firstAgent = await harness.createAgent('user-root-agent-1')
+    assert.equal(contextTexts(await harness.executeRead(firstAgent, 'src/app.ts')).length, 1)
+    assert.deepEqual(contextTexts(await harness.executeRead(firstAgent, 'src/other.ts')), [])
+
+    const secondAgent = await harness.createAgent('user-root-agent-2')
+    assert.equal(contextTexts(await harness.executeRead(secondAgent, 'src/app.ts')).length, 1)
+
+    await harness.reannounce(firstAgent, 'clear')
+    assert.equal(contextTexts(await harness.executeRead(firstAgent, 'src/app.ts')).length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('preserves the accepted native result and drops all partial rule contexts when user-root listing fails', async () => {
+  const harness = await makeHarness({
+    userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+    failListDirPath: '@user',
+    rules: {
+      '.claude/rules/project.md': rule('partial project match must not escape', 'alwaysApply: true'),
+      '@user/global.md': rule('user list fails', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.equal(result.isError, false)
+    assert.deepEqual(result.value, { body: 'body:src/app.ts' })
+    assert.deepEqual(result.content, [{ type: 'text', text: 'finalized:canonical:body:src/app.ts' }])
+    assert.deepEqual(contextTexts(result), [])
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@user'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('preserves the native result and drops project matches when an explicit user rule read fails', async () => {
+  const harness = await makeHarness({
+    userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+    rules: {
+      '.claude/rules/project.md': rule('partial project match must not escape', 'alwaysApply: true'),
+      '@user/global.md': {
+        text: rule('user read fails', 'alwaysApply: true'),
+        readBytes() { throw new Error('simulated user-rule read failure') },
+      },
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.equal(result.isError, false)
+    assert.deepEqual(result.value, { body: 'body:src/app.ts' })
+    assert.deepEqual(result.content, [{ type: 'text', text: 'finalized:canonical:body:src/app.ts' }])
+    assert.deepEqual(contextTexts(result), [])
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@user/global.md'))
   } finally {
     await harness.dispose()
   }

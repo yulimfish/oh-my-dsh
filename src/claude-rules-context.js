@@ -23,6 +23,26 @@ const ABORTED = Symbol('Claude rules read context cancelled')
 const LIMIT_REACHED = Symbol('Claude rules scan limit reached')
 const INVALID_RULE = Symbol('invalid Claude rule frontmatter')
 
+export function normalizeUserClaudeRulesRoots(value) {
+  if (value === undefined) return Object.freeze([])
+  if (!Array.isArray(value) || value.length > 1) {
+    throw new TypeError('userClaudeRulesRoots must be an array with at most one absolute .claude/rules directory')
+  }
+  const roots = []
+  for (let index = 0; index < value.length; index += 1) {
+    const inputRoot = value[index]
+    const root = typeof inputRoot === 'string' ? inputRoot.replace(/\/+$/u, '') || inputRoot : inputRoot
+    if (typeof inputRoot !== 'string' || !inputRoot || inputRoot.trim() !== inputRoot
+      || inputRoot.length > MAX_PATH_CHARS || PATH_CONTROL_OR_BIDI.test(inputRoot)
+      || !path.isAbsolute(root) || path.normalize(root) !== root
+      || path.basename(root) !== 'rules' || path.basename(path.dirname(root)) !== '.claude') {
+      throw new TypeError(`userClaudeRulesRoots[${index}] must be a normalized absolute path ending in .claude/rules`)
+    }
+    roots.push(root)
+  }
+  return Object.freeze(roots)
+}
+
 function isObject(value) {
   return value !== null && typeof value === 'object'
 }
@@ -587,26 +607,70 @@ function commitReservations(state, keys) {
   }
 }
 
-async function prepareRulesContext({ fs, cwd, filePath, cwdTarget, agentState, generation, signal }) {
+async function getConfiguredUserRulesRoot(fs, rootPath, signal) {
   assertNotAborted(signal)
-  const claude = await getDirectoryTarget(fs, cwd, cwdTarget, '.claude', undefined, undefined, signal)
-  if (!claude) return []
-  const rules = await getDirectoryTarget(fs, cwd, cwdTarget, RULES_DIRECTORY, undefined, undefined, signal)
-  if (!rules || !contains(fs, claude.target, rules.target)) return []
+  const pathInfo = await lstat(fs, rootPath, undefined, signal)
+  assertNotAborted(signal)
+  if (pathInfo?.type !== 'directory') return undefined
+  const target = await resolve(fs, rootPath, undefined, signal)
+  assertNotAborted(signal)
+  const key = safeTargetKey(target)
+  if (!key) return undefined
+  const info = await stat(fs, target, signal)
+  assertNotAborted(signal)
+  if (info?.type !== 'directory' || !metadataMatches(pathInfo, info)) return undefined
+  return { target, key, pathInfo, info }
+}
 
-  const rootBefore = await getDirectoryTarget(fs, cwd, cwdTarget, RULES_DIRECTORY, rules.key, undefined, signal)
-  if (!rootBefore) return []
+async function prepareRulesContext({ fs, cwd, filePath, cwdTarget, agentState, generation, signal, userClaudeRulesRoots = [] }) {
+  assertNotAborted(signal)
+  const roots = []
+  const claude = await getDirectoryTarget(fs, cwd, cwdTarget, '.claude', undefined, undefined, signal)
+  if (claude) {
+    const rules = await getDirectoryTarget(fs, cwd, cwdTarget, RULES_DIRECTORY, undefined, undefined, signal)
+    if (rules && contains(fs, claude.target, rules.target)) {
+      const rootBefore = await getDirectoryTarget(fs, cwd, cwdTarget, RULES_DIRECTORY, rules.key, undefined, signal)
+      if (rootBefore) {
+        roots.push({
+          cwd,
+          cwdTarget,
+          rulesTarget: rootBefore.target,
+          relative: RULES_DIRECTORY,
+          rootKey: rootBefore.key,
+          pathInfo: rootBefore.pathInfo,
+          labelPrefix: '',
+        })
+      }
+    }
+  }
+  for (const rootPath of userClaudeRulesRoots) {
+    const root = await getConfiguredUserRulesRoot(fs, rootPath, signal)
+    if (!root) continue
+    roots.push({
+      cwd: rootPath,
+      cwdTarget: root.target,
+      rulesTarget: root.target,
+      relative: '.',
+      rootKey: root.key,
+      pathInfo: root.pathInfo,
+      labelPrefix: 'user/.claude/rules',
+    })
+  }
+  if (roots.length === 0) return []
 
   const scan = { directories: 0, entries: 0, bytes: 0, files: [], visited: new Set() }
-  const walk = async (directoryRelative, directoryTarget, directoryKey, depth) => {
+  const walk = async (root, directoryRelative, directoryKey, depth) => {
     assertNotAborted(signal)
     if (depth > MAX_RULE_DEPTH) throw LIMIT_REACHED
-    if (++scan.directories > MAX_RULE_DIRECTORIES) throw LIMIT_REACHED
     if (scan.visited.has(directoryKey)) return
+    if (++scan.directories > MAX_RULE_DIRECTORIES) throw LIMIT_REACHED
     scan.visited.add(directoryKey)
 
-    const before = await getDirectoryTarget(fs, cwd, cwdTarget, directoryRelative, directoryKey, undefined, signal)
-    if (!before) return
+    const before = await getDirectoryTarget(
+      fs, root.cwd, root.cwdTarget, directoryRelative, directoryKey, undefined, signal,
+      depth === 0 ? root.pathInfo : undefined,
+    )
+    if (!before) throw LIMIT_REACHED
     const listing = await safeCall(() => fs.listDir(before.target, signal), signal)
     assertNotAborted(signal)
     if (!Array.isArray(listing)) throw LIMIT_REACHED
@@ -624,25 +688,27 @@ async function prepareRulesContext({ fs, cwd, filePath, cwdTarget, agentState, g
       seenNames.add(entry.name)
       if (entry.type !== 'file' && entry.type !== 'directory') continue
       if (entry.type === 'directory' && SKIP_RULE_DIRECTORIES.has(entry.name)) continue
-      const childRelative = `${directoryRelative ? `${directoryRelative}/` : ''}${entry.name}`
-      const pathInfo = await lstat(fs, childRelative, cwd, signal)
+      const childRelative = directoryRelative === '.' || directoryRelative === ''
+        ? entry.name
+        : `${directoryRelative}/${entry.name}`
+      const pathInfo = await lstat(fs, childRelative, root.cwd, signal)
       assertNotAborted(signal)
       if (pathInfo?.type !== entry.type) continue
       if (entry.type === 'directory') {
-        const child = await getDirectoryTarget(fs, cwd, cwdTarget, childRelative, undefined, entry, signal, pathInfo)
+        const child = await getDirectoryTarget(fs, root.cwd, root.cwdTarget, childRelative, undefined, entry, signal, pathInfo)
         if (!child || !contains(fs, before.target, child.target)) continue
         children.push({ relative: childRelative, target: child.target, key: child.key, depth: depth + 1 })
         continue
       }
       if (!/\.(?:md|mdc)$/u.test(entry.name)) {
         // Even non-rule files are identity/type checked before being ignored.
-        const child = await getFileTarget(fs, cwd, cwdTarget, rules.target, childRelative, entry, signal, pathInfo)
+        const child = await getFileTarget(fs, root.cwd, root.cwdTarget, root.rulesTarget, childRelative, entry, signal, pathInfo)
         if (!child) continue
         continue
       }
-      const file = await getFileTarget(fs, cwd, cwdTarget, rules.target, childRelative, entry, signal, pathInfo)
+      const file = await getFileTarget(fs, root.cwd, root.cwdTarget, root.rulesTarget, childRelative, entry, signal, pathInfo)
       if (!file) continue
-      const read = await readRuleFile(fs, cwd, cwdTarget, rules.target, childRelative, entry, scan, signal, file)
+      const read = await readRuleFile(fs, root.cwd, root.cwdTarget, root.rulesTarget, childRelative, entry, scan, signal, file)
       if (!read) continue
       let parsed
       try {
@@ -662,25 +728,26 @@ async function prepareRulesContext({ fs, cwd, filePath, cwdTarget, agentState, g
       if (!reason) continue
       const body = parsed.body
       if (body.trim() === '') continue
+      const relativePath = root.labelPrefix ? `${root.labelPrefix}/${childRelative}` : childRelative
       scan.files.push({
         key: dedupeKey(read.key, body),
         targetKey: read.key,
-        relativePath: childRelative,
+        relativePath,
         reason,
         body,
       })
     }
 
-    const after = await getDirectoryTarget(fs, cwd, cwdTarget, directoryRelative, directoryKey, undefined, signal)
+    const after = await getDirectoryTarget(fs, root.cwd, root.cwdTarget, directoryRelative, directoryKey, undefined, signal)
     if (!after || after.key !== before.key || !metadataMatches(before.pathInfo, after.pathInfo)
       || !metadataMatches(before.info, after.info)) throw LIMIT_REACHED
     for (const child of children) {
       if (child.depth > MAX_RULE_DEPTH) throw LIMIT_REACHED
-      await walk(child.relative, child.target, child.key, child.depth)
+      await walk(root, child.relative, child.key, child.depth)
     }
   }
 
-  await walk(RULES_DIRECTORY, rootBefore.target, rootBefore.key, 0)
+  for (const root of roots) await walk(root, root.relative, root.rootKey, 0)
   assertNotAborted(signal)
   if (agentState.generation !== generation) return []
   const unique = []
@@ -698,10 +765,11 @@ async function prepareRulesContext({ fs, cwd, filePath, cwdTarget, agentState, g
 }
 
 /** Append bounded, matched `.claude/rules` UserMessages to accepted DSH `read`, `write`, and `edit` results. */
-export function createClaudeRulesOnReadContextListener(agents, sessions, fs) {
+export function createClaudeRulesOnReadContextListener(agents, sessions, fs, userClaudeRulesRoots = []) {
   if (!agents || typeof agents.get !== 'function') throw new TypeError('Claude rules context requires DSH agents.get')
   if (!sessions || typeof sessions.get !== 'function') throw new TypeError('Claude rules context requires DSH sessions.get')
   assertFileSystem(fs)
+  const normalizedUserClaudeRulesRoots = normalizeUserClaudeRulesRoots(userClaudeRulesRoots)
 
   const states = new WeakMap()
   const lifecycle = new AbortController()
@@ -776,7 +844,16 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs) {
       assertNotAborted(linked.signal)
       if (operationInfo?.type !== 'file') return decision
 
-      messages = await prepareRulesContext({ fs, cwd, filePath, cwdTarget, agentState: state, generation, signal: linked.signal })
+      messages = await prepareRulesContext({
+        fs,
+        cwd,
+        filePath,
+        cwdTarget,
+        agentState: state,
+        generation,
+        signal: linked.signal,
+        userClaudeRulesRoots: normalizedUserClaudeRulesRoots,
+      })
       assertNotAborted(linked.signal)
       if (messages.length === 0) return decision
       if (state.generation !== generation || states.get(liveAgent) !== state || disposed) return decision
@@ -824,11 +901,11 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs) {
 }
 
 /** Register the Claude rules file-operation adapter and clear dedupe on clear/compact. */
-export function registerClaudeRulesOnReadContext(ctx, agents, sessions, fs) {
+export function registerClaudeRulesOnReadContext(ctx, agents, sessions, fs, userClaudeRulesRoots = []) {
   if (typeof ctx?.on !== 'function' || typeof ctx?.effect !== 'function') {
     throw new TypeError('registerClaudeRulesOnReadContext requires Cordis ctx.on and ctx.effect')
   }
-  const listener = createClaudeRulesOnReadContextListener(agents, sessions, fs)
+  const listener = createClaudeRulesOnReadContextListener(agents, sessions, fs, userClaudeRulesRoots)
   try {
     ctx.on('tools/post-execute', listener)
     ctx.on('agent/created', listener.onAgentCreated)
