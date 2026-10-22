@@ -5,6 +5,10 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 const FILE_OPERATION_TOOL_NAMES = new Set(['read', 'write', 'edit'])
 const RULES_DIRECTORY = '.claude/rules'
+const OPENCODE_USER_RULE_SOURCES = Object.freeze([
+  Object.freeze({ suffix: '.omo/rules', labelPrefix: 'user/.omo/rules' }),
+  Object.freeze({ suffix: '.opencode/rules', labelPrefix: 'user/.opencode/rules' }),
+])
 const SKIP_RULE_DIRECTORIES = new Set(['node_modules', '.git', 'dist', 'build', '.turbo', '.next', 'coverage'])
 const MAX_CWD_CHARS = 4_096
 const MAX_PATH_CHARS = 4_096
@@ -19,9 +23,9 @@ const MAX_AGENT_CACHE_ENTRIES = 256
 const READ_PIPELINE_TIMEOUT_MS = 5_000
 const CONTROL_OR_BIDI_GLOBAL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\p{Bidi_Control}]/gu
 const PATH_CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\p{Bidi_Control}]/u
-const ABORTED = Symbol('Claude rules read context cancelled')
-const LIMIT_REACHED = Symbol('Claude rules scan limit reached')
-const INVALID_RULE = Symbol('invalid Claude rule frontmatter')
+const ABORTED = Symbol('rules read context cancelled')
+const LIMIT_REACHED = Symbol('rules scan limit reached')
+const INVALID_RULE = Symbol('invalid rule frontmatter')
 
 export function normalizeUserClaudeRulesRoots(value) {
   if (value === undefined) return Object.freeze([])
@@ -40,6 +44,38 @@ export function normalizeUserClaudeRulesRoots(value) {
     }
     roots.push(root)
   }
+  return Object.freeze(roots)
+}
+
+export function normalizeUserOpenCodeRulesRoots(value) {
+  if (value === undefined) return Object.freeze([])
+  if (!Array.isArray(value) || value.length > OPENCODE_USER_RULE_SOURCES.length) {
+    throw new TypeError('userOpenCodeRulesRoots must contain at most one absolute root for each supported source')
+  }
+  const roots = []
+  const seenSources = new Set()
+  for (let index = 0; index < value.length; index += 1) {
+    const inputRoot = value[index]
+    const root = typeof inputRoot === 'string' ? inputRoot.replace(/\/+$/u, '') || inputRoot : inputRoot
+    const source = typeof root === 'string'
+      ? OPENCODE_USER_RULE_SOURCES.find(candidate => root.endsWith(`/${candidate.suffix}`))
+      : undefined
+    if (typeof inputRoot !== 'string' || !inputRoot || inputRoot.trim() !== inputRoot
+      || inputRoot.length > MAX_PATH_CHARS || PATH_CONTROL_OR_BIDI.test(inputRoot)
+      || !path.isAbsolute(root) || path.normalize(root) !== root || !source) {
+      throw new TypeError(`userOpenCodeRulesRoots[${index}] must be a normalized absolute path ending in .omo/rules or .opencode/rules`)
+    }
+    if (seenSources.has(source.suffix)) {
+      throw new TypeError(`userOpenCodeRulesRoots accepts at most one root ending in ${source.suffix}`)
+    }
+    seenSources.add(source.suffix)
+    roots.push(root)
+  }
+  roots.sort((left, right) => {
+    const leftIndex = OPENCODE_USER_RULE_SOURCES.findIndex(source => left.endsWith(`/${source.suffix}`))
+    const rightIndex = OPENCODE_USER_RULE_SOURCES.findIndex(source => right.endsWith(`/${source.suffix}`))
+    return leftIndex - rightIndex
+  })
   return Object.freeze(roots)
 }
 
@@ -257,7 +293,7 @@ function assertFileSystem(fs) {
   if (!fs || typeof fs.resolve !== 'function' || typeof fs.contains !== 'function'
     || typeof fs.lstat !== 'function' || typeof fs.stat !== 'function'
     || typeof fs.readBytes !== 'function' || typeof fs.listDir !== 'function') {
-    throw new TypeError('Claude rules context requires DSH fs.resolve, contains, lstat, stat, readBytes, and listDir')
+    throw new TypeError('rules context requires DSH fs.resolve, contains, lstat, stat, readBytes, and listDir')
   }
 }
 
@@ -588,9 +624,8 @@ function resetAgentState(state) {
   state.pending.clear()
 }
 
-function dedupeKey(targetKey, body) {
-  const hash = createHash('sha256').update(body).digest('hex').slice(0, 16)
-  return JSON.stringify([targetKey, hash])
+function contentHash(body) {
+  return createHash('sha256').update(body).digest('hex').slice(0, 16)
 }
 
 function releaseReservations(state, keys) {
@@ -622,26 +657,55 @@ async function getConfiguredUserRulesRoot(fs, rootPath, signal) {
   return { target, key, pathInfo, info }
 }
 
-async function prepareRulesContext({ fs, cwd, filePath, cwdTarget, agentState, generation, signal, userClaudeRulesRoots = [] }) {
+async function prepareRulesContext({
+  fs,
+  cwd,
+  filePath,
+  cwdTarget,
+  agentState,
+  generation,
+  signal,
+  includeProjectClaudeRoot = true,
+  userClaudeRulesRoots = [],
+  userOpenCodeRulesRoots = [],
+}) {
   assertNotAborted(signal)
   const roots = []
-  const claude = await getDirectoryTarget(fs, cwd, cwdTarget, '.claude', undefined, undefined, signal)
-  if (claude) {
-    const rules = await getDirectoryTarget(fs, cwd, cwdTarget, RULES_DIRECTORY, undefined, undefined, signal)
-    if (rules && contains(fs, claude.target, rules.target)) {
-      const rootBefore = await getDirectoryTarget(fs, cwd, cwdTarget, RULES_DIRECTORY, rules.key, undefined, signal)
-      if (rootBefore) {
-        roots.push({
-          cwd,
-          cwdTarget,
-          rulesTarget: rootBefore.target,
-          relative: RULES_DIRECTORY,
-          rootKey: rootBefore.key,
-          pathInfo: rootBefore.pathInfo,
-          labelPrefix: '',
-        })
+  if (includeProjectClaudeRoot) {
+    const claude = await getDirectoryTarget(fs, cwd, cwdTarget, '.claude', undefined, undefined, signal)
+    if (claude) {
+      const rules = await getDirectoryTarget(fs, cwd, cwdTarget, RULES_DIRECTORY, undefined, undefined, signal)
+      if (rules && contains(fs, claude.target, rules.target)) {
+        const rootBefore = await getDirectoryTarget(fs, cwd, cwdTarget, RULES_DIRECTORY, rules.key, undefined, signal)
+        if (rootBefore) {
+          roots.push({
+            cwd,
+            cwdTarget,
+            rulesTarget: rootBefore.target,
+            relative: RULES_DIRECTORY,
+            rootKey: rootBefore.key,
+            pathInfo: rootBefore.pathInfo,
+            labelPrefix: '',
+          })
+        }
       }
     }
+  }
+  // Pinned upstream orders these user sources: ~/.omo, ~/.opencode, then ~/.claude.
+  for (const rootPath of userOpenCodeRulesRoots) {
+    const root = await getConfiguredUserRulesRoot(fs, rootPath, signal)
+    if (!root) continue
+    const source = OPENCODE_USER_RULE_SOURCES.find(candidate => rootPath.endsWith(`/${candidate.suffix}`))
+    if (!source) continue
+    roots.push({
+      cwd: rootPath,
+      cwdTarget: root.target,
+      rulesTarget: root.target,
+      relative: '.',
+      rootKey: root.key,
+      pathInfo: root.pathInfo,
+      labelPrefix: source.labelPrefix,
+    })
   }
   for (const rootPath of userClaudeRulesRoots) {
     const root = await getConfiguredUserRulesRoot(fs, rootPath, signal)
@@ -730,8 +794,7 @@ async function prepareRulesContext({ fs, cwd, filePath, cwdTarget, agentState, g
       if (body.trim() === '') continue
       const relativePath = root.labelPrefix ? `${root.labelPrefix}/${childRelative}` : childRelative
       scan.files.push({
-        key: dedupeKey(read.key, body),
-        targetKey: read.key,
+        key: contentHash(body),
         relativePath,
         reason,
         body,
@@ -764,12 +827,14 @@ async function prepareRulesContext({ fs, cwd, filePath, cwdTarget, agentState, g
   }))
 }
 
-/** Append bounded, matched `.claude/rules` UserMessages to accepted DSH `read`, `write`, and `edit` results. */
-export function createClaudeRulesOnReadContextListener(agents, sessions, fs, userClaudeRulesRoots = []) {
-  if (!agents || typeof agents.get !== 'function') throw new TypeError('Claude rules context requires DSH agents.get')
-  if (!sessions || typeof sessions.get !== 'function') throw new TypeError('Claude rules context requires DSH sessions.get')
+/** Append bounded, matched rule UserMessages to accepted DSH `read`, `write`, and `edit` results. */
+export function createClaudeRulesOnReadContextListener(agents, sessions, fs, userClaudeRulesRoots = [], options = {}) {
+  if (!agents || typeof agents.get !== 'function') throw new TypeError('Rules context requires DSH agents.get')
+  if (!sessions || typeof sessions.get !== 'function') throw new TypeError('Rules context requires DSH sessions.get')
   assertFileSystem(fs)
+  const includeProjectClaudeRoot = options?.includeProjectClaudeRoot !== false
   const normalizedUserClaudeRulesRoots = normalizeUserClaudeRulesRoots(userClaudeRulesRoots)
+  const normalizedUserOpenCodeRulesRoots = normalizeUserOpenCodeRulesRoots(options?.userOpenCodeRulesRoots)
 
   const states = new WeakMap()
   const lifecycle = new AbortController()
@@ -852,7 +917,9 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs, use
         agentState: state,
         generation,
         signal: linked.signal,
+        includeProjectClaudeRoot,
         userClaudeRulesRoots: normalizedUserClaudeRulesRoots,
+        userOpenCodeRulesRoots: normalizedUserOpenCodeRulesRoots,
       })
       assertNotAborted(linked.signal)
       if (messages.length === 0) return decision
@@ -900,16 +967,16 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs, use
   return listener
 }
 
-/** Register the Claude rules file-operation adapter and clear dedupe on clear/compact. */
-export function registerClaudeRulesOnReadContext(ctx, agents, sessions, fs, userClaudeRulesRoots = []) {
+/** Register the bounded rules file-operation adapter and clear dedupe on clear/compact. */
+export function registerClaudeRulesOnReadContext(ctx, agents, sessions, fs, userClaudeRulesRoots = [], options = {}) {
   if (typeof ctx?.on !== 'function' || typeof ctx?.effect !== 'function') {
     throw new TypeError('registerClaudeRulesOnReadContext requires Cordis ctx.on and ctx.effect')
   }
-  const listener = createClaudeRulesOnReadContextListener(agents, sessions, fs, userClaudeRulesRoots)
+  const listener = createClaudeRulesOnReadContextListener(agents, sessions, fs, userClaudeRulesRoots, options)
   try {
     ctx.on('tools/post-execute', listener)
     ctx.on('agent/created', listener.onAgentCreated)
-    ctx.effect(() => listener.dispose, 'dsh-omo Claude rules on read context')
+    ctx.effect(() => listener.dispose, 'dsh-omo rules on read context')
   } catch (error) {
     listener.dispose()
     throw error

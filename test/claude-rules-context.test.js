@@ -6,7 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { createClaudeRulesOnReadContextListener, normalizeUserClaudeRulesRoots, registerClaudeRulesOnReadContext } from '../src/claude-rules-context.js'
+import { createClaudeRulesOnReadContextListener, normalizeUserClaudeRulesRoots, normalizeUserOpenCodeRulesRoots, registerClaudeRulesOnReadContext } from '../src/claude-rules-context.js'
 
 const systemPromptRequire = createRequire(import.meta.resolve('@deepseek-ai/dsh-system-prompt'))
 const { createScope } = await import(systemPromptRequire.resolve('@deepseek-ai/dsh-scope'))
@@ -15,6 +15,8 @@ const { AgentRegistry } = await import(agentRequire.resolve('@deepseek-ai/dsh-ag
 
 const CWD = '/workspace/project'
 const USER_CLAUDE_RULES_ROOT = '/Users/alice/.claude/rules'
+const USER_OMO_RULES_ROOT = '/Users/alice/.omo/rules'
+const USER_OPENCODE_RULES_ROOT = '/Users/alice/.opencode/rules'
 const encoder = new TextEncoder()
 
 function rule(body, frontmatter = 'alwaysApply: true') {
@@ -35,7 +37,10 @@ function makeRecord(value) {
 function makeFileSystem({
   cwd = CWD,
   userClaudeRulesRoot = USER_CLAUDE_RULES_ROOT,
+  userOpenCodeRulesRoots = [],
   userRootTargetKey,
+  targetKeys = {},
+  symlinkTargets = {},
   rules = {},
   types = {},
   failListDir = false,
@@ -46,8 +51,14 @@ function makeFileSystem({
   const calls = []
   const records = new Map(Object.entries(rules).map(([relative, value]) => [relative, makeRecord(value)]))
   const extraTypes = new Map(Object.entries(types))
+  const targetKeyAliases = new Map(Object.entries(targetKeys))
+  const symlinkTargetAliases = new Map(Object.entries(symlinkTargets))
+  const userRootMappings = [
+    { path: userClaudeRulesRoot, relative: '@user' },
+    ...userOpenCodeRulesRoots.map((root, index) => ({ path: root, relative: `@opencode${index}` })),
+  ].sort((left, right) => right.path.length - left.path.length)
   const directories = new Set(['', '.claude', '.claude/rules'])
-  if (!missingUserRoot) directories.add('@user')
+  if (!missingUserRoot) for (const root of userRootMappings) directories.add(root.relative)
   const targets = new WeakMap()
   const targetCache = new Map()
   let activeReadPath = 'src/app.ts'
@@ -78,6 +89,7 @@ function makeFileSystem({
   function currentTargetKey(relative, record, kind) {
     if (record?.replaced && record.afterTargetKey !== undefined) return record.afterTargetKey
     if (relative === '@user' && typeof userRootTargetKey === 'string') return userRootTargetKey
+    if (targetKeyAliases.has(relative)) return targetKeyAliases.get(relative)
     return record?.targetKey ?? `${kind}:${cwd}:${relative}`
   }
 
@@ -99,18 +111,23 @@ function makeFileSystem({
   function relativeFromPath(value, baseCwd = cwd) {
     if (typeof value !== 'string') return undefined
     if (value === cwd) return ''
-    if (value === userClaudeRulesRoot) return '@user'
+    for (const root of userRootMappings) {
+      if (value === root.path) return root.relative
+      if (path.isAbsolute(value) && value.startsWith(`${root.path}/`)) {
+        return `${root.relative}/${path.relative(root.path, value)}`
+      }
+    }
     if (path.isAbsolute(value)) {
-      if (value.startsWith(`${userClaudeRulesRoot}/`)) return `@user/${path.relative(userClaudeRulesRoot, value)}`
       const relative = path.relative(cwd, value)
       if (relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return undefined
       return relative
     }
-    if (baseCwd === userClaudeRulesRoot) {
+    const userRoot = userRootMappings.find(root => root.path === baseCwd)
+    if (userRoot) {
       const relative = path.normalize(value)
-      if (relative === '.') return '@user'
+      if (relative === '.') return userRoot.relative
       if (relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return undefined
-      return `@user/${relative}`
+      return `${userRoot.relative}/${relative}`
     }
     return value
   }
@@ -131,6 +148,22 @@ function makeFileSystem({
     return makeTarget(relative, type, record)
   }
 
+  function resolveSymlinks(relative) {
+    let current = ''
+    const visited = new Set()
+    for (const segment of relative.split('/').filter(Boolean)) {
+      current = current ? `${current}/${segment}` : segment
+      while (typeAt(current) === 'symlink') {
+        if (visited.has(current)) return undefined
+        visited.add(current)
+        const target = symlinkTargetAliases.get(current)
+        if (typeof target !== 'string' || target.length === 0) return undefined
+        current = target
+      }
+    }
+    return current
+  }
+
   function metadataFor(record, type) {
     if (record?.afterStat !== undefined && record.replaced && record.statCalls > 1) return record.afterStat
     if (record?.stat !== undefined) return record.stat
@@ -146,14 +179,15 @@ function makeFileSystem({
       if (directory === '' || directory === relative || records.has(directory)) continue
       if (path.dirname(directory) === (relative || '.')) {
         const name = path.basename(directory)
-        output.push({ name, type: typeAt(directory) ?? 'directory', target: targetAt(directory), version: 'dir-v1' })
+        const type = typeAt(directory) ?? 'directory'
+        output.push({ name, type: type === 'symlink' ? 'other' : type, target: targetAt(directory), version: 'dir-v1' })
       }
     }
     for (const [filePath, record] of records) {
       if (path.dirname(filePath) !== (relative || '.')) continue
       output.push({
         name: path.basename(filePath),
-        type: record.type,
+        type: record.type === 'symlink' ? 'other' : record.type,
         target: targetAt(filePath),
         ...(record.bytes ? { size: record.bytes.byteLength } : {}),
         ...(record.version === undefined ? {} : { version: record.version }),
@@ -165,12 +199,14 @@ function makeFileSystem({
   const fs = {
     async resolve(value, options = {}) {
       calls.push({ method: 'resolve', path: value, options })
-      if (options.cwd !== undefined && options.cwd !== cwd && options.cwd !== userClaudeRulesRoot) {
+      if (options.cwd !== undefined && options.cwd !== cwd && !userRootMappings.some(root => root.path === options.cwd)) {
         return makeTarget(String(value), 'file', undefined, { outside: true, key: `outside:${String(value)}` })
       }
       const relative = relativeFromPath(value, options.cwd ?? cwd)
       if (relative === undefined) return makeTarget(String(value), 'file', undefined, { outside: true, key: `outside:${String(value)}` })
-      const target = targetAt(relative)
+      const canonicalRelative = resolveSymlinks(relative)
+      if (canonicalRelative === undefined) return makeTarget(String(value), 'file', undefined, { outside: true, key: `outside:${String(value)}` })
+      const target = targetAt(canonicalRelative)
       if (!target) throw new Error(`missing test target: ${String(value)}`)
       const record = targets.get(target)?.record
       if (record?.resolveOutside) return makeTarget(relative, 'file', record, { outside: true, key: `outside:${relative}` })
@@ -193,6 +229,7 @@ function makeFileSystem({
       calls.push({ method: 'lstat', path: relative, options, signal })
       const resolvedPath = relativeFromPath(relative, options.cwd ?? cwd)
       if (resolvedPath === undefined) return undefined
+      if (extraTypes.has(resolvedPath)) return { type: extraTypes.get(resolvedPath) }
       const record = records.get(resolvedPath)
       if (record) {
         record.lstatCalls = (record.lstatCalls ?? 0) + 1
@@ -287,6 +324,10 @@ async function makeHarness(options = {}) {
     { get: id => sessions.get(id) },
     fileSystem.fs,
     options.userClaudeRulesRoots ?? [],
+    {
+      includeProjectClaudeRoot: options.includeProjectClaudeRoot ?? true,
+      userOpenCodeRulesRoots: options.userOpenCodeRulesRoots ?? [],
+    },
   ))
   let policyFiber
   const downstreamContext = options.downstreamContext ? userContext('downstream context') : undefined
@@ -448,6 +489,37 @@ test('validates one explicit normalized absolute user Claude rules root', () => 
   }
 })
 
+test('validates explicit OpenCode user roots and sorts sources in pinned priority', () => {
+  assert.deepEqual(normalizeUserOpenCodeRulesRoots(undefined), [])
+  assert.deepEqual(
+    normalizeUserOpenCodeRulesRoots([USER_OPENCODE_RULES_ROOT, USER_OMO_RULES_ROOT]),
+    [USER_OMO_RULES_ROOT, USER_OPENCODE_RULES_ROOT],
+  )
+  assert.deepEqual(normalizeUserOpenCodeRulesRoots([`${USER_OMO_RULES_ROOT}/`]), [USER_OMO_RULES_ROOT])
+  assert.ok(Object.isFrozen(normalizeUserOpenCodeRulesRoots([USER_OMO_RULES_ROOT])))
+  assert.throws(() => normalizeUserOpenCodeRulesRoots(USER_OMO_RULES_ROOT), /must contain/u)
+  assert.throws(() => normalizeUserOpenCodeRulesRoots([
+    USER_OMO_RULES_ROOT,
+    '/Users/alice/other/.omo/rules',
+  ]), /at most one root ending in .omo\/rules/u)
+  assert.throws(() => normalizeUserOpenCodeRulesRoots([
+    USER_OMO_RULES_ROOT,
+    USER_OPENCODE_RULES_ROOT,
+    USER_CLAUDE_RULES_ROOT,
+  ]), /at most one absolute root/u)
+  for (const invalid of [
+    '.omo/rules',
+    '~/.opencode/rules',
+    '/Users/alice/.sisyphus/rules',
+    '/Users/alice/.opencode/commands',
+    '/Users/alice/.opencode/../.opencode/rules',
+    `${USER_OPENCODE_RULES_ROOT}\\`,
+    ` ${USER_OPENCODE_RULES_ROOT}`,
+  ]) {
+    assert.throws(() => normalizeUserOpenCodeRulesRoots([invalid]), /normalized absolute path/u, invalid)
+  }
+})
+
 test('injects alwaysApply and matching .md/.mdc rules while preserving native value/content and UserMessage shape', async () => {
   const harness = await makeHarness({ rules: {
     '.claude/rules/always.md': rule('always guidance', 'alwaysApply: true'),
@@ -501,8 +573,89 @@ test('scans one explicit user Claude root after project rules and matches the se
   }
 })
 
+test('scans explicit OpenCode user roots after project rules in pinned priority order', async () => {
+  const harness = await makeHarness({
+    userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+    userOpenCodeRulesRoots: [USER_OPENCODE_RULES_ROOT, USER_OMO_RULES_ROOT],
+    rules: {
+      '.claude/rules/project.md': rule('project rule first', 'alwaysApply: true'),
+      '@opencode1/omo.mdc': rule('explicit OMO global source', 'globs: "**/*.ts"'),
+      '@opencode0/opencode.md': rule('explicit OpenCode global source', 'alwaysApply: true'),
+      '@user/claude.md': rule('explicit Claude global source', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.claude/rules/project.md',
+      'user/.omo/rules/omo.mdc',
+      'user/.opencode/rules/opencode.md',
+      'user/.claude/rules/claude.md',
+    ])
+    for (const [index, expected] of [
+      'project rule first',
+      'explicit OMO global source',
+      'explicit OpenCode global source',
+      'explicit Claude global source',
+    ].entries()) assert.ok(texts[index].includes(expected))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('deduplicates identical rule bodies across prioritized OpenCode roots per live Agent', async () => {
+  const body = 'one shared global instruction'
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    userOpenCodeRulesRoots: [USER_OMO_RULES_ROOT, USER_OPENCODE_RULES_ROOT],
+    rules: {
+      '@opencode0/omo.md': rule(body, 'alwaysApply: true'),
+      '@opencode1/opencode.md': rule(body, 'globs: "**/*.ts"'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const first = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(first).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), ['user/.omo/rules/omo.md'])
+    assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/app.ts')), [])
+
+    const otherAgent = await harness.createAgent('other-agent')
+    const isolated = await harness.executeRead(otherAgent, 'src/app.ts')
+    assert.deepEqual(contextTexts(isolated).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), ['user/.omo/rules/omo.md'])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('OpenCode-only mode reads explicit user roots without scanning project Claude rules', async () => {
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    userOpenCodeRulesRoots: [USER_OMO_RULES_ROOT],
+    rules: {
+      '.claude/rules/project.md': rule('must not be read in OpenCode-only mode', 'alwaysApply: true'),
+      '@opencode0/global.md': rule('explicit OpenCode source', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      'user/.omo/rules/global.md',
+    ])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.claude/rules'), false)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '.claude/rules/project.md'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
 test('does not infer user rule roots and skips a missing explicit root', async () => {
-  const implicit = await makeHarness({ rules: { '@user/global.md': rule('must not be discovered implicitly', 'alwaysApply: true') } })
+  const implicit = await makeHarness({ rules: {
+    '@user/global.md': rule('must not be discovered implicitly', 'alwaysApply: true'),
+    '@opencode0/global.md': rule('must not be discovered implicitly', 'alwaysApply: true'),
+  } })
   try {
     const agent = await implicit.createAgent()
     const result = await implicit.executeRead(agent, 'src/app.ts')
@@ -522,6 +675,20 @@ test('does not infer user rule roots and skips a missing explicit root', async (
     assert.equal(missing.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@user'), false)
   } finally {
     await missing.dispose()
+  }
+
+  const missingOpenCode = await makeHarness({
+    includeProjectClaudeRoot: false,
+    userOpenCodeRulesRoots: [USER_OMO_RULES_ROOT],
+    missingUserRoot: true,
+  })
+  try {
+    const agent = await missingOpenCode.createAgent()
+    const result = await missingOpenCode.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(missingOpenCode.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@opencode0'), false)
+  } finally {
+    await missingOpenCode.dispose()
   }
 })
 
@@ -553,6 +720,26 @@ test('fails closed on a symlinked user root or an entry resolving outside its co
       const result = await harness.executeRead(agent, 'src/app.ts')
       assert.deepEqual(contextTexts(result), [])
       assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@user/escape.md'), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('symlinked OpenCode root', async () => {
+    const harness = await makeHarness({
+      includeProjectClaudeRoot: false,
+      userOpenCodeRulesRoots: [USER_OMO_RULES_ROOT],
+      types: { '@opencode0': 'symlink', '@outside/rules': 'directory' },
+      symlinkTargets: { '@opencode0': '@outside/rules' },
+      rules: { '@opencode0/escape.md': rule('OpenCode root symlink must not be followed', 'alwaysApply: true') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      const result = await harness.executeRead(agent, 'src/app.ts')
+      assert.deepEqual(contextTexts(result), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'resolve' && call.path === USER_OMO_RULES_ROOT), false, 'lstat rejects the final symlink before resolve follows it')
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@opencode0'), false)
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@opencode0/escape.md'), false)
     } finally {
       await harness.dispose()
     }
@@ -607,14 +794,40 @@ test('skips duplicate root identities before charging the shared directory cap',
   }
 })
 
+test('skips OpenCode root aliases sharing one canonical targetKey before listing both', async () => {
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    userOpenCodeRulesRoots: [USER_OMO_RULES_ROOT, USER_OPENCODE_RULES_ROOT],
+    targetKeys: {
+      '@opencode0': 'shared-open-code-rules-root',
+      '@opencode1': 'shared-open-code-rules-root',
+    },
+    rules: {
+      '@opencode0/omo.md': rule('canonical alias winner', 'alwaysApply: true'),
+      '@opencode1/opencode.md': rule('duplicate alias must not be listed', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), ['user/.omo/rules/omo.md'])
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'listDir' && call.path.startsWith('@opencode')).length, 1)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@opencode1/opencode.md'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
 test('uses shared per-invocation byte budgets across project and explicit user rule roots', async () => {
   const body = 'x'.repeat(11_000)
   const harness = await makeHarness({
     userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+    userOpenCodeRulesRoots: [USER_OMO_RULES_ROOT],
     rules: {
       '.claude/rules/a.md': rule(body, 'alwaysApply: true'),
       '.claude/rules/b.md': rule(body, 'alwaysApply: true'),
-      '@user/c.md': rule(body, 'alwaysApply: true'),
+      '@opencode0/c.md': rule(body, 'alwaysApply: true'),
+      '@user/d.md': rule(body, 'alwaysApply: true'),
     },
   })
   try {
@@ -623,8 +836,10 @@ test('uses shared per-invocation byte budgets across project and explicit user r
     assert.equal(result.isError, false)
     assert.deepEqual(contextTexts(result), [], 'the root scans fail open without partially injecting earlier matches')
     assert.equal(harness.fileSystem.calls.filter(call => call.method === 'readBytes').length, 2)
-    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@user/c.md'), false,
-      'project bytes reduce the user-root byte allowance')
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@opencode0/c.md'), false,
+      'project bytes reduce the earlier OpenCode user-root byte allowance')
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@user/d.md'), false,
+      'all configured user roots share the same byte allowance')
   } finally {
     await harness.dispose()
   }
@@ -667,6 +882,28 @@ test('preserves the accepted native result and drops all partial rule contexts w
     assert.deepEqual(result.content, [{ type: 'text', text: 'finalized:canonical:body:src/app.ts' }])
     assert.deepEqual(contextTexts(result), [])
     assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@user'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('preserves the native result and drops project matches when an OpenCode user root listing fails', async () => {
+  const harness = await makeHarness({
+    userOpenCodeRulesRoots: [USER_OMO_RULES_ROOT],
+    failListDirPath: '@opencode0',
+    rules: {
+      '.claude/rules/project.md': rule('partial project match must not escape', 'alwaysApply: true'),
+      '@opencode0/global.md': rule('OpenCode list fails', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.equal(result.isError, false)
+    assert.deepEqual(result.value, { body: 'body:src/app.ts' })
+    assert.deepEqual(result.content, [{ type: 'text', text: 'finalized:canonical:body:src/app.ts' }])
+    assert.deepEqual(contextTexts(result), [])
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@opencode0'))
   } finally {
     await harness.dispose()
   }
@@ -1202,7 +1439,7 @@ test('enforces per-file, aggregate, directory, entry, depth, and injected-rule l
   })
 })
 
-test('deduplicates per live Agent by target and body hash, resets on clear/compact, and observes changed content', async () => {
+test('deduplicates per live Agent by body hash, resets on clear/compact, and observes changed content', async () => {
   const rulePath = '.claude/rules/always.md'
   const harness = await makeHarness({ rules: { [rulePath]: rule('first body', 'alwaysApply: true') } })
   try {
