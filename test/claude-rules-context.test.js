@@ -328,6 +328,7 @@ async function makeHarness(options = {}) {
       includeProjectOmoRoot: options.includeProjectOmoRoot ?? false,
       includeProjectClaudeRoot: options.includeProjectClaudeRoot ?? true,
       includeProjectCursorRoot: options.includeProjectCursorRoot ?? false,
+      includeProjectGitHubInstructionsRoot: options.includeProjectGitHubInstructionsRoot ?? false,
       userOpenCodeRulesRoots: options.userOpenCodeRulesRoots ?? [],
     },
   ))
@@ -577,6 +578,20 @@ test('session-cwd Cursor project rules remain default-off', async () => {
   }
 })
 
+test('session-cwd GitHub instruction rules remain default-off', async () => {
+  const harness = await makeHarness({
+    rules: { '.github/instructions/disabled.instructions.md': rule('must remain unread without the opt-in', 'alwaysApply: true') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === '.github'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
 test('Cursor-only mode scans session-cwd .cursor/rules with .mdc glob matching', async () => {
   const harness = await makeHarness({
     includeProjectOmoRoot: false,
@@ -605,6 +620,75 @@ test('Cursor-only mode scans session-cwd .cursor/rules with .mdc glob matching',
   }
 })
 
+test('GitHub-only mode matches cwd-relative applyTo and ignores non-instruction filenames', async () => {
+  const harness = await makeHarness({
+    includeProjectOmoRoot: false,
+    includeProjectClaudeRoot: false,
+    includeProjectCursorRoot: false,
+    includeProjectGitHubInstructionsRoot: true,
+    rules: {
+      '.github/instructions/always.instructions.md': rule('always-applied GitHub instruction', 'alwaysApply: true'),
+      '.github/instructions/matching.instructions.md': rule('matching GitHub TypeScript instruction', 'description: Applies to TypeScript files\napplyTo: "src/*.ts"'),
+      '.github/instructions/nonmatching.instructions.md': rule('nonmatching GitHub instruction', 'applyTo: "docs/*.ts"'),
+      '.github/instructions/no-pattern.instructions.md': rule('instruction without a matcher', 'description: No applyTo value'),
+      '.github/instructions/plain.md': rule('plain Markdown is not a GitHub instruction', 'alwaysApply: true'),
+      '.github/instructions/plain.mdc': rule('plain MDC is not a GitHub instruction', 'alwaysApply: true'),
+      '.github/instructions/wrong-extension.instructions.mdc': rule('MDC instructions are not pinned candidates', 'alwaysApply: true'),
+      '.github/copilot-instructions.md': rule('the separate GitHub single-file source is unsupported', 'alwaysApply: true'),
+      '.omo/rules/ignored.md': rule('OMO source is independently disabled', 'alwaysApply: true'),
+      '.claude/rules/ignored.md': rule('Claude source is independently disabled', 'alwaysApply: true'),
+      '.cursor/rules/ignored.mdc': rule('Cursor source is independently disabled', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.github/instructions/always.instructions.md',
+      '.github/instructions/matching.instructions.md',
+    ])
+    assert.ok(texts[0].includes('[Match: alwaysApply]'))
+    assert.ok(texts[1].includes('[Match: glob: src/*.ts]'))
+    const ignoredPaths = [
+      '.github/instructions/plain.md',
+      '.github/instructions/plain.mdc',
+      '.github/instructions/wrong-extension.instructions.mdc',
+      '.github/copilot-instructions.md',
+    ]
+    for (const ignoredPath of ignoredPaths) {
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === ignoredPath), false, `${ignoredPath} must not be read`)
+    }
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && (call.path === '.omo' || call.path === '.claude' || call.path === '.cursor')), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('keeps the session cwd as the matching root for files beneath a nested project path', async () => {
+  const nestedFilePath = 'apps/appA/src/app.ts'
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubInstructionsRoot: true,
+    rules: {
+      '.github/instructions/monorepo.instructions.md': rule('CWD-root instruction can match a nested project path', 'applyTo: "apps/appA/src/*.ts"'),
+      'apps/appA/package.json': rule('marker data is not part of instruction discovery'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, nestedFilePath)
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.github/instructions/monorepo.instructions.md',
+    ])
+    assert.ok(texts[0].includes('[Match: glob: apps/appA/src/*.ts]'))
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === 'apps/appA/package.json'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
 test('does not search an ancestor .cursor/rules tree', async () => {
   const harness = await makeHarness({
     includeProjectClaudeRoot: false,
@@ -617,6 +701,23 @@ test('does not search an ancestor .cursor/rules tree', async () => {
     assert.deepEqual(contextTexts(result), [])
     assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === '../.cursor'), false)
     assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path.startsWith('../.cursor')), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('does not search an ancestor .github/instructions tree', async () => {
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubInstructionsRoot: true,
+    rules: { '../.github/instructions/ancestor.instructions.md': rule('ancestor GitHub instructions must not be read', 'alwaysApply: true') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === '../.github'), false)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path.startsWith('../.github')), false)
   } finally {
     await harness.dispose()
   }
@@ -644,10 +745,11 @@ test('OMO-only mode scans the session-cwd .omo/rules root without inspecting Cla
   }
 })
 
-test('scans session-cwd OMO, Claude, and Cursor roots in pinned priority before user roots', async () => {
+test('scans session-cwd OMO, Claude, Cursor, and GitHub instruction roots in pinned priority before user roots', async () => {
   const harness = await makeHarness({
     includeProjectOmoRoot: true,
     includeProjectCursorRoot: true,
+    includeProjectGitHubInstructionsRoot: true,
     userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
     userOpenCodeRulesRoots: [USER_OPENCODE_RULES_ROOT, USER_OMO_RULES_ROOT],
     rules: {
@@ -656,6 +758,8 @@ test('scans session-cwd OMO, Claude, and Cursor roots in pinned priority before 
       '.claude/rules/project-claude.md': rule('cwd Claude source', 'alwaysApply: true'),
       '.cursor/rules/project-duplicate.mdc': rule('shared project body', 'alwaysApply: true'),
       '.cursor/rules/project-cursor.mdc': rule('cwd Cursor source', 'alwaysApply: true'),
+      '.github/instructions/project-duplicate.instructions.md': rule('shared project body', 'alwaysApply: true'),
+      '.github/instructions/project-github.instructions.md': rule('cwd GitHub instructions source', 'alwaysApply: true'),
       '@opencode1/user-omo.md': rule('user OMO source', 'alwaysApply: true'),
       '@opencode0/user-opencode.md': rule('user OpenCode source', 'alwaysApply: true'),
       '@user/user-claude.md': rule('user Claude source', 'alwaysApply: true'),
@@ -669,6 +773,7 @@ test('scans session-cwd OMO, Claude, and Cursor roots in pinned priority before 
       '.omo/rules/project-omo.md',
       '.claude/rules/project-claude.md',
       '.cursor/rules/project-cursor.mdc',
+      '.github/instructions/project-github.instructions.md',
       'user/.omo/rules/user-omo.md',
       'user/.opencode/rules/user-opencode.md',
       'user/.claude/rules/user-claude.md',
@@ -715,6 +820,73 @@ test('does not follow symlinked entries inside the session-cwd Cursor rules root
     assert.deepEqual(contextTexts(result), [])
     assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.cursor/rules'))
     assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '.cursor/rules/escape/secret.mdc'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('rejects symlinked session-cwd GitHub instruction-root components', async t => {
+  for (const symlinkPath of ['.github', '.github/instructions']) {
+    await t.test(symlinkPath, async () => {
+      const harness = await makeHarness({
+        includeProjectClaudeRoot: false,
+        includeProjectGitHubInstructionsRoot: true,
+        types: { [symlinkPath]: 'symlink' },
+        rules: { '.github/instructions/escape.instructions.md': rule('symlinked GitHub instruction roots must not be read', 'alwaysApply: true') },
+      })
+      try {
+        const agent = await harness.createAgent()
+        const result = await harness.executeRead(agent, 'src/app.ts')
+        assert.deepEqual(contextTexts(result), [])
+        assert.ok(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === symlinkPath))
+        assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.github/instructions'), false)
+      } finally {
+        await harness.dispose()
+      }
+    })
+  }
+})
+
+test('drops earlier project-rule contexts when a later GitHub instructions root fails', async () => {
+  const harness = await makeHarness({
+    includeProjectCursorRoot: true,
+    includeProjectGitHubInstructionsRoot: true,
+    failListDirPath: '.github/instructions',
+    rules: {
+      '.cursor/rules/first.mdc': rule('must not partially escape', 'alwaysApply: true'),
+      '.github/instructions/fails.instructions.md': rule('later instructions root fails', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.equal(result.isError, false)
+    assert.deepEqual(contextTexts(result), [])
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.cursor/rules'))
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.github/instructions'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('does not follow symlinked child directories in the session-cwd GitHub instructions root', async () => {
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubInstructionsRoot: true,
+    types: { '.github/instructions/escape': 'symlink' },
+    symlinkTargets: { '.github/instructions/escape': '../outside/.github/instructions' },
+    rules: {
+      '.github/instructions/legit.instructions.md': rule('valid instruction remains available', 'alwaysApply: true'),
+      '.github/instructions/escape/secret.instructions.md': rule('an escaping child instruction must not be read', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.github/instructions/legit.instructions.md',
+    ])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '.github/instructions/escape/secret.instructions.md'), false)
   } finally {
     await harness.dispose()
   }
@@ -1057,17 +1229,19 @@ test('skips OpenCode root aliases sharing one canonical targetKey before listing
   }
 })
 
-test('uses shared per-invocation byte budgets across Cursor project and explicit user rules', async () => {
-  const body = 'x'.repeat(11_000)
+test('uses shared per-invocation byte budgets across Cursor and GitHub project plus explicit user rules', async () => {
+  const body = 'x'.repeat(8_000)
   const harness = await makeHarness({
     includeProjectCursorRoot: true,
+    includeProjectGitHubInstructionsRoot: true,
     userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
     userOpenCodeRulesRoots: [USER_OMO_RULES_ROOT],
     rules: {
       '.claude/rules/a.md': rule(body, 'alwaysApply: true'),
       '.cursor/rules/b.mdc': rule(body, 'alwaysApply: true'),
-      '@opencode0/c.md': rule(body, 'alwaysApply: true'),
-      '@user/d.md': rule(body, 'alwaysApply: true'),
+      '.github/instructions/c.instructions.md': rule(body, 'alwaysApply: true'),
+      '@opencode0/d.md': rule(body, 'alwaysApply: true'),
+      '@user/e.md': rule(body, 'alwaysApply: true'),
     },
   })
   try {
@@ -1075,11 +1249,12 @@ test('uses shared per-invocation byte budgets across Cursor project and explicit
     const result = await harness.executeRead(agent, 'src/app.ts')
     assert.equal(result.isError, false)
     assert.deepEqual(contextTexts(result), [], 'the root scans fail open without partially injecting earlier matches')
-    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'readBytes').length, 2)
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'readBytes').length, 4)
     assert.ok(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '.cursor/rules/b.mdc'))
-    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@opencode0/c.md'), false,
-      'the Cursor source shares the aggregate allowance before OpenCode user roots')
-    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@user/d.md'), false,
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '.github/instructions/c.instructions.md'))
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@opencode0/d.md'),
+      'the GitHub instruction source shares the aggregate allowance before OpenCode user roots')
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@user/e.md'), false,
       'all configured user roots share the same byte allowance')
   } finally {
     await harness.dispose()

@@ -7,6 +7,8 @@ const FILE_OPERATION_TOOL_NAMES = new Set(['read', 'write', 'edit'])
 const OMO_PROJECT_RULES_DIRECTORY = '.omo/rules'
 const RULES_DIRECTORY = '.claude/rules'
 const CURSOR_PROJECT_RULES_DIRECTORY = '.cursor/rules'
+const GITHUB_PROJECT_INSTRUCTIONS_DIRECTORY = '.github/instructions'
+const GITHUB_INSTRUCTION_FILE_PATTERN = /\.instructions\.md$/u
 const OPENCODE_USER_RULE_SOURCES = Object.freeze([
   Object.freeze({ suffix: '.omo/rules', labelPrefix: 'user/.omo/rules' }),
   Object.freeze({ suffix: '.opencode/rules', labelPrefix: 'user/.opencode/rules' }),
@@ -670,6 +672,7 @@ async function prepareRulesContext({
   includeProjectOmoRoot = false,
   includeProjectClaudeRoot = true,
   includeProjectCursorRoot = false,
+  includeProjectGitHubInstructionsRoot = false,
   userClaudeRulesRoots = [],
   userOpenCodeRulesRoots = [],
 }) {
@@ -730,6 +733,27 @@ async function prepareRulesContext({
             rootKey: rootBefore.key,
             pathInfo: rootBefore.pathInfo,
             labelPrefix: '',
+          })
+        }
+      }
+    }
+  }
+  if (includeProjectGitHubInstructionsRoot) {
+    const github = await getDirectoryTarget(fs, cwd, cwdTarget, '.github', undefined, undefined, signal)
+    if (github) {
+      const instructions = await getDirectoryTarget(fs, cwd, cwdTarget, GITHUB_PROJECT_INSTRUCTIONS_DIRECTORY, undefined, undefined, signal)
+      if (instructions && contains(fs, github.target, instructions.target)) {
+        const rootBefore = await getDirectoryTarget(fs, cwd, cwdTarget, GITHUB_PROJECT_INSTRUCTIONS_DIRECTORY, instructions.key, undefined, signal)
+        if (rootBefore) {
+          roots.push({
+            cwd,
+            cwdTarget,
+            rulesTarget: rootBefore.target,
+            relative: GITHUB_PROJECT_INSTRUCTIONS_DIRECTORY,
+            rootKey: rootBefore.key,
+            pathInfo: rootBefore.pathInfo,
+            labelPrefix: '',
+            ruleFilePattern: GITHUB_INSTRUCTION_FILE_PATTERN,
           })
         }
       }
@@ -808,7 +832,10 @@ async function prepareRulesContext({
         children.push({ relative: childRelative, target: child.target, key: child.key, depth: depth + 1 })
         continue
       }
-      if (!/\.(?:md|mdc)$/u.test(entry.name)) {
+      const isRuleFile = root.ruleFilePattern
+        ? root.ruleFilePattern.test(entry.name)
+        : /\.(?:md|mdc)$/u.test(entry.name)
+      if (!isRuleFile) {
         // Even non-rule files are identity/type checked before being ignored.
         const child = await getFileTarget(fs, root.cwd, root.cwdTarget, root.rulesTarget, childRelative, entry, signal, pathInfo)
         if (!child) continue
@@ -879,6 +906,7 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs, use
   const includeProjectOmoRoot = options?.includeProjectOmoRoot === true
   const includeProjectClaudeRoot = options?.includeProjectClaudeRoot !== false
   const includeProjectCursorRoot = options?.includeProjectCursorRoot === true
+  const includeProjectGitHubInstructionsRoot = options?.includeProjectGitHubInstructionsRoot === true
   const normalizedUserClaudeRulesRoots = normalizeUserClaudeRulesRoots(userClaudeRulesRoots)
   const normalizedUserOpenCodeRulesRoots = normalizeUserOpenCodeRulesRoots(options?.userOpenCodeRulesRoots)
 
@@ -966,6 +994,7 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs, use
         includeProjectOmoRoot,
         includeProjectClaudeRoot,
         includeProjectCursorRoot,
+        includeProjectGitHubInstructionsRoot,
         userClaudeRulesRoots: normalizedUserClaudeRulesRoots,
         userOpenCodeRulesRoots: normalizedUserOpenCodeRulesRoots,
       })
