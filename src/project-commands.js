@@ -6,12 +6,13 @@ export const PROJECT_COMMAND_DIRECTORIES = Object.freeze([PROJECT_COMMAND_DIRECT
 export const PROJECT_COMMAND_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
 
 export const MAX_USER_OPENCODE_COMMAND_ROOTS = 2
+export const MAX_USER_CLAUDE_COMMAND_ROOTS = 1
 
-export function normalizeUserOpenCodeCommandRoots(value) {
+function normalizeUserCommandRoots(value, { field, maxRoots, allowedBasenames, provider }) {
   if (value === undefined) return Object.freeze([])
-  if (!Array.isArray(value)) throw new TypeError('dsh-omo: userOpenCodeCommandRoots must be an array of absolute command directories')
-  if (value.length > MAX_USER_OPENCODE_COMMAND_ROOTS) {
-    throw new TypeError(`dsh-omo: userOpenCodeCommandRoots may contain at most ${MAX_USER_OPENCODE_COMMAND_ROOTS} roots`)
+  if (!Array.isArray(value)) throw new TypeError(`dsh-omo: ${field} must be an array of absolute ${provider} command directories`)
+  if (value.length > maxRoots) {
+    throw new TypeError(`dsh-omo: ${field} may contain at most ${maxRoots} roots`)
   }
   const roots = []
   const seen = new Set()
@@ -20,15 +21,34 @@ export function normalizeUserOpenCodeCommandRoots(value) {
     const root = typeof inputRoot === 'string' ? inputRoot.replace(/[\\/]+$/u, '') || inputRoot : inputRoot
     if (typeof inputRoot !== 'string' || !inputRoot || inputRoot.trim() !== inputRoot || inputRoot.length > 4_096
       || !isAbsolute(root) || normalize(root) !== root
-      || (basename(root) !== 'commands' && basename(root) !== 'command')
+      || !allowedBasenames.includes(basename(root))
       || CONTROL_OR_BIDI.test(inputRoot)) {
-      throw new TypeError(`dsh-omo: userOpenCodeCommandRoots[${index}] must be a normalized absolute OpenCode command directory named command or commands`)
+      const allowed = allowedBasenames.length === 1 ? allowedBasenames[0] : allowedBasenames.join(' or ')
+      throw new TypeError(`dsh-omo: ${field}[${index}] must be a normalized absolute ${provider} command directory named ${allowed}`)
     }
-    if (seen.has(root)) throw new TypeError('dsh-omo: userOpenCodeCommandRoots must not contain duplicates')
+    if (seen.has(root)) throw new TypeError(`dsh-omo: ${field} must not contain duplicates`)
     seen.add(root)
     roots.push(root)
   }
   return Object.freeze(roots)
+}
+
+export function normalizeUserOpenCodeCommandRoots(value) {
+  return normalizeUserCommandRoots(value, {
+    field: 'userOpenCodeCommandRoots',
+    maxRoots: MAX_USER_OPENCODE_COMMAND_ROOTS,
+    allowedBasenames: ['command', 'commands'],
+    provider: 'OpenCode',
+  })
+}
+
+export function normalizeUserClaudeCommandRoots(value) {
+  return normalizeUserCommandRoots(value, {
+    field: 'userClaudeCommandRoots',
+    maxRoots: MAX_USER_CLAUDE_COMMAND_ROOTS,
+    allowedBasenames: ['commands'],
+    provider: 'Claude',
+  })
 }
 
 const MAX_CWD_CHARS = 4_096
@@ -162,21 +182,22 @@ async function resolveDirectory(fs, relativePath, cwd, rootTarget, signal) {
   return { target, info, boundaryTarget: rootTarget }
 }
 
-async function resolveUserCommandDirectory(fs, absolutePath, cwd, signal) {
+async function resolveUserCommandDirectory(fs, absolutePath, cwd, signal, source) {
+  const provider = source === 'claude' ? 'Claude' : 'OpenCode'
   const pathInfo = await awaitWithSignal(() => fs.lstat(absolutePath, { cwd }, signal), signal)
   assertNotAborted(signal)
   if (pathInfo === undefined) return undefined
-  if (pathInfo?.type !== 'directory') throw new TypeError(`User OpenCode command path ${absolutePath} is not a real directory.`)
+  if (pathInfo?.type !== 'directory') throw new TypeError(`User ${provider} command path ${absolutePath} is not a real directory.`)
   const target = await resolveTarget(fs, absolutePath, cwd, signal)
   assertNotAborted(signal)
-  if (!targetKey(target)) throw new TypeError(`User OpenCode command path ${absolutePath} could not be resolved safely.`)
+  if (!targetKey(target)) throw new TypeError(`User ${provider} command path ${absolutePath} could not be resolved safely.`)
   const info = await safeStat(fs, target, signal)
   assertNotAborted(signal)
-  if (info?.type !== 'directory') throw new TypeError(`User OpenCode command path ${absolutePath} changed during inspection.`)
-  return { target, info, path: absolutePath, boundaryTarget: target, source: 'opencode', userRoot: true }
+  if (info?.type !== 'directory') throw new TypeError(`User ${provider} command path ${absolutePath} changed during inspection.`)
+  return { target, info, path: absolutePath, boundaryTarget: target, source, userRoot: true }
 }
 
-async function resolveScope(fs, cwd, signal, userOpenCodeCommandRoots = []) {
+async function resolveScope(fs, cwd, signal, userOpenCodeCommandRoots = [], userClaudeCommandRoots = []) {
   const rootPathInfo = await awaitWithSignal(() => fs.lstat(cwd, { cwd }, signal), signal)
   assertNotAborted(signal)
   if (rootPathInfo?.type !== 'directory') throw new TypeError('Agent CWD is not a real directory.')
@@ -210,16 +231,21 @@ async function resolveScope(fs, cwd, signal, userOpenCodeCommandRoots = []) {
       } : undefined)
     }
   }
-  for (const absolutePath of userOpenCodeCommandRoots) {
-    const directory = await resolveUserCommandDirectory(fs, absolutePath, cwd, signal)
-    const key = targetKey(directory?.target)
-    if (directory && key && seenDirectoryKeys.has(key)) directories.push(undefined)
-    else {
-      if (key) seenDirectoryKeys.add(key)
-      directories.push(directory)
+  for (const [roots, source] of [
+    [userOpenCodeCommandRoots, 'opencode'],
+    [userClaudeCommandRoots, 'claude'],
+  ]) {
+    for (const absolutePath of roots) {
+      const directory = await resolveUserCommandDirectory(fs, absolutePath, cwd, signal, source)
+      const key = targetKey(directory?.target)
+      if (directory && key && seenDirectoryKeys.has(key)) directories.push(undefined)
+      else {
+        if (key) seenDirectoryKeys.add(key)
+        directories.push(directory)
+      }
     }
   }
-  return { rootTarget, rootInfo, directories, userOpenCodeCommandRoots }
+  return { rootTarget, rootInfo, directories, userOpenCodeCommandRoots, userClaudeCommandRoots }
 }
 
 function sameDirectory(before, after) {
@@ -228,7 +254,7 @@ function sameDirectory(before, after) {
 }
 
 async function scopeStillMatches(fs, cwd, before, signal) {
-  const after = await resolveScope(fs, cwd, signal, before.userOpenCodeCommandRoots)
+  const after = await resolveScope(fs, cwd, signal, before.userOpenCodeCommandRoots, before.userClaudeCommandRoots)
   return targetKey(after.rootTarget) === targetKey(before.rootTarget)
     && (before.rootInfo.version === undefined || after.rootInfo.version === before.rootInfo.version)
     && before.directories.length === after.directories.length
@@ -372,11 +398,12 @@ async function readProjectCommand(fs, cwd, scope, directory, entry, name, signal
 
 /**
  * Create a read-only project and explicit user-root command scanner. The caller chooses how to register each definition.
- * options.sessions is the DSH Session service; options.userOpenCodeCommandRoots are explicit provider-world absolute directories.
+ * options.sessions is the DSH Session service; user command root options are explicit provider-world absolute directories.
  */
 export function createProjectCommandAdapter(fs, options = {}) {
   const sessions = options.sessions
   const userOpenCodeCommandRoots = normalizeUserOpenCodeCommandRoots(options.userOpenCodeCommandRoots)
+  const userClaudeCommandRoots = normalizeUserClaudeCommandRoots(options.userClaudeCommandRoots)
   if (!sessions || typeof sessions.get !== 'function') throw new TypeError('Project commands require DSH sessions.get.')
   for (const method of ['resolve', 'contains', 'lstat', 'stat', 'listDir', 'readBytes']) {
     if (!fs || typeof fs[method] !== 'function') throw new TypeError(`Project commands require DSH fs.${method}.`)
@@ -386,7 +413,7 @@ export function createProjectCommandAdapter(fs, options = {}) {
     if (signal !== undefined && !validSignal(signal)) throw new TypeError('Project command listing requires a valid AbortSignal.')
     assertNotAborted(signal)
     const cwd = safeAgentCwd(agent, sessions)
-    const scope = await resolveScope(fs, cwd, signal, userOpenCodeCommandRoots)
+    const scope = await resolveScope(fs, cwd, signal, userOpenCodeCommandRoots, userClaudeCommandRoots)
     assertNotAborted(signal)
     if (!scope.directories.some(Boolean)) return Object.freeze({ commands: Object.freeze([]), truncated: false, skipped: 0 })
 

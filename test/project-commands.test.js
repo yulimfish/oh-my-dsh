@@ -5,6 +5,7 @@ import { apply, Config } from '../src/index.js'
 import {
   createProjectCommandAdapter,
   makeProjectCommandDefinition,
+  normalizeUserClaudeCommandRoots,
   normalizeUserOpenCodeCommandRoots,
   parseProjectCommandDocument,
   registerProjectCommandDefinitions,
@@ -98,6 +99,7 @@ function fixture(options = {}) {
   const adapter = createProjectCommandAdapter(memory.fs, {
     sessions,
     userOpenCodeCommandRoots: options.userOpenCodeCommandRoots,
+    userClaudeCommandRoots: options.userClaudeCommandRoots,
   })
   return { ...memory, agent, session, sessions, adapter }
 }
@@ -127,6 +129,23 @@ test('validates explicit user OpenCode roots and keeps the option default-off', 
   assert.throws(() => normalizeUserOpenCodeCommandRoots([roots[0], roots[0]]), /must not contain duplicates/u)
   assert.throws(() => normalizeUserOpenCodeCommandRoots([roots[0], `${roots[0]}/`]), /must not contain duplicates/u)
   assert.throws(() => apply({}, Config({ userOpenCodeCommandRoots: [roots[0]] })), /requires enableProjectCommands/u)
+  assert.deepEqual(Config({}).userClaudeCommandRoots, [])
+})
+
+test('validates only one explicit user Claude command root and keeps it default-off', () => {
+  const root = '/Users/alice/.claude/commands'
+  assert.deepEqual(normalizeUserClaudeCommandRoots(undefined), [])
+  assert.deepEqual(normalizeUserClaudeCommandRoots([root]), [root])
+  assert.deepEqual(normalizeUserClaudeCommandRoots([`${root}/`]), [root], 'trailing separators are stripped before filesystem checks')
+  assert.ok(Object.isFrozen(normalizeUserClaudeCommandRoots([root])))
+  assert.throws(() => normalizeUserClaudeCommandRoots('/Users/alice/.claude/commands'), /must be an array/u)
+  assert.throws(() => normalizeUserClaudeCommandRoots(['.claude/commands']), /normalized absolute/u)
+  assert.throws(() => normalizeUserClaudeCommandRoots(['~/.claude/commands']), /normalized absolute/u)
+  assert.throws(() => normalizeUserClaudeCommandRoots(['/Users/alice/.claude/command']), /named commands/u)
+  assert.throws(() => normalizeUserClaudeCommandRoots(['/Users/alice/.claude/../commands']), /normalized absolute/u)
+  assert.throws(() => normalizeUserClaudeCommandRoots([`${root}\u202e`]), /normalized absolute/u)
+  assert.throws(() => normalizeUserClaudeCommandRoots([root, '/Users/alice/other/commands']), /at most 1 roots/u)
+  assert.throws(() => apply({}, Config({ userClaudeCommandRoots: [root] })), /requires enableProjectCommands/u)
 })
 
 test('parses bounded Claude argument hints while keeping OpenCode frontmatter exact', () => {
@@ -233,6 +252,37 @@ test('reads only explicitly configured absolute user OpenCode roots after projec
   assert.ok(!listedNames(missing).includes(root), 'a reported-missing user root does not disable valid project commands')
 })
 
+test('reads an explicit user Claude root after project and OpenCode roots', async () => {
+  const openCodeRoot = '/Users/alice/.config/opencode/commands'
+  const claudeRoot = '/Users/alice/.claude/commands'
+  const state = fixture({ userOpenCodeCommandRoots: [openCodeRoot], userClaudeCommandRoots: [claudeRoot] })
+  state.addDirectory(openCodeRoot)
+  state.addDirectory(claudeRoot)
+  state.addFile(`${CWD}/${PROJECT_COMMAND_DIRECTORY}/priority.md`, '---\ndescription: Project wins\n---\nProject body.\n')
+  state.addFile(`${openCodeRoot}/priority.md`, '---\ndescription: OpenCode wins over user Claude\n---\nOpenCode body.\n')
+  state.addFile(`${claudeRoot}/priority.md`, '---\ndescription: Claude is lower priority\n---\nClaude body.\n')
+  state.addFile(`${claudeRoot}/claude-only.md`, '---\ndescription: User Claude command\nargument-hint: "file paths"\n---\nRead: $ARGUMENTS\n')
+
+  const result = await state.adapter.list(state.agent)
+  assert.deepEqual(Object.fromEntries(result.commands.map(command => [command.name, command.description])), {
+    priority: 'Project wins',
+    'claude-only': 'User Claude command',
+  })
+  assert.equal(result.commands.find(command => command.name === 'claude-only').argumentHint, 'file paths')
+  assert.deepEqual(listedNames(state), [`${CWD}/${PROJECT_COMMAND_DIRECTORY}`, openCodeRoot, claudeRoot])
+
+  const defaultOff = fixture()
+  defaultOff.addDirectory(claudeRoot)
+  defaultOff.addFile(`${claudeRoot}/must-not-load.md`, VALID)
+  assert.deepEqual((await defaultOff.adapter.list(defaultOff.agent)).commands, [])
+  assert.ok(!listedNames(defaultOff).includes(claudeRoot), 'no user Claude path is inferred or scanned by default')
+
+  const missing = fixture({ userClaudeCommandRoots: [claudeRoot] })
+  missing.addFile(`${CWD}/${PROJECT_COMMAND_DIRECTORY}/project-only.md`, VALID)
+  assert.deepEqual((await missing.adapter.list(missing.agent)).commands.map(command => command.name), ['project-only'])
+  assert.ok(!listedNames(missing).includes(claudeRoot), 'a missing user Claude root leaves project commands available')
+})
+
 test('keeps project and user-root command precedence deterministic', async () => {
   const first = '/Users/alice/.config/opencode/commands'
   const second = '/Users/alice/.config/opencode/command'
@@ -272,6 +322,13 @@ test('rejects symlinked user roots and files resolving outside their configured 
   assert.equal(listedNames(trailingSlash).length, 0, 'trailing slashes are removed before lstat')
   assert.equal(readCalls(trailingSlash).length, 0)
 
+  const claudeRoot = '/Users/alice/.claude/commands'
+  const claudeTrailingSlash = fixture({ userClaudeCommandRoots: [`${claudeRoot}/`] })
+  claudeTrailingSlash.addSymlink(claudeRoot)
+  await assert.rejects(claudeTrailingSlash.adapter.list(claudeTrailingSlash.agent), /not a real directory/u)
+  assert.equal(listedNames(claudeTrailingSlash).length, 0)
+  assert.equal(readCalls(claudeTrailingSlash).length, 0)
+
   const file = `${root}/steal.md`
   const outside = '/outside/steal.md'
   const escaped = fixture({
@@ -283,6 +340,17 @@ test('rejects symlinked user roots and files resolving outside their configured 
   escaped.addFile(outside, VALID)
   assert.deepEqual((await escaped.adapter.list(escaped.agent)).commands, [])
   assert.equal(readCalls(escaped).length, 0, 'canonical containment rejects an outside target before reading')
+
+  const claudeFile = `${claudeRoot}/steal.md`
+  const claudeEscaped = fixture({
+    userClaudeCommandRoots: [claudeRoot],
+    fsOptions: { aliases: { [claudeFile]: outside } },
+  })
+  claudeEscaped.addDirectory(claudeRoot)
+  claudeEscaped.addFile(claudeFile, VALID)
+  claudeEscaped.addFile(outside, VALID)
+  assert.deepEqual((await claudeEscaped.adapter.list(claudeEscaped.agent)).commands, [])
+  assert.equal(readCalls(claudeEscaped).length, 0, 'user Claude roots enforce the same canonical containment boundary')
 })
 
 test('does not follow symlinked OpenCode or Claude command roots', async () => {
@@ -355,17 +423,22 @@ test('applies the 128-entry, 64 KiB per-file, and 256 KiB aggregate read caps', 
   assert.ok(readCalls(directoryLimited).length <= 128)
 
   const userRoot = '/Users/alice/.config/opencode/commands'
-  const sharedEntryLimit = fixture({ userOpenCodeCommandRoots: [userRoot] })
+  const claudeRoot = '/Users/alice/.claude/commands'
+  const sharedEntryLimit = fixture({ userOpenCodeCommandRoots: [userRoot], userClaudeCommandRoots: [claudeRoot] })
   sharedEntryLimit.addDirectory(userRoot)
-  for (let index = 0; index < 64; index += 1) {
+  sharedEntryLimit.addDirectory(claudeRoot)
+  for (let index = 0; index < 42; index += 1) {
     sharedEntryLimit.addFile(`${directory}/local-${String(index).padStart(3, '0')}.md`, VALID)
   }
-  for (let index = 0; index < 65; index += 1) {
+  for (let index = 0; index < 42; index += 1) {
     sharedEntryLimit.addFile(`${userRoot}/user-${String(index).padStart(3, '0')}.md`, VALID)
+  }
+  for (let index = 0; index < 45; index += 1) {
+    sharedEntryLimit.addFile(`${claudeRoot}/claude-${String(index).padStart(3, '0')}.md`, VALID)
   }
   const sharedEntryList = await sharedEntryLimit.adapter.list(sharedEntryLimit.agent)
   assert.equal(sharedEntryList.truncated, true)
-  assert.ok(readCalls(sharedEntryLimit).length <= 128, 'the entry cap is shared across project and user roots')
+  assert.ok(readCalls(sharedEntryLimit).length <= 128, 'the entry cap is shared across project, OpenCode user, and Claude user roots')
 
   const perFile = fixture()
   const tooLarge = `---\ndescription: large\n---\n${'x'.repeat(64 * 1024)}`
@@ -375,14 +448,17 @@ test('applies the 128-entry, 64 KiB per-file, and 256 KiB aggregate read caps', 
   assert.equal(readCalls(perFile).length, 0, 'known oversized files are rejected before readBytes')
 
   const totalRoot = '/Users/alice/.config/opencode/commands'
-  const total = fixture({ userOpenCodeCommandRoots: [totalRoot] })
+  const claudeTotalRoot = '/Users/alice/.claude/commands'
+  const total = fixture({ userOpenCodeCommandRoots: [totalRoot], userClaudeCommandRoots: [claudeTotalRoot] })
   total.addDirectory(totalRoot)
+  total.addDirectory(claudeTotalRoot)
   const fixedSizeSource = (() => {
     const prefix = '---\ndescription: bounded\n---\n'
     return prefix + 'x'.repeat(64 * 1024 - encoder.encode(prefix).byteLength)
   })()
   for (let index = 0; index < 2; index += 1) total.addFile(`${directory}/local-${index}.md`, fixedSizeSource)
-  for (let index = 0; index < 3; index += 1) total.addFile(`${totalRoot}/user-${index}.md`, fixedSizeSource)
+  total.addFile(`${totalRoot}/user-0.md`, fixedSizeSource)
+  for (let index = 0; index < 3; index += 1) total.addFile(`${claudeTotalRoot}/claude-${index}.md`, fixedSizeSource)
   const totalList = await total.adapter.list(total.agent)
   assert.equal(readCalls(total).reduce((sum, call) => sum + call.maxBytes, 0), 4 * 64 * 1024)
   assert.equal(totalList.commands.length, 4)
@@ -524,15 +600,18 @@ test('rolls back partial explicit registrations if a later registration fails', 
 
 test('integrates project and user-root commands in only the exact live Agent command scope', async () => {
   const userRoot = '/Users/alice/.config/opencode/commands'
-  const state = fixture({ userOpenCodeCommandRoots: [userRoot] })
+  const userClaudeRoot = '/Users/alice/.claude/commands'
+  const state = fixture({ userOpenCodeCommandRoots: [userRoot], userClaudeCommandRoots: [userClaudeRoot] })
   state.addDirectory(userRoot)
+  state.addDirectory(userClaudeRoot)
   state.addFile(`${userRoot}/user-level-only.md`, VALID)
+  state.addFile(`${userClaudeRoot}/user-claude-only.md`, '---\ndescription: User Claude command\nargument-hint: "file paths"\n---\nDocument: $ARGUMENTS\n')
   state.addFile(`${CWD}/${PROJECT_COMMAND_DIRECTORY}/local-check.md`, VALID)
   state.addFile(`${CWD}/${PROJECT_COMMAND_DIRECTORY}/omo.md`, '---\ndescription: Shadow attempt\n---\nMust not replace global command.\n')
   state.addDirectory(`${CWD}/.claude`)
   state.addDirectory(`${CWD}/.claude/commands`)
   state.addFile(`${CWD}/.claude/commands/claude-source-only.md`, '---\ndescription: Document request\nargument-hint: "file paths"\n---\nDocument: $ARGUMENTS\n')
-  assert.equal((await state.adapter.list(state.agent)).commands.length, 4)
+  assert.equal((await state.adapter.list(state.agent)).commands.length, 5)
   const globalCommands = new Map()
   const scopedCommands = new Map()
   const listeners = new Map()
@@ -607,14 +686,17 @@ test('integrates project and user-root commands in only the exact live Agent com
     },
   }
 
-  apply(ctx, Config({ enableProjectCommands: true, userOpenCodeCommandRoots: [userRoot] }))
+  apply(ctx, Config({ enableProjectCommands: true, userOpenCodeCommandRoots: [userRoot], userClaudeCommandRoots: [userClaudeRoot] }))
   assert.equal(Config({ enableProjectCommands: true }).enableProjectCommands, true)
   assert.deepEqual(Config({}).userOpenCodeCommandRoots, [])
+  assert.deepEqual(Config({}).userClaudeCommandRoots, [])
   assert.equal((listeners.get('agent/created') ?? []).length, 1)
   await Promise.all((listeners.get('agent/created') ?? []).map(listener => listener({ agent, signal: new AbortController().signal })))
   assert.ok(scopedCommands.has('local-check'), JSON.stringify({ warnings, calls: state.calls.map(call => call.method) }))
   assert.ok(scopedCommands.has('user-level-only'), 'explicit user OpenCode roots register in the receiving Agent scope')
-  assert.ok(scopedCommands.has('claude-source-only'), 'Claude-style Markdown command files use the same bounded subset')
+  assert.ok(scopedCommands.has('user-claude-only'), 'explicit user Claude roots register in the receiving Agent scope')
+  assert.equal(scopedCommands.get('user-claude-only').input.hint, 'file paths')
+  assert.ok(scopedCommands.has('claude-source-only'), 'project Claude Markdown command files use the same bounded subset')
   assert.equal(scopedCommands.get('claude-source-only').input.hint, 'file paths')
   assert.equal(scopedCommands.get('local-check').input.hint, '[arguments]')
   assert.equal(scopedCommands.has('omo'), false)
