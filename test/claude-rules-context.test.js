@@ -327,6 +327,7 @@ async function makeHarness(options = {}) {
     {
       includeProjectOmoRoot: options.includeProjectOmoRoot ?? false,
       includeProjectClaudeRoot: options.includeProjectClaudeRoot ?? true,
+      includeProjectCursorRoot: options.includeProjectCursorRoot ?? false,
       userOpenCodeRulesRoots: options.userOpenCodeRulesRoots ?? [],
     },
   ))
@@ -562,6 +563,65 @@ test('session-cwd OMO project rules remain default-off', async () => {
   }
 })
 
+test('session-cwd Cursor project rules remain default-off', async () => {
+  const harness = await makeHarness({
+    rules: { '.cursor/rules/disabled.mdc': rule('must not be read without the opt-in') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === '.cursor'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('Cursor-only mode scans session-cwd .cursor/rules with .mdc glob matching', async () => {
+  const harness = await makeHarness({
+    includeProjectOmoRoot: false,
+    includeProjectClaudeRoot: false,
+    includeProjectCursorRoot: true,
+    rules: {
+      '.cursor/rules/typescript.mdc': rule('Cursor TypeScript guidance', 'description: Applies to TypeScript source\nglobs: "src/*.ts"'),
+      '.cursor/rules/ignored.mdc': rule('nonmatching Cursor guidance', 'globs: "docs/*.ts"'),
+      '.omo/rules/ignored.md': rule('OMO source is independently disabled'),
+      '.claude/rules/ignored.md': rule('Claude source is independently disabled'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.cursor/rules/typescript.mdc',
+    ])
+    assert.ok(texts[0].includes('Cursor TypeScript guidance'))
+    assert.ok(texts[0].includes('[Match: glob: src/*.ts]'))
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === '.omo'), false)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === '.claude'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('does not search an ancestor .cursor/rules tree', async () => {
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectCursorRoot: true,
+    rules: { '../.cursor/rules/ancestor.mdc': rule('ancestor Cursor guidance must not be read') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === '../.cursor'), false)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path.startsWith('../.cursor')), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
 test('OMO-only mode scans the session-cwd .omo/rules root without inspecting Claude rules', async () => {
   const harness = await makeHarness({
     includeProjectOmoRoot: true,
@@ -584,15 +644,18 @@ test('OMO-only mode scans the session-cwd .omo/rules root without inspecting Cla
   }
 })
 
-test('scans session-cwd .omo rules before Claude and configured user roots', async () => {
+test('scans session-cwd OMO, Claude, and Cursor roots in pinned priority before user roots', async () => {
   const harness = await makeHarness({
     includeProjectOmoRoot: true,
+    includeProjectCursorRoot: true,
     userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
     userOpenCodeRulesRoots: [USER_OPENCODE_RULES_ROOT, USER_OMO_RULES_ROOT],
     rules: {
       '.omo/rules/project-omo.md': rule('shared project body', 'alwaysApply: true'),
       '.claude/rules/project-duplicate.md': rule('shared project body', 'alwaysApply: true'),
       '.claude/rules/project-claude.md': rule('cwd Claude source', 'alwaysApply: true'),
+      '.cursor/rules/project-duplicate.mdc': rule('shared project body', 'alwaysApply: true'),
+      '.cursor/rules/project-cursor.mdc': rule('cwd Cursor source', 'alwaysApply: true'),
       '@opencode1/user-omo.md': rule('user OMO source', 'alwaysApply: true'),
       '@opencode0/user-opencode.md': rule('user OpenCode source', 'alwaysApply: true'),
       '@user/user-claude.md': rule('user Claude source', 'alwaysApply: true'),
@@ -605,11 +668,53 @@ test('scans session-cwd .omo rules before Claude and configured user roots', asy
     assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
       '.omo/rules/project-omo.md',
       '.claude/rules/project-claude.md',
+      '.cursor/rules/project-cursor.mdc',
       'user/.omo/rules/user-omo.md',
       'user/.opencode/rules/user-opencode.md',
       'user/.claude/rules/user-claude.md',
     ])
     assert.equal(texts.filter(text => text.includes('shared project body')).length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('rejects symlinked session-cwd Cursor rule-root components', async t => {
+  for (const symlinkPath of ['.cursor', '.cursor/rules']) {
+    await t.test(symlinkPath, async () => {
+      const harness = await makeHarness({
+        includeProjectClaudeRoot: false,
+        includeProjectCursorRoot: true,
+        types: { [symlinkPath]: 'symlink' },
+        rules: { '.cursor/rules/escape.mdc': rule('symlinked Cursor roots must not be read', 'alwaysApply: true') },
+      })
+      try {
+        const agent = await harness.createAgent()
+        const result = await harness.executeRead(agent, 'src/app.ts')
+        assert.deepEqual(contextTexts(result), [])
+        assert.ok(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === symlinkPath))
+        assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.cursor/rules'), false)
+      } finally {
+        await harness.dispose()
+      }
+    })
+  }
+})
+
+test('does not follow symlinked entries inside the session-cwd Cursor rules root', async () => {
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectCursorRoot: true,
+    types: { '.cursor/rules/escape': 'symlink' },
+    symlinkTargets: { '.cursor/rules/escape': '../outside/.cursor/rules' },
+    rules: { '.cursor/rules/escape/secret.mdc': rule('a symlinked Cursor entry must not be read') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.cursor/rules'))
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '.cursor/rules/escape/secret.mdc'), false)
   } finally {
     await harness.dispose()
   }
@@ -653,6 +758,29 @@ test('drops earlier OMO contexts when a later project-rule root fails', async ()
     assert.deepEqual(contextTexts(result), [])
     assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.omo/rules'))
     assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.claude/rules'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('drops earlier Cursor contexts when a later explicit user root fails', async () => {
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectCursorRoot: true,
+    userOpenCodeRulesRoots: [USER_OMO_RULES_ROOT],
+    failListDirPath: '@opencode0',
+    rules: {
+      '.cursor/rules/first.mdc': rule('must not partially escape', 'alwaysApply: true'),
+      '@opencode0/fails.md': rule('later user root fails', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.equal(result.isError, false)
+    assert.deepEqual(contextTexts(result), [])
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.cursor/rules'))
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@opencode0'))
   } finally {
     await harness.dispose()
   }
@@ -929,14 +1057,15 @@ test('skips OpenCode root aliases sharing one canonical targetKey before listing
   }
 })
 
-test('uses shared per-invocation byte budgets across project and explicit user rule roots', async () => {
+test('uses shared per-invocation byte budgets across Cursor project and explicit user rules', async () => {
   const body = 'x'.repeat(11_000)
   const harness = await makeHarness({
+    includeProjectCursorRoot: true,
     userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
     userOpenCodeRulesRoots: [USER_OMO_RULES_ROOT],
     rules: {
       '.claude/rules/a.md': rule(body, 'alwaysApply: true'),
-      '.claude/rules/b.md': rule(body, 'alwaysApply: true'),
+      '.cursor/rules/b.mdc': rule(body, 'alwaysApply: true'),
       '@opencode0/c.md': rule(body, 'alwaysApply: true'),
       '@user/d.md': rule(body, 'alwaysApply: true'),
     },
@@ -947,8 +1076,9 @@ test('uses shared per-invocation byte budgets across project and explicit user r
     assert.equal(result.isError, false)
     assert.deepEqual(contextTexts(result), [], 'the root scans fail open without partially injecting earlier matches')
     assert.equal(harness.fileSystem.calls.filter(call => call.method === 'readBytes').length, 2)
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '.cursor/rules/b.mdc'))
     assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@opencode0/c.md'), false,
-      'project bytes reduce the earlier OpenCode user-root byte allowance')
+      'the Cursor source shares the aggregate allowance before OpenCode user roots')
     assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@user/d.md'), false,
       'all configured user roots share the same byte allowance')
   } finally {

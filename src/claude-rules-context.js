@@ -6,6 +6,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 const FILE_OPERATION_TOOL_NAMES = new Set(['read', 'write', 'edit'])
 const OMO_PROJECT_RULES_DIRECTORY = '.omo/rules'
 const RULES_DIRECTORY = '.claude/rules'
+const CURSOR_PROJECT_RULES_DIRECTORY = '.cursor/rules'
 const OPENCODE_USER_RULE_SOURCES = Object.freeze([
   Object.freeze({ suffix: '.omo/rules', labelPrefix: 'user/.omo/rules' }),
   Object.freeze({ suffix: '.opencode/rules', labelPrefix: 'user/.opencode/rules' }),
@@ -668,6 +669,7 @@ async function prepareRulesContext({
   signal,
   includeProjectOmoRoot = false,
   includeProjectClaudeRoot = true,
+  includeProjectCursorRoot = false,
   userClaudeRulesRoots = [],
   userOpenCodeRulesRoots = [],
 }) {
@@ -705,6 +707,26 @@ async function prepareRulesContext({
             cwdTarget,
             rulesTarget: rootBefore.target,
             relative: RULES_DIRECTORY,
+            rootKey: rootBefore.key,
+            pathInfo: rootBefore.pathInfo,
+            labelPrefix: '',
+          })
+        }
+      }
+    }
+  }
+  if (includeProjectCursorRoot) {
+    const cursor = await getDirectoryTarget(fs, cwd, cwdTarget, '.cursor', undefined, undefined, signal)
+    if (cursor) {
+      const rules = await getDirectoryTarget(fs, cwd, cwdTarget, CURSOR_PROJECT_RULES_DIRECTORY, undefined, undefined, signal)
+      if (rules && contains(fs, cursor.target, rules.target)) {
+        const rootBefore = await getDirectoryTarget(fs, cwd, cwdTarget, CURSOR_PROJECT_RULES_DIRECTORY, rules.key, undefined, signal)
+        if (rootBefore) {
+          roots.push({
+            cwd,
+            cwdTarget,
+            rulesTarget: rootBefore.target,
+            relative: CURSOR_PROJECT_RULES_DIRECTORY,
             rootKey: rootBefore.key,
             pathInfo: rootBefore.pathInfo,
             labelPrefix: '',
@@ -856,6 +878,7 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs, use
   assertFileSystem(fs)
   const includeProjectOmoRoot = options?.includeProjectOmoRoot === true
   const includeProjectClaudeRoot = options?.includeProjectClaudeRoot !== false
+  const includeProjectCursorRoot = options?.includeProjectCursorRoot === true
   const normalizedUserClaudeRulesRoots = normalizeUserClaudeRulesRoots(userClaudeRulesRoots)
   const normalizedUserOpenCodeRulesRoots = normalizeUserOpenCodeRulesRoots(options?.userOpenCodeRulesRoots)
 
@@ -942,6 +965,7 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs, use
         signal: linked.signal,
         includeProjectOmoRoot,
         includeProjectClaudeRoot,
+        includeProjectCursorRoot,
         userClaudeRulesRoots: normalizedUserClaudeRulesRoots,
         userOpenCodeRulesRoots: normalizedUserOpenCodeRulesRoots,
       })
