@@ -325,6 +325,7 @@ async function makeHarness(options = {}) {
     fileSystem.fs,
     options.userClaudeRulesRoots ?? [],
     {
+      includeProjectOmoRoot: options.includeProjectOmoRoot ?? false,
       includeProjectClaudeRoot: options.includeProjectClaudeRoot ?? true,
       userOpenCodeRulesRoots: options.userOpenCodeRulesRoots ?? [],
     },
@@ -542,6 +543,116 @@ test('injects alwaysApply and matching .md/.mdc rules while preserving native va
     assert.match(texts[0], /always guidance/u)
     assert.match(texts[1], /Untrusted/u)
     assert.ok(result.additionalContexts.every(message => message.role === 'user' && message.source.kind === 'user'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('session-cwd OMO project rules remain default-off', async () => {
+  const harness = await makeHarness({
+    rules: { '.omo/rules/disabled.md': rule('must not be read without the opt-in') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === '.omo'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('OMO-only mode scans the session-cwd .omo/rules root without inspecting Claude rules', async () => {
+  const harness = await makeHarness({
+    includeProjectOmoRoot: true,
+    includeProjectClaudeRoot: false,
+    rules: {
+      '.omo/rules/project.md': rule('session-cwd OMO project guidance', 'alwaysApply: true'),
+      '.claude/rules/ignored.md': rule('Claude source is disabled in OMO-only mode', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.omo/rules/project.md',
+    ])
+    assert.ok(contextTexts(result)[0].includes('session-cwd OMO project guidance'))
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === '.claude'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('scans session-cwd .omo rules before Claude and configured user roots', async () => {
+  const harness = await makeHarness({
+    includeProjectOmoRoot: true,
+    userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+    userOpenCodeRulesRoots: [USER_OPENCODE_RULES_ROOT, USER_OMO_RULES_ROOT],
+    rules: {
+      '.omo/rules/project-omo.md': rule('shared project body', 'alwaysApply: true'),
+      '.claude/rules/project-duplicate.md': rule('shared project body', 'alwaysApply: true'),
+      '.claude/rules/project-claude.md': rule('cwd Claude source', 'alwaysApply: true'),
+      '@opencode1/user-omo.md': rule('user OMO source', 'alwaysApply: true'),
+      '@opencode0/user-opencode.md': rule('user OpenCode source', 'alwaysApply: true'),
+      '@user/user-claude.md': rule('user Claude source', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.omo/rules/project-omo.md',
+      '.claude/rules/project-claude.md',
+      'user/.omo/rules/user-omo.md',
+      'user/.opencode/rules/user-opencode.md',
+      'user/.claude/rules/user-claude.md',
+    ])
+    assert.equal(texts.filter(text => text.includes('shared project body')).length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('rejects symlinked session-cwd .omo rule-root components', async t => {
+  for (const symlinkPath of ['.omo', '.omo/rules']) {
+    await t.test(symlinkPath, async () => {
+      const harness = await makeHarness({
+        includeProjectOmoRoot: true,
+        includeProjectClaudeRoot: false,
+        types: { [symlinkPath]: 'symlink' },
+        rules: { '.omo/rules/escape.md': rule('symlinked OMO roots must not be read', 'alwaysApply: true') },
+      })
+      try {
+        const agent = await harness.createAgent()
+        const result = await harness.executeRead(agent, 'src/app.ts')
+        assert.deepEqual(contextTexts(result), [])
+        assert.ok(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === symlinkPath))
+        assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.omo/rules'), false)
+      } finally {
+        await harness.dispose()
+      }
+    })
+  }
+})
+
+test('drops earlier OMO contexts when a later project-rule root fails', async () => {
+  const harness = await makeHarness({
+    includeProjectOmoRoot: true,
+    failListDirPath: '.claude/rules',
+    rules: {
+      '.omo/rules/first.md': rule('must not partially escape', 'alwaysApply: true'),
+      '.claude/rules/fails.md': rule('later project root fails', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.equal(result.isError, false)
+    assert.deepEqual(contextTexts(result), [])
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.omo/rules'))
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.claude/rules'))
   } finally {
     await harness.dispose()
   }
@@ -933,10 +1044,14 @@ test('preserves the native result and drops project matches when an explicit use
   }
 })
 
-test('injects matching rules after successful write and edit file operations', async () => {
-  const harness = await makeHarness({ rules: {
-    '.claude/rules/source.md': rule('apply after file mutation', 'globs: "src/*.ts"'),
-  } })
+test('injects matching OMO project rules after successful write and edit file operations', async () => {
+  const harness = await makeHarness({
+    includeProjectOmoRoot: true,
+    includeProjectClaudeRoot: false,
+    rules: {
+      '.omo/rules/source.md': rule('apply after file mutation', 'globs: "src/*.ts"'),
+    },
+  })
   try {
     const writeAgent = await harness.createAgent('write-agent')
     const writeResult = await harness.executeFileOperation(writeAgent, 'write', 'src/new.ts', { content: 'new source' })

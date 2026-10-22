@@ -4,6 +4,7 @@ import picomatch from 'picomatch'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 const FILE_OPERATION_TOOL_NAMES = new Set(['read', 'write', 'edit'])
+const OMO_PROJECT_RULES_DIRECTORY = '.omo/rules'
 const RULES_DIRECTORY = '.claude/rules'
 const OPENCODE_USER_RULE_SOURCES = Object.freeze([
   Object.freeze({ suffix: '.omo/rules', labelPrefix: 'user/.omo/rules' }),
@@ -665,12 +666,33 @@ async function prepareRulesContext({
   agentState,
   generation,
   signal,
+  includeProjectOmoRoot = false,
   includeProjectClaudeRoot = true,
   userClaudeRulesRoots = [],
   userOpenCodeRulesRoots = [],
 }) {
   assertNotAborted(signal)
   const roots = []
+  if (includeProjectOmoRoot) {
+    const omo = await getDirectoryTarget(fs, cwd, cwdTarget, '.omo', undefined, undefined, signal)
+    if (omo) {
+      const rules = await getDirectoryTarget(fs, cwd, cwdTarget, OMO_PROJECT_RULES_DIRECTORY, undefined, undefined, signal)
+      if (rules && contains(fs, omo.target, rules.target)) {
+        const rootBefore = await getDirectoryTarget(fs, cwd, cwdTarget, OMO_PROJECT_RULES_DIRECTORY, rules.key, undefined, signal)
+        if (rootBefore) {
+          roots.push({
+            cwd,
+            cwdTarget,
+            rulesTarget: rootBefore.target,
+            relative: OMO_PROJECT_RULES_DIRECTORY,
+            rootKey: rootBefore.key,
+            pathInfo: rootBefore.pathInfo,
+            labelPrefix: '',
+          })
+        }
+      }
+    }
+  }
   if (includeProjectClaudeRoot) {
     const claude = await getDirectoryTarget(fs, cwd, cwdTarget, '.claude', undefined, undefined, signal)
     if (claude) {
@@ -832,6 +854,7 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs, use
   if (!agents || typeof agents.get !== 'function') throw new TypeError('Rules context requires DSH agents.get')
   if (!sessions || typeof sessions.get !== 'function') throw new TypeError('Rules context requires DSH sessions.get')
   assertFileSystem(fs)
+  const includeProjectOmoRoot = options?.includeProjectOmoRoot === true
   const includeProjectClaudeRoot = options?.includeProjectClaudeRoot !== false
   const normalizedUserClaudeRulesRoots = normalizeUserClaudeRulesRoots(userClaudeRulesRoots)
   const normalizedUserOpenCodeRulesRoots = normalizeUserOpenCodeRulesRoots(options?.userOpenCodeRulesRoots)
@@ -917,6 +940,7 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs, use
         agentState: state,
         generation,
         signal: linked.signal,
+        includeProjectOmoRoot,
         includeProjectClaudeRoot,
         userClaudeRulesRoots: normalizedUserClaudeRulesRoots,
         userOpenCodeRulesRoots: normalizedUserOpenCodeRulesRoots,

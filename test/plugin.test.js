@@ -250,6 +250,7 @@ const baseConfig = {
   enableRootReadmeContext: false,
   enableReadmeOnRead: false,
   enableClaudeRulesOnRead: false,
+  enableOmoProjectRulesOnRead: false,
   userClaudeRulesRoots: [],
   enableOpenCodeRulesOnRead: false,
   userOpenCodeRulesRoots: [],
@@ -410,6 +411,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableReadmeOnRead: true }).enableReadmeOnRead, true)
   assert.equal(Config({}).enableClaudeRulesOnRead, false)
   assert.equal(Config({ enableClaudeRulesOnRead: true }).enableClaudeRulesOnRead, true)
+  assert.equal(Config({}).enableOmoProjectRulesOnRead, false)
+  assert.equal(Config({ enableOmoProjectRulesOnRead: true }).enableOmoProjectRulesOnRead, true)
   assert.deepEqual(Config({}).userClaudeRulesRoots, [])
   assert.deepEqual(Config({ userClaudeRulesRoots: ['/Users/alice/.claude/rules'] }).userClaudeRulesRoots, ['/Users/alice/.claude/rules'])
   assert.equal(Config({}).enableOpenCodeRulesOnRead, false)
@@ -637,7 +640,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.match(status.text, /taskResultTool=disabled; taskCancelTool=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
   assert.match(status.text, /goalUseReminder=disabled; agentUsageReminder=disabled; compactionResumeAdvisory=disabled/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamModeContext=disabled; teamStatusContext=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; manualContextPruning=disabled; searchToolResultPruning=disabled; generalToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; webSearchTool=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamModeContext=disabled; teamStatusContext=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; manualContextPruning=disabled; searchToolResultPruning=disabled; generalToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; webSearchTool=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; storageDomain=absent; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -1582,7 +1585,7 @@ test('mounts opt-in README-on-read injection only with DSH prerequisites and kee
   assert.deepEqual(includedRoot.readTargets, [{ targetKey: 'root-readme' }])
 })
 
-test('mounts opt-in Claude rules-on-read independently with complete prerequisites', async () => {
+test('mounts opt-in cwd OMO and Claude rules-on-read independently with complete prerequisites', async () => {
   const calls = []
   const prerequisites = () => ({
     services: {
@@ -1602,7 +1605,7 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
   const disabled = makeContext(prerequisites())
   apply(disabled.ctx, baseConfig)
   assert.equal(disabled.events.has('tools/post-execute'), false, 'the default-off flag registers no post-execute hook')
-  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; openCodeRulesOnRead=disabled/u)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; openCodeRulesOnRead=disabled/u)
   assert.match(disabled.commands.get('omo').handler().text, /Claude rules after read\/write\/edit: disabled/u)
   assert.match(disabled.commands.get('omo').handler().text, /OpenCode user rules after file operations: disabled \(explicit roots only\)/u)
   assert.deepEqual(calls, [], 'disabled setup and status do not call filesystem or Service methods')
@@ -1652,6 +1655,20 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
     assert.equal(fixture.effects.length, 0, `${missingName} failure must not attach effects`)
   }
 
+  const missingOmoProjectRulesApi = prerequisites()
+  delete missingOmoProjectRulesApi.fs.listDir
+  const missingOmoProjectRulesFixture = makeContext(missingOmoProjectRulesApi)
+  assert.throws(
+    () => apply(missingOmoProjectRulesFixture.ctx, { ...baseConfig, enableOmoProjectRulesOnRead: true }),
+    /enableOmoProjectRulesOnRead requires DSH agents\.get/u,
+  )
+  assert.equal(missingOmoProjectRulesFixture.events.size, 0)
+
+  const omoProjectOnly = makeContext(prerequisites())
+  apply(omoProjectOnly.ctx, { ...baseConfig, enableOmoProjectRulesOnRead: true })
+  assert.equal(typeof omoProjectOnly.events.get('tools/post-execute'), 'function')
+  assert.match(omoProjectOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; omoProjectRulesOnRead=enabled; openCodeRulesOnRead=disabled/u)
+
   const missingOpenCodeApi = prerequisites()
   delete missingOpenCodeApi.fs.listDir
   const missingOpenCodeFixture = makeContext(missingOpenCodeApi)
@@ -1665,12 +1682,13 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
   apply(enabled.ctx, {
     ...baseConfig,
     enableClaudeRulesOnRead: true,
+    enableOmoProjectRulesOnRead: true,
     userClaudeRulesRoots: ['/Users/alice/.claude/rules'],
     enableOpenCodeRulesOnRead: true,
     userOpenCodeRulesRoots: ['/Users/alice/.opencode/rules', '/Users/alice/.omo/rules'],
   })
   assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
-  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=enabled; openCodeRulesOnRead=enabled/u)
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=enabled; omoProjectRulesOnRead=enabled; openCodeRulesOnRead=enabled/u)
   assert.match(enabled.commands.get('omo').handler().text, /Claude rules after read\/write\/edit: enabled/u)
   assert.match(enabled.commands.get('omo').handler().text, /OpenCode user rules after file operations: enabled \(explicit roots only\)/u)
   assert.deepEqual(calls, [], 'enabled registration/status do not perform filesystem or Service operations')
@@ -1736,12 +1754,12 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
   const readmeOnReadOnly = makeContext(prerequisites())
   apply(readmeOnReadOnly.ctx, { ...baseConfig, enableReadmeOnRead: true })
   assert.equal(typeof readmeOnReadOnly.events.get('tools/post-execute'), 'function')
-  assert.match(readmeOnReadOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /readmeOnRead=enabled; claudeRulesOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
+  assert.match(readmeOnReadOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /readmeOnRead=enabled; claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
 
   const rootSnapshotsOnly = makeContext(prerequisites())
   apply(rootSnapshotsOnly.ctx, { ...baseConfig, enableRootReadmeContext: true, enableRootAgentsContext: true })
   assert.equal(rootSnapshotsOnly.events.has('tools/post-execute'), false)
-  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
+  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
 
   const combined = makeContext(prerequisites())
   apply(combined.ctx, {
@@ -1752,7 +1770,7 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
     enableRootAgentsContext: true,
   })
   assert.equal(typeof combined.events.get('tools/post-execute'), 'function', 'independent on-read and root-context flags can be combined')
-  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
+  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; omoProjectRulesOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
   assert.deepEqual(calls, [], 'combined registration/status remain free of runtime filesystem and Service calls')
 })
 
