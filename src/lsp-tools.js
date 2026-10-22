@@ -7,7 +7,7 @@ const MAX_URI_CHARS = 4_096
 const MAX_LOCATIONS = 50
 const MAX_OUTPUT_BYTES = 24_000
 const MAX_POSITION = 10_000_000
-const CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u
+const CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
 
 const RANGE_SCHEMA = {
   type: 'object',

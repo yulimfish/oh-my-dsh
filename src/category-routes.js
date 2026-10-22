@@ -10,9 +10,9 @@ const MAX_MODEL_CHARS = 256
 const MAX_REASONING_EFFORT_CHARS = 64
 const MAX_EXPLICIT_FALLBACK_MODELS = 3
 const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'fallbackModels', 'disable', 'promptAppend', 'description', 'tools'])
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u
-const CATEGORY_TOOL_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u
-const DESCRIPTION_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
+const CATEGORY_TOOL_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
+const DESCRIPTION_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
 const CATEGORY_ROUTE_DATA = new WeakMap()
 
 function isRecord(value) {
@@ -320,8 +320,8 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
   const maxTokens = roleMaxTokens ?? categoryRoute.maxTokens
   if (maxTokens === undefined) delete resolved.maxTokens
   else resolved.maxTokens = maxTokens
-  const fallbackModels = rolePin !== undefined && roleRoute?.fallbackModels !== undefined
-    ? roleRoute.fallbackModels
+  const fallbackModels = rolePin !== undefined
+    ? roleRoute?.fallbackModels
     : categoryRoute.fallbackModels
   if (fallbackModels === undefined) delete resolved.fallbackModels
   else resolved.fallbackModels = fallbackModels

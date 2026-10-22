@@ -8,7 +8,8 @@ const MAX_EVENT_TYPE_CHARS = 96
 const MAX_SNIPPET_CODEPOINTS = 600
 const MAX_SNIPPET_SOURCE_CHARS = 4_096
 const SURFACES = new Set(['current', 'shadowed', 'log-only'])
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u
+const CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
+const CONTROL_OR_BIDI_GLOBAL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu
 const OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -50,7 +51,7 @@ function cleanText(value, label, max, { allowEmpty = false, truncateCodepoints =
   if (typeof value !== 'string' || value.length > inputLimit || (!allowEmpty && value.trim().length === 0)) {
     throw new TypeError(`DSH returned an invalid ${label}`)
   }
-  const normalized = value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ').replace(/\s+/gu, ' ').trim()
+  const normalized = value.replace(CONTROL_OR_BIDI_GLOBAL, ' ').replace(/\s+/gu, ' ').trim()
   if (!allowEmpty && !normalized) throw new TypeError(`DSH returned an invalid ${label}`)
   if (!truncateCodepoints) return normalized
   const codepoints = Array.from(normalized)
@@ -58,7 +59,7 @@ function cleanText(value, label, max, { allowEmpty = false, truncateCodepoints =
 }
 
 function validQuery(value) {
-  if (typeof value !== 'string' || value.length > MAX_QUERY_CHARS || CONTROL_CHARACTERS.test(value)) {
+  if (typeof value !== 'string' || value.length > MAX_QUERY_CHARS || CONTROL_OR_BIDI.test(value)) {
     throw new TypeError(`query must be non-empty literal text of at most ${MAX_QUERY_CHARS} characters`)
   }
   const query = value.trim()
@@ -67,7 +68,7 @@ function validQuery(value) {
 }
 
 function validSessionId(value, label) {
-  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_SESSION_ID_CHARS || CONTROL_CHARACTERS.test(value)) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_SESSION_ID_CHARS || CONTROL_OR_BIDI.test(value)) {
     throw new TypeError(`DSH returned an invalid ${label}`)
   }
   return value
@@ -96,7 +97,7 @@ function validLimit(value) {
 
 function validCursor(value) {
   if (value === undefined) return undefined
-  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_CURSOR_CHARS || CONTROL_CHARACTERS.test(value)) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_CURSOR_CHARS || CONTROL_OR_BIDI.test(value)) {
     throw new TypeError(`cursor must be a non-empty opaque string of at most ${MAX_CURSOR_CHARS} characters`)
   }
   return value
@@ -154,7 +155,7 @@ export function createSessionEventSearchTool(sessionQuery) {
       const limit = validLimit(args?.limit)
       const cursor = validCursor(args?.cursor)
       const agent = exec?.agent
-      if (!agent || typeof agent.id !== 'string' || agent.id.length === 0 || agent.id.length > MAX_SESSION_ID_CHARS || CONTROL_CHARACTERS.test(agent.id)) {
+      if (!agent || typeof agent.id !== 'string' || agent.id.length === 0 || agent.id.length > MAX_SESSION_ID_CHARS || CONTROL_OR_BIDI.test(agent.id)) {
         throw new TypeError('session_event_search requires a valid current Agent')
       }
       const sessionId = agent.id
@@ -179,7 +180,7 @@ export function createSessionEventSearchTool(sessionQuery) {
       const returnedSessionId = validSessionId(page.session.id, 'event search session id')
       if (returnedSessionId !== sessionId) throw new Error('DSH returned an event search page for the wrong session.')
       if (page.nextCursor !== undefined && (typeof page.nextCursor !== 'string' || page.nextCursor.length === 0
-        || page.nextCursor.length > MAX_CURSOR_CHARS || CONTROL_CHARACTERS.test(page.nextCursor))) {
+        || page.nextCursor.length > MAX_CURSOR_CHARS || CONTROL_OR_BIDI.test(page.nextCursor))) {
         throw new Error('DSH returned an invalid current-session event search cursor.')
       }
       const results = Array.from(page.items, hit => projectHit(hit, sessionId))
@@ -201,5 +202,6 @@ export function registerSessionEventSearchTool(ctx, sessionQuery) {
     throw new TypeError('registerSessionEventSearchTool requires ctx.tools.register')
   }
   const dispose = ctx.tools.register(createSessionEventSearchTool(sessionQuery))
-  return typeof dispose === 'function' ? dispose : () => {}
+  if (typeof dispose !== 'function') throw new TypeError('session_event_search Tool registration did not return a disposer')
+  return dispose
 }

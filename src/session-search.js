@@ -9,6 +9,8 @@ const MAX_EVENT_TYPE_CHARS = 96
 const MAX_SNIPPET_CHARS = 600
 const MAX_SNIPPET_SOURCE_CHARS = 4_096
 const SURFACES = new Set(['current', 'shadowed', 'log-only'])
+const BIDI_CONTROLS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
+const BIDI_CONTROLS_GLOBAL = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu
 const OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -49,17 +51,23 @@ function isRecord(value) {
   return prototype === Object.prototype || prototype === null
 }
 
-function cleanText(value, label, max, { allowEmpty = false, truncate = false } = {}) {
-  if (typeof value !== 'string' || value.length > (truncate ? MAX_SNIPPET_SOURCE_CHARS : max) || (!allowEmpty && value.trim().length === 0)) {
+function cleanText(value, label, max, { allowEmpty = false, truncate = false, rejectBidi = false } = {}) {
+  if (typeof value !== 'string' || value.length > (truncate ? MAX_SNIPPET_SOURCE_CHARS : max)
+    || (!allowEmpty && value.trim().length === 0) || (rejectBidi && BIDI_CONTROLS.test(value))) {
     throw new TypeError(`DSH returned an invalid ${label}`)
   }
-  const normalized = value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ').replace(/\s+/gu, ' ').trim()
+  const normalized = value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ')
+    .replace(BIDI_CONTROLS_GLOBAL, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
   if (!allowEmpty && !normalized) throw new TypeError(`DSH returned an invalid ${label}`)
   return normalized.length > max ? `${normalized.slice(0, max - 1)}…` : normalized
 }
 
 function validQuery(value) {
-  if (typeof value !== 'string' || value.length > MAX_QUERY_CHARS || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) {
+  if (typeof value !== 'string' || value.length > MAX_QUERY_CHARS
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(value) || BIDI_CONTROLS.test(value)) {
     throw new TypeError(`query must be a non-empty string of at most ${MAX_QUERY_CHARS} characters`)
   }
   const query = value.trim()
@@ -73,8 +81,8 @@ function projectHit(hit) {
   }
   const header = hit.header
   const match = hit.bestMatch
-  const sessionId = cleanText(header.id, 'session id', MAX_SESSION_ID_CHARS)
-  const matchedSessionId = cleanText(match.sessionId, 'matched session id', MAX_SESSION_ID_CHARS)
+  const sessionId = cleanText(header.id, 'session id', MAX_SESSION_ID_CHARS, { rejectBidi: true })
+  const matchedSessionId = cleanText(match.sessionId, 'matched session id', MAX_SESSION_ID_CHARS, { rejectBidi: true })
   if (sessionId !== matchedSessionId) throw new TypeError('DSH returned a search hit for the wrong session')
   if (typeof hit.live !== 'boolean' || typeof hit.persisted !== 'boolean'
     || !Number.isFinite(header.createdAt) || !Number.isSafeInteger(match.seq) || match.seq < 0
@@ -120,7 +128,7 @@ function validLimit(value) {
 function validCursor(value) {
   if (value === undefined) return undefined
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_CURSOR_CHARS
-    || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) {
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(value) || BIDI_CONTROLS.test(value)) {
     throw new TypeError(`cursor must be a non-empty opaque string of at most ${MAX_CURSOR_CHARS} characters`)
   }
   return value
@@ -242,5 +250,6 @@ export function registerSessionSearchTool(ctx, sessionQuery) {
     throw new TypeError('registerSessionSearchTool requires ctx.tools.register')
   }
   const dispose = ctx.tools.register(createSessionSearchTool(sessionQuery))
-  return typeof dispose === 'function' ? dispose : () => {}
+  if (typeof dispose !== 'function') throw new TypeError('session_search Tool registration did not return a disposer')
+  return dispose
 }

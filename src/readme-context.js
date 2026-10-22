@@ -316,7 +316,13 @@ export function registerRootReadmeContext(ctx, agents, sessions, fs) {
   const listener = createRootReadmeContextListener(agents, sessions, fs)
   const dispose = listener.dispose
   Object.defineProperty(dispose, 'hasSnapshot', { value: listener.hasSnapshot })
-  ctx.on('agent/created', listener)
-  ctx.effect(() => dispose, 'dsh-omo root README prompt context')
+  try {
+    ctx.on('agent/created', listener)
+    ctx.effect(() => dispose, 'dsh-omo root README prompt context')
+  } catch (error) {
+    // If lifecycle registration fails after the awaited listener was attached, leave it inert.
+    void dispose()
+    throw error
+  }
   return dispose
 }

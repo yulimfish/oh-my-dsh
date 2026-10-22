@@ -67,6 +67,10 @@ test('requires exact services and registers with a disposer', () => {
   assert.ok(tools.has('session_info'))
   dispose()
   assert.equal(tools.has('session_info'), false)
+  assert.throws(
+    () => registerSessionInfoTool({ tools: { register: () => undefined } }, sessionQuery),
+    /did not return a disposer/u,
+  )
 })
 
 test('defaults to current workspace and returns only bounded allowlisted title metadata', async () => {

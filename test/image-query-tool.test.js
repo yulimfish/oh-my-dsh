@@ -350,6 +350,9 @@ test('registration validates optional services and disposal stops capture and un
   assert.throws(() => registerImageQueryTool({}, makeLlm().llm, route), /ctx.on/u)
   assert.throws(() => registerImageQueryTool({ on() {}, tools: { register() {} } }, makeLlm().llm, route), /ctx.effect/u)
   assert.throws(() => registerImageQueryTool({ on() {}, effect() {}, tools: { register() {} } }, {}, route), /llm.prepareCall/u)
+  const noDisposer = makeContext()
+  noDisposer.ctx.tools.register = () => undefined
+  assert.throws(() => registerImageQueryTool(noDisposer.ctx, makeLlm().llm, route), /did not return a disposer/u)
   assert.throws(() => createImageQueryTool(makeLlm().llm, {}, new Map()), /imageQueryRoute/u)
 
   const fixture = makeLlm()

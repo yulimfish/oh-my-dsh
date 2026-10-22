@@ -134,6 +134,10 @@ test('validates controller methods and registers exactly two disposable read-onl
   dispose()
   assert.equal(tools.registered.size, 0)
   assert.equal(fixture.calls.kill, 0)
+  assert.throws(
+    () => registerJobTools({ tools: { register: () => undefined } }, fixture.controller),
+    /did not return a disposer/u,
+  )
 })
 
 test('dsh_omo_job_list requires the current Agent and rejects invalid limits before Host calls', async () => {

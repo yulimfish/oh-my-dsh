@@ -64,7 +64,7 @@ function inlineCode(value) {
   return `\`${value}\``
 }
 
-/** Parse a bounded single-line query for the explicit human-only /omo subcommand. */
+/** Parse a bounded single-line query for DSH web.search. */
 export function parseOmoWebSearchQuery(rawInput) {
   if (typeof rawInput !== 'string') return { ok: false, error: 'Usage: /omo web-search <query>' }
   if (rawInput.length > MAX_QUERY_CHARS) {
@@ -195,8 +195,8 @@ function failureText(error, commandSignal, lifecycleSignal, deadline, timeoutMs)
   return 'DSH web.search failed. Check the selected provider configuration and retry.'
 }
 
-/** Execute one bounded search only when a human invokes /omo web-search. */
-export function createOmoWebSearchHandler(web, lifecycleSignal, timeoutMs = SEARCH_TIMEOUT_MS) {
+/** Execute one bounded search for an explicitly invoked DSH command or Tool call. */
+export function createDshWebSearchHandler(web, lifecycleSignal, timeoutMs = SEARCH_TIMEOUT_MS) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
     throw new TypeError('web-search timeout must be an integer from 1 through 60000 ms')
   }
@@ -239,3 +239,5 @@ export function createOmoWebSearchHandler(web, lifecycleSignal, timeoutMs = SEAR
       .catch(error => result('error', failureText(error, commandSignal, lifecycleSignal, deadline, timeoutMs)))
   }
 }
+
+export const createOmoWebSearchHandler = createDshWebSearchHandler

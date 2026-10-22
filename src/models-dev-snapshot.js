@@ -91,6 +91,42 @@ function mergeEntry(existing, incoming) {
   }
 }
 
+function freezeModelEntry(entry) {
+  if (entry.modalities) {
+    if (entry.modalities.input) Object.freeze(entry.modalities.input)
+    if (entry.modalities.output) Object.freeze(entry.modalities.output)
+    Object.freeze(entry.modalities)
+  }
+  if (entry.limit) Object.freeze(entry.limit)
+  return Object.freeze(entry)
+}
+
+class ReadonlyModelMap extends Map {
+  #sealed = false
+
+  constructor(entries) {
+    super()
+    for (const [key, value] of entries) super.set(key, value)
+    this.#sealed = true
+    Object.freeze(this)
+  }
+
+  set(key, value) {
+    if (this.#sealed) throw new TypeError('models.dev snapshot models are read-only.')
+    return super.set(key, value)
+  }
+
+  delete(key) {
+    if (this.#sealed) throw new TypeError('models.dev snapshot models are read-only.')
+    return super.delete(key)
+  }
+
+  clear() {
+    if (this.#sealed) throw new TypeError('models.dev snapshot models are read-only.')
+    return super.clear()
+  }
+}
+
 export function buildModelsDevSnapshot(raw, generatedAt = new Date().toISOString()) {
   if (!isRecord(raw)) throw new TypeError('models.dev data must be a JSON object.')
   if (typeof generatedAt !== 'string' || generatedAt.length > 64 || !Number.isFinite(Date.parse(generatedAt))) {
@@ -117,11 +153,13 @@ export function buildModelsDevSnapshot(raw, generatedAt = new Date().toISOString
     }
   }
   if (models.size === 0) throw new TypeError('models.dev data did not contain any valid model capability entries.')
+  for (const [key, entry] of models) models.set(key, freezeModelEntry(entry))
+  const readonlyModels = new ReadonlyModelMap(models)
   return Object.freeze({
     sourceUrl: MODELS_DEV_SOURCE_URL,
     generatedAt,
-    modelCount: models.size,
-    models,
+    modelCount: readonlyModels.size,
+    models: readonlyModels,
   })
 }
 

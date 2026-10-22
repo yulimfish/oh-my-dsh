@@ -148,6 +148,8 @@ test('same-ID parent replacement starts fresh; late disposal and stale operation
 
   const replacement = makeAgent(oldAgent.id)
   assert.equal(registry.record(replacement, 'new-child'), true)
+  assert.equal(registry.record(oldAgent, 'late-old-child'), false, 'a displaced Agent cannot reclaim the same-ID bucket')
+  assert.deepEqual(registry.reserveSend(replacement, 'new-child'), { status: 'reserved' }, 'late old-Agent results do not evict replacement state')
   assert.deepEqual(registry.reserveSend(replacement, 'old-child'), { status: 'untracked' }, 'old child IDs cannot be followed up through a replacement Agent')
   assert.deepEqual(registry.reserveSend(oldAgent, 'old-child'), { status: 'untracked' })
   assert.equal(registry.remove(oldAgent, 'new-child'), false)

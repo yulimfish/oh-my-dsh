@@ -132,7 +132,7 @@ test('findReferences leaves inclusion provider-defined and rejects unsupported e
 test('rejects absolute, URI, traversal, malformed, and control-bearing input paths before session or FS access', async () => {
   const fixture = makeFixture()
   const tool = getTool(fixture)
-  for (const filePath of ['/etc/passwd', 'C:/secret.js', '\\\\server\\share\\file.js', 'file:///tmp/a.js', 'https://example.com/a.js', '../outside.js', 'src/../outside.js', './src/a.js', 'src//a.js', 'src\\a.js', 'src/\u0000bad.js']) {
+  for (const filePath of ['/etc/passwd', 'C:/secret.js', '\\\\server\\share\\file.js', 'file:///tmp/a.js', 'https://example.com/a.js', '../outside.js', 'src/../outside.js', './src/a.js', 'src//a.js', 'src\\a.js', 'src/\u0000bad.js', 'src/\u061cbad.js']) {
     await assert.rejects(tool.execute(input({ filePath }), execution()), /filePath/u, filePath)
   }
   assert.deepEqual(fixture.gets, [])
@@ -194,6 +194,7 @@ test('rejects malformed or wrong-union LSP results and unsafe URIs/ranges', asyn
     async () => ({ kind: 'hover', hover: { contents: 'not a navigation result' } }),
     async () => ({ kind: 'locations', resolvedWorkspaceUri: 'file:///workspace/project', locations: [{ uri: 'https://example.com/file.js', range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } }] }),
     async () => ({ kind: 'locations', resolvedWorkspaceUri: 'file:///workspace/project', locations: [{ uri: 'file:///tmp/\u202e.js', range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } }] }),
+    async () => ({ kind: 'locations', resolvedWorkspaceUri: 'file:///workspace/project', locations: [{ uri: 'file:///tmp/\u200e.js', range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } }] }),
     async () => ({ kind: 'locations', resolvedWorkspaceUri: 'file:///workspace/project', locations: [{ uri: `file:///${'é'.repeat(700)}`, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } }] }),
     async () => ({ kind: 'locations', resolvedWorkspaceUri: 'file:///workspace/project', locations: [{ uri: 'file:///tmp/file.js', range: { start: { line: -1, character: 0 }, end: { line: 0, character: 0 } } }] }),
   ]) {

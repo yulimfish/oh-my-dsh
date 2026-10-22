@@ -327,5 +327,6 @@ export function registerSessionListTool(ctx, sessionQuery) {
     throw new TypeError('registerSessionListTool requires ctx.tools.register')
   }
   const dispose = ctx.tools.register(createSessionListTool(sessionQuery))
-  return typeof dispose === 'function' ? dispose : () => {}
+  if (typeof dispose !== 'function') throw new TypeError('session_list Tool registration did not return a disposer')
+  return dispose
 }

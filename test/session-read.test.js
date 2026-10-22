@@ -87,6 +87,10 @@ test('requires exact read services and registers with a disposer', () => {
   assert.ok(tools.has('session_read'))
   dispose()
   assert.equal(tools.has('session_read'), false)
+  assert.throws(
+    () => registerSessionReadTool({ tools: { register: () => undefined } }, sessionQuery),
+    /did not return a disposer/u,
+  )
 })
 
 test('defaults to current workspace, forwards exact request and cancellation, and projects text only', async () => {
@@ -138,6 +142,17 @@ test('defaults to current workspace, forwards exact request and cancellation, an
   assert.equal(fixture.calls.fullReads, 0)
 })
 
+test('strips bidi controls from historical message text before model-facing projection', async () => {
+  const fixture = makeSessionQuery({
+    window: eventWindow({ events: [userEvent(15, 'Visible\u202e hidden\u2066 text')], targetSeq: 15 }),
+  })
+  const tool = createSessionReadTool(fixture.sessionQuery)
+  const result = await tool.execute({ ...baseArgs, includeOtherProjects: true })
+
+  assert.equal(result.messages[0].text, 'Visible hidden text')
+  assert.doesNotMatch(result.messages[0].text, /\p{Bidi_Control}/u)
+})
+
 test('global access is explicit and bypasses local workspace metadata only when requested', async () => {
   const fixture = makeSessionQuery({ cwd: undefined })
   const tool = createSessionReadTool(fixture.sessionQuery)
@@ -154,6 +169,7 @@ test('rejects invalid inputs before service calls and fails closed without the c
   const invalid = [
     { sessionId: '', seq: 1 },
     { sessionId: 'session-1\n', seq: 1 },
+    { sessionId: 'session-\u202e1', seq: 1 },
     { sessionId: 'x'.repeat(257), seq: 1 },
     { sessionId: 'session-1', seq: -1 },
     { sessionId: 'session-1', seq: 1.5 },

@@ -17,14 +17,19 @@ test('requires one bounded existing-plan selector and applies both configured an
   }
   assert.equal(parse('Plan name', 4).ok, false)
   assert.equal(parse('x'.repeat(12_001), 20_000).ok, false, 'the adapter hard cap applies even if config is larger')
-  assert.equal(ULW_EXECUTE_COMMAND_HINT, '<existing plan name>')
+  assert.equal(ULW_EXECUTE_COMMAND_HINT, '<existing plan name> [--worktree]')
 })
 
-test('rejects upstream worktree, PR, and shipping flags before queuing', () => {
+test('accepts only a standalone trailing --worktree and rejects custom worktree paths', () => {
+  assert.deepEqual(parse('Migration plan --worktree'), { ok: true, planName: 'Migration plan', worktree: true })
+  for (const input of ['Plan --worktree /tmp/worktree', 'Plan --worktree=/tmp/worktree', 'Plan --WORKTREE']) {
+    const result = parse(input)
+    assert.equal(result.ok, false, `expected worktree syntax rejection for ${input}`)
+  }
+})
+
+test('rejects PR and shipping flags before queuing', () => {
   for (const input of [
-    'Plan --worktree /tmp/worktree',
-    'Plan --worktree=/tmp/worktree',
-    'Plan --WORKTREE=/tmp/worktree',
     'Plan --make-pr',
     'Plan --MAKE-PR',
     'Plan --make-pr=true',
@@ -36,12 +41,13 @@ test('rejects upstream worktree, PR, and shipping flags before queuing', () => {
   ]) {
     const result = parse(input)
     assert.equal(result.ok, false, `expected rejection for ${input}`)
-    assert.match(result.error, /rejects --worktree, --make-pr, and --ship/u)
+    assert.match(result.error, /rejects --make-pr and --ship/u)
   }
 })
 
 test('directive is explicit prompt-only guidance with no OMO lifecycle or external operations', () => {
   const directive = buildUlwExecuteDirective()
+  const worktreeDirective = buildUlwExecuteDirective({ worktree: true })
   assert.match(directive, /Prompt-only DSH adapter/u)
   assert.match(directive, /existing project plan/u)
   assert.match(directive, /untrusted data/u)
@@ -50,5 +56,8 @@ test('directive is explicit prompt-only guidance with no OMO lifecycle or extern
   assert.match(directive, /does not invoke the upstream OMO hook/u)
   assert.match(directive, /does not .*resume plans/u)
   assert.match(directive, /boulder state or notepads/u)
-  assert.match(directive, /worktree, open a PR, push, ship, merge, or commit automatically/u)
+  assert.match(directive, /Do not create a worktree/u)
+  assert.match(worktreeDirective, /explicitly requested --worktree/u)
+  assert.match(worktreeDirective, /already been created and selected as this Agent’s current working directory/u)
+  assert.match(worktreeDirective, /do not commit, push, open a PR, ship, or merge automatically/u)
 })

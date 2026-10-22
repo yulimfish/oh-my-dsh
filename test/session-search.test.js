@@ -48,6 +48,10 @@ test('requires the inspected search service and registers with a disposer', () =
   assert.ok(tools.has('session_search'))
   dispose()
   assert.equal(tools.has('session_search'), false)
+  assert.throws(
+    () => registerSessionSearchTool({ tools: { register: () => undefined } }, sessionQuery),
+    /did not return a disposer/u,
+  )
 })
 
 test('requires explicit cross-project scope and forwards the exact search request and cancellation', async () => {
@@ -127,10 +131,12 @@ test('bounds query, limit, cursor, and scope arguments before any service calls'
     { query: '  ' },
     { query: 'x'.repeat(513) },
     { query: 'x\nquery' },
+    { query: 'deceptive\u202equery' },
     { query: 'valid', limit: 0 },
     { query: 'valid', limit: 21 },
     { query: 'valid', limit: 1.5 },
     { query: 'valid', cursor: '' },
+    { query: 'valid', cursor: 'x\u202ey' },
     { query: 'valid', cursor: 'x'.repeat(2_049) },
     { query: 'valid', includeOtherProjects: 'true' },
   ]
@@ -142,12 +148,13 @@ test('bounds query, limit, cursor, and scope arguments before any service calls'
 
 test('bounds returned excerpts and omits absent workspace metadata', async () => {
   const fixture = makeSessionQuery({
-    page: { items: [searchHit({ snippet: 'x'.repeat(2_000), cwd: null })] },
+    page: { items: [searchHit({ snippet: `x${'x'.repeat(990)}\u202e${'x'.repeat(1_009)}`, cwd: null })] },
   })
   const tool = createSessionSearchTool(fixture.sessionQuery)
   const result = await tool.execute({ query: 'long excerpt', limit: 1, includeOtherProjects: true })
 
   assert.equal(result.results[0].snippet.length, 600)
+  assert.doesNotMatch(result.results[0].snippet, /\p{Bidi_Control}/u)
   assert.equal(result.results[0].cwd, undefined)
   assert.equal(result.hasMore, false)
 })
@@ -183,4 +190,11 @@ test('sanitizes service errors, propagates cancellation, and rejects malformed p
   const malformed = makeSessionQuery({ page: { items: [wrongSessionHit], nextCursor: 'cursor' } })
   const malformedTool = createSessionSearchTool(malformed.sessionQuery)
   await assert.rejects(malformedTool.execute({ query: 'valid', includeOtherProjects: true }), /wrong session/u)
+
+  const deceptiveId = searchHit({ sessionId: 'session-\u202e1' })
+  const malformedId = makeSessionQuery({ page: { items: [deceptiveId] } })
+  await assert.rejects(
+    createSessionSearchTool(malformedId.sessionQuery).execute({ query: 'valid', includeOtherProjects: true }),
+    /invalid session id/u,
+  )
 })

@@ -553,8 +553,10 @@ export function registerTeamTools(ctx, teamService) {
   const disposers = []
   try {
     for (const create of tools) {
-      const dispose = ctx.tools.register(create(service))
-      if (typeof dispose === 'function') disposers.push(dispose)
+      const definition = create(service)
+      const dispose = ctx.tools.register(definition)
+      if (typeof dispose !== 'function') throw new TypeError(`Team Tool ${definition.name} did not return a disposer`)
+      disposers.push(dispose)
     }
   } catch (error) {
     for (const dispose of disposers.reverse()) {

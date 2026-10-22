@@ -61,7 +61,10 @@ function makeContext(options = {}) {
       section: section => { sections.push(section); return () => {} },
       context: () => () => {},
     },
-    commands: { register: command => { commands.set(command.name, command); return () => commands.delete(command.name) } },
+    commands: {
+      register: command => { commands.set(command.name, command); return () => commands.delete(command.name) },
+      find: (_agent, name) => commands.get(name),
+    },
     fs: options.fs ?? {},
     skills: {
       register: skill => { skills.set(skill.name, skill); return () => skills.delete(skill.name) },
@@ -194,6 +197,9 @@ const baseConfig = {
   maxDepth: 1,
   maxTaskChars: 12_000,
   maxResultChars: 8_000,
+  enableTaskResultTool: false,
+  enableTaskCancelTool: false,
+  enablePersistentMemoryTools: false,
   enableContinuableTasks: false,
   enableContinuableTaskFollowups: false,
   enableGoalTools: false,
@@ -213,15 +219,20 @@ const baseConfig = {
   enablePlanFormatAdvisory: false,
   enableModelCapabilitiesRefresh: false,
   enableWebSearchCommand: false,
+  enableWebSearchTool: false,
   enableJobTools: false,
   enableToolResultPruning: false,
+  enableManualContextPruning: false,
   enableSearchToolResultPruning: false,
+  enableGeneralToolResultPruning: false,
+  additionalSearchToolResultPruningTools: [],
   enableImageQueryTool: false,
   enableAgentTerminalTools: false,
   enableLspTools: false,
   enableRootAgentsContext: false,
   enableAgentsOnRead: false,
   enableProjectAgentFiles: false,
+  enableProjectCommands: false,
   enablePromptFileExpansion: false,
   enableRootReadmeContext: false,
   enableReadmeOnRead: false,
@@ -251,6 +262,12 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).disabledOmoRoles, [])
   assert.deepEqual(Config({ disabledOmoRoles: ['architect', 'reviewer'] }).disabledOmoRoles, ['architect', 'reviewer'])
   assert.deepEqual(Config({}).userAgents, [])
+  assert.equal(Config({}).enableTaskResultTool, false)
+  assert.equal(Config({ enableTaskResultTool: true }).enableTaskResultTool, true)
+  assert.equal(Config({}).enableTaskCancelTool, false)
+  assert.equal(Config({ enableTaskCancelTool: true }).enableTaskCancelTool, true)
+  assert.equal(Config({}).enablePersistentMemoryTools, false)
+  assert.equal(Config({ enablePersistentMemoryTools: true }).enablePersistentMemoryTools, true)
   assert.equal(Config({}).enableContinuableTaskFollowups, false)
   assert.equal(Config({ enableContinuableTaskFollowups: true }).enableContinuableTaskFollowups, true)
   assert.equal(Config({}).enablePlanChecklist, false)
@@ -258,6 +275,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enablePlanFormatAdvisory: true }).enablePlanFormatAdvisory, true)
   assert.equal(Config({}).enableProjectAgentFiles, false)
   assert.equal(Config({ enableProjectAgentFiles: true }).enableProjectAgentFiles, true)
+  assert.equal(Config({}).enableProjectCommands, false)
+  assert.equal(Config({ enableProjectCommands: true }).enableProjectCommands, true)
   assert.equal(Config({}).enablePromptFileExpansion, false)
   assert.equal(Config({ enablePromptFileExpansion: true }).enablePromptFileExpansion, true)
   assert.equal(Config({}).enableWriteExistingFileGuard, false)
@@ -342,8 +361,14 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableJobTools: true }).enableJobTools, true)
   assert.equal(Config({}).enableToolResultPruning, false)
   assert.equal(Config({ enableToolResultPruning: true }).enableToolResultPruning, true)
+  assert.equal(Config({}).enableManualContextPruning, false)
+  assert.equal(Config({ enableManualContextPruning: true }).enableManualContextPruning, true)
   assert.equal(Config({}).enableSearchToolResultPruning, false)
   assert.equal(Config({ enableSearchToolResultPruning: true }).enableSearchToolResultPruning, true)
+  assert.equal(Config({}).enableGeneralToolResultPruning, false)
+  assert.equal(Config({ enableGeneralToolResultPruning: true }).enableGeneralToolResultPruning, true)
+  assert.deepEqual(Config({}).additionalSearchToolResultPruningTools, [])
+  assert.deepEqual(Config({ enableSearchToolResultPruning: true, additionalSearchToolResultPruningTools: ['custom_text_tool'] }).additionalSearchToolResultPruningTools, ['custom_text_tool'])
   assert.equal(Config({}).enableImageQueryTool, false)
   assert.equal(Config({}).imageQueryRoute, undefined)
   assert.equal(Config({ enableImageQueryTool: true, imageQueryRoute: { provider: 'vision-provider', model: 'vision-model' } }).enableImageQueryTool, true)
@@ -355,6 +380,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableModelCapabilitiesRefresh: true }).enableModelCapabilitiesRefresh, true)
   assert.equal(Config({}).enableWebSearchCommand, false)
   assert.equal(Config({ enableWebSearchCommand: true }).enableWebSearchCommand, true)
+  assert.equal(Config({}).enableWebSearchTool, false)
+  assert.equal(Config({ enableWebSearchTool: true }).enableWebSearchTool, true)
   assert.equal(Config({}).enableLspTools, false)
   assert.equal(Config({ enableLspTools: true }).enableLspTools, true)
   assert.equal(Config({}).enableRootAgentsContext, false)
@@ -576,6 +603,7 @@ test('/omo status reports feature flags and service presence without calling bus
   apply(fixture.ctx, mutableConfig)
   assert.equal(fixture.tools.has('lsp_goto_definition'), false, 'present LSP services do not enable tools by default')
   assert.equal(fixture.tools.has('lsp_find_references'), false, 'present LSP services do not enable tools by default')
+  assert.equal(fixture.tools.has('dsh_omo_task_result'), false, 'task result caching and its Tool are disabled by default')
 
   const command = fixture.commands.get('omo')
   assert.equal(command.input.hint, '[status|status capabilities]', 'both status modes are discoverable')
@@ -584,10 +612,11 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
   assert.match(status.text, /continuableTaskFollowups=disabled/u)
+  assert.match(status.text, /taskResultTool=disabled; taskCancelTool=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
   assert.match(status.text, /goalUseReminder=disabled; agentUsageReminder=disabled; compactionResumeAdvisory=disabled/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamModeContext=disabled; teamStatusContext=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; searchToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; promptFileExpansion=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
-  assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; mcpResources=present/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamModeContext=disabled; teamStatusContext=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; manualContextPruning=disabled; searchToolResultPruning=disabled; generalToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; webSearchTool=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
+  assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; storageDomain=absent; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
   assert.equal(command.handler({ rawInput: 'status extra' }).kind, 'error')
@@ -595,7 +624,7 @@ test('/omo status reports feature flags and service presence without calling bus
 
   const absent = makeContext()
   apply(absent.ctx, baseConfig)
-  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; web=absent; agentTeams=absent; agents=absent; jobController=absent; toolResultPruner=absent; terminals=absent; lsp=absent; sessionQuery=absent; sessions=absent; mcpResources=absent/u)
+  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; web=absent; agentTeams=absent; agents=absent; jobController=absent; toolResultPruner=absent; terminals=absent; lsp=absent; sessionQuery=absent; sessions=absent; storageDomain=absent; mcpResources=absent/u)
 })
 
 test('Agent terminal tools are opt-in and require a registered Agent-owned PTY backend', async () => {
@@ -695,7 +724,7 @@ test('Agent terminal tools are opt-in and require a registered Agent-owned PTY b
   assert.equal(readResult.content, readContent)
   assert.equal(sendResult.content, sendContent)
   assert.equal(prunedInputs.length, 2)
-  assert.match(enabledPruning.commands.get('omo').handler({ rawInput: 'status' }).text, /toolResultPruning=enabled; searchToolResultPruning=disabled; agentTerminalTools=enabled/u)
+  assert.match(enabledPruning.commands.get('omo').handler({ rawInput: 'status' }).text, /toolResultPruning=enabled; manualContextPruning=disabled; searchToolResultPruning=disabled; generalToolResultPruning=disabled; agentTerminalTools=enabled/u)
   await enabledPruning.effects.find(item => item.label === 'dsh-omo Agent terminal tools').dispose()
 })
 
@@ -1601,7 +1630,7 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
   const rootSnapshotsOnly = makeContext(prerequisites())
   apply(rootSnapshotsOnly.ctx, { ...baseConfig, enableRootReadmeContext: true, enableRootAgentsContext: true })
   assert.equal(rootSnapshotsOnly.events.has('tools/post-execute'), false)
-  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
+  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
 
   const combined = makeContext(prerequisites())
   apply(combined.ctx, {
@@ -1612,7 +1641,7 @@ test('mounts opt-in Claude rules-on-read independently with complete prerequisit
     enableRootAgentsContext: true,
   })
   assert.equal(typeof combined.events.get('tools/post-execute'), 'function', 'independent on-read and root-context flags can be combined')
-  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; writeExistingFileGuard=disabled/u)
+  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; writeExistingFileGuard=disabled/u)
   assert.deepEqual(calls, [], 'combined registration/status remain free of runtime filesystem and Service calls')
 })
 
@@ -2465,6 +2494,13 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   )
   assert.equal(invalidPruningConfigFixture.tools.size, 0)
 
+  const extraNamesWithoutGateFixture = makeContext()
+  assert.throws(
+    () => apply(extraNamesWithoutGateFixture.ctx, { ...baseConfig, additionalSearchToolResultPruningTools: ['custom_text_tool'] }),
+    /additionalSearchToolResultPruningTools requires enableSearchToolResultPruning/u,
+  )
+  assert.equal(extraNamesWithoutGateFixture.tools.size, 0)
+
   const missingSearchPrunerFixture = makeContext()
   assert.throws(
     () => apply(missingSearchPrunerFixture.ctx, { ...baseConfig, enableSearchToolResultPruning: true }),
@@ -2500,7 +2536,11 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
       return { name: toolName }
     },
   })
-  apply(searchPruningFixture.ctx, { ...baseConfig, enableSearchToolResultPruning: true })
+  apply(searchPruningFixture.ctx, {
+    ...baseConfig,
+    enableSearchToolResultPruning: true,
+    additionalSearchToolResultPruningTools: ['custom_text_tool'],
+  })
   const searchPostExecute = searchPruningFixture.events.get('tools/post-execute')
   assert.equal(typeof searchPostExecute, 'function')
   const downstreamDecision = Object.freeze({ kind: 'accept', content: searchBlocks, additionalContexts, marker: 'preserved' })
@@ -2514,9 +2554,14 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   assert.strictEqual(searchDecision.additionalContexts, additionalContexts)
   assert.equal(searchDecision.marker, 'preserved')
   assert.strictEqual(prunedInput, searchBlocks, 'the downstream decision content is pruned, not result.content')
-  assert.deepEqual(searchToolLookups, [['grep', searchAgent]])
+  const customDecision = await searchPostExecute({
+    name: 'custom_text_tool', agent: searchAgent, parent: undefined, signal: new AbortController().signal,
+  }, { isError: false, content: resultBlocks }, async () => downstreamDecision)
+  assert.notStrictEqual(customDecision, downstreamDecision, 'an explicitly configured content-only Tool name is eligible')
+  assert.strictEqual(customDecision.content, replacementBlocks)
+  assert.deepEqual(searchToolLookups, [['grep', searchAgent], ['custom_text_tool', searchAgent]])
   assert.match(searchPruningFixture.commands.get('omo').handler({ rawInput: 'status' }).text, /searchToolResultPruning=enabled/u)
-  assert.match(searchPruningFixture.commands.get('omo').handler().text, /Search Tool result pruning: enabled for direct grep\/glob calls only/u)
+  assert.match(searchPruningFixture.commands.get('omo').handler().text, /Search Tool result pruning: enabled for default grep\/glob\/web_fetch plus configured exact Tool names/u)
   const searchPruningEffect = searchPruningFixture.effects.find(effect => effect.label === 'dsh-omo direct search Tool result pruning')
   assert.ok(searchPruningEffect)
   await searchPruningEffect.dispose()
@@ -2524,6 +2569,80 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
     name: 'grep', agent: searchAgent, parent: undefined, signal: new AbortController().signal,
   }, { isError: false, content: searchBlocks }, async () => downstreamDecision)
   assert.strictEqual(afterSearchDispose, downstreamDecision, 'disposed listener accepts without pruning')
+
+  const disabledGeneralPruningFixture = makeContext({ services: {
+    toolResultPruner: { pruneContent: blocks => blocks },
+  } })
+  apply(disabledGeneralPruningFixture.ctx, baseConfig)
+  assert.equal(disabledGeneralPruningFixture.effects.some(effect => effect.label === 'dsh-omo general Tool result pruning'), false)
+  assert.match(disabledGeneralPruningFixture.commands.get('omo').handler({ rawInput: 'status' }).text, /generalToolResultPruning=disabled/u)
+
+  const missingGeneralPrunerFixture = makeContext()
+  assert.throws(
+    () => apply(missingGeneralPrunerFixture.ctx, { ...baseConfig, enableGeneralToolResultPruning: true }),
+    /enableGeneralToolResultPruning requires DSH toolResultPruner\.pruneContent/u,
+  )
+  assert.equal(missingGeneralPrunerFixture.tools.size, 0, 'missing general pruner fails before registrations')
+
+  const missingGeneralGetFixture = makeContext({ services: { toolResultPruner: { pruneContent: blocks => blocks } } })
+  missingGeneralGetFixture.ctx.tools.get = undefined
+  assert.throws(
+    () => apply(missingGeneralGetFixture.ctx, { ...baseConfig, enableGeneralToolResultPruning: true }),
+    /enableGeneralToolResultPruning requires DSH tools\.get/u,
+  )
+  assert.equal(missingGeneralGetFixture.tools.size, 0, 'missing general visible-definition lookup fails before registrations')
+
+  for (const missingApi of ['on', 'effect']) {
+    const missingLifecycleFixture = makeContext({ services: { toolResultPruner: { pruneContent: blocks => blocks } } })
+    missingLifecycleFixture.ctx[missingApi] = undefined
+    assert.throws(
+      () => apply(missingLifecycleFixture.ctx, { ...baseConfig, enableGeneralToolResultPruning: true }),
+      /enableGeneralToolResultPruning requires Cordis ctx\.on and ctx\.effect/u,
+    )
+    assert.equal(missingLifecycleFixture.tools.size, 0, `missing Cordis ${missingApi} fails before registrations`)
+  }
+
+  const generalOriginal = Object.freeze([{ type: 'text', text: 'large output from a non-search Tool' }])
+  const generalReplacement = Object.freeze([{ type: 'text', text: '[Host-pruned general output]' }])
+  const generalAgent = Object.freeze({ id: 'general-pruning-agent' })
+  let generalPrunedInput
+  const generalToolLookups = []
+  const generalPruningFixture = makeContext({
+    services: {
+      toolResultPruner: {
+        pruneContent(content) {
+          generalPrunedInput = content
+          return generalReplacement
+        },
+      },
+    },
+    getTool: (toolName, agent) => {
+      generalToolLookups.push([toolName, agent])
+      return { name: toolName }
+    },
+  })
+  apply(generalPruningFixture.ctx, { ...baseConfig, enableGeneralToolResultPruning: true })
+  const generalPostExecute = generalPruningFixture.events.get('tools/post-execute')
+  assert.equal(typeof generalPostExecute, 'function')
+  const generalDecision = Object.freeze({ kind: 'accept', content: generalOriginal, marker: 'retain extras' })
+  const generalReturned = await generalPostExecute({
+    name: 'custom_large_output_tool', agent: generalAgent, parent: undefined, signal: new AbortController().signal,
+  }, { isError: false, value: { structured: 'do not use dispatch content' }, content: [{ type: 'text', text: 'dispatch value' }] }, async () => generalDecision)
+  assert.notStrictEqual(generalReturned, generalDecision)
+  assert.strictEqual(generalReturned.content, generalReplacement)
+  assert.equal(generalReturned.marker, 'retain extras')
+  assert.strictEqual(generalPrunedInput, generalOriginal, 'general mode prunes downstream content, not dispatch result content')
+  assert.deepEqual(generalToolLookups, [['custom_large_output_tool', generalAgent]])
+  const generalStatus = generalPruningFixture.commands.get('omo').handler({ rawInput: 'status' }).text
+  assert.match(generalStatus, /generalToolResultPruning=enabled/u)
+  assert.match(generalPruningFixture.commands.get('omo').handler().text, /General Tool result pruning: enabled for eligible top-level successful content-only Tool results/u)
+  const generalPruningEffect = generalPruningFixture.effects.find(effect => effect.label === 'dsh-omo general Tool result pruning')
+  assert.ok(generalPruningEffect)
+  await generalPruningEffect.dispose()
+  const afterGeneralDispose = await generalPostExecute({
+    name: 'custom_large_output_tool', agent: generalAgent, parent: undefined, signal: new AbortController().signal,
+  }, { isError: false, content: generalOriginal }, async () => generalDecision)
+  assert.strictEqual(afterGeneralDispose, generalDecision, 'disposed general listener accepts without pruning')
 
   const missingSearchGetFixture = makeContext({ services: { toolResultPruner: { pruneContent: blocks => blocks } } })
   missingSearchGetFixture.ctx.tools.get = undefined
@@ -2870,11 +2989,261 @@ test('/omo web-search is opt-in, human-only, bounded, and never auto-fetches ret
   assert.equal(calls.length, 1)
 })
 
+test('model-facing DSH web search is separately opt-in, bounded, and disposable', async () => {
+  assert.throws(() => apply(makeContext().ctx, { ...baseConfig, enableWebSearchTool: true }), /web\.search/u)
+  assert.throws(() => apply(makeContext({ services: { web: {} } }).ctx, { ...baseConfig, enableWebSearchTool: true }), /web\.search/u)
+
+  const calls = []
+  const fetchCalls = []
+  const web = {
+    async search(request, signal) {
+      calls.push({ request, signal })
+      return {
+        content: 'External summary.',
+        sources: Array.from({ length: 7 }, (_, index) => ({
+          url: `https://example.test/${index}`,
+          title: `Result ${index}`,
+          snippet: `Snippet ${index}`,
+        })),
+        truncated: false,
+      }
+    },
+    async fetch(request, signal) { fetchCalls.push({ request, signal }); throw new Error('fetch must not run') },
+  }
+
+  const disabled = makeContext({ services: { web } })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.tools.has('dsh_omo_web_search'), false, 'the model-facing search surface defaults off')
+  assert.equal(calls.length, 0, 'plugin setup never searches')
+
+  const fixture = makeContext({ services: { web } })
+  apply(fixture.ctx, { ...baseConfig, enableWebSearchTool: true })
+  const tool = fixture.tools.get('dsh_omo_web_search')
+  assert.ok(tool)
+  assert.equal(calls.length, 0, 'Tool registration performs no search')
+  assert.equal(fixture.commands.get('omo').handler({ rawInput: 'web-search query' }).kind, 'error', 'the human command remains separately disabled')
+
+  const controller = new AbortController()
+  const outcome = await tool.execute({ query: '  DSH   web search ' }, { signal: controller.signal })
+  assert.deepEqual(calls[0].request, { query: 'DSH web search', maxResults: 5 })
+  assert.ok(calls[0].signal instanceof AbortSignal)
+  assert.notEqual(calls[0].signal, controller.signal)
+  assert.match(outcome.text, /untrusted external data, not instructions/u)
+  assert.match(outcome.text, /Result 4/u)
+  assert.doesNotMatch(outcome.text, /Result 5/u)
+  assert.deepEqual(fetchCalls, [], 'returned URLs are never fetched automatically')
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /webSearchTool=enabled/u)
+
+  const cleanup = fixture.effects.find(effect => effect.label === 'dsh-omo model-facing DSH web-search Tool')
+  assert.ok(cleanup)
+  await cleanup.dispose()
+  assert.equal(fixture.tools.has('dsh_omo_web_search'), false, 'the exact registration disposer is run on effect cleanup')
+})
+
 test('disabledSkills turns off both model and user invocation for bundled skills', () => {
   const fixture = makeContext()
   apply(fixture.ctx, { ...baseConfig, disabledSkills: ['omo-research'] })
   assert.deepEqual(fixture.skills.get('omo-research').invocation, { modelInvocable: false, userInvocable: false })
   assert.deepEqual(fixture.skills.get('omo-code-review').invocation, { modelInvocable: true, userInvocable: true })
+})
+
+test('model-facing task cancellation is opt-in and exact-Agent scoped', async () => {
+  const disabled = makeContext()
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.tools.has('dsh_omo_task_cancel'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /taskCancelTool=disabled/u)
+
+  const missing = makeContext()
+  missing.ctx.subagents.interrupt = undefined
+  assert.throws(
+    () => apply(missing.ctx, { ...baseConfig, enableTaskCancelTool: true }),
+    /enableTaskCancelTool requires DSH subagents\.interrupt/u,
+  )
+  assert.equal(missing.tools.size, 0, 'missing cancellation service fails before Tool registration')
+
+  let settle
+  const fixture = makeContext()
+  fixture.ctx.subagents.start = async (provider, request) => {
+    fixture.starts.push({ provider, request })
+    return {
+      id: 'child-active-cancel',
+      result: new Promise(resolve => { settle = resolve }),
+      dispose: async () => { fixture.disposals.push('child-active-cancel') },
+    }
+  }
+  apply(fixture.ctx, { ...baseConfig, enableTaskCancelTool: true })
+  const parent = { id: 'parent-task-cancel', followup: message => fixture.followups.push(message) }
+  const start = await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'Investigate a bounded task' },
+    { agent: parent, signal: new AbortController().signal },
+  )
+  assert.equal(start.childId, 'child-active-cancel')
+  const cancel = fixture.tools.get('dsh_omo_task_cancel')
+  assert.ok(cancel)
+  await assert.rejects(cancel.execute({ childId: start.childId }, { agent: { id: parent.id } }), /No active dsh-omo one-shot child/u)
+  assert.deepEqual(fixture.interrupts, [])
+  assert.deepEqual(await cancel.execute({ childId: start.childId }, { agent: parent }), {
+    childId: start.childId,
+    status: 'interrupt-requested',
+  })
+  assert.deepEqual(fixture.interrupts, [{ childId: start.childId, authority: { kind: 'ancestor', agent: parent } }])
+  assert.match(cancel.description, /not proof that the child stopped/u)
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /taskCancelTool=enabled/u)
+
+  settle({ stopReason: 'aborted', output: [{ type: 'text', text: 'Partial output.' }] })
+  await new Promise(resolve => setImmediate(resolve))
+  await assert.rejects(cancel.execute({ childId: start.childId }, { agent: parent }), /No active dsh-omo one-shot child/u)
+  const cleanup = fixture.effects.find(effect => effect.label === 'dsh-omo exact-Agent active task cancellation Tool')
+  assert.ok(cleanup)
+  await cleanup.dispose()
+  assert.equal(fixture.tools.has('dsh_omo_task_cancel'), false)
+})
+
+test('persistent project-memory Tool is opt-in, service-gated, scoped, and closed on unload', async () => {
+  const disabled = makeContext()
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.tools.has('dsh_omo_persistent_memory'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /persistentMemoryTools=disabled/u)
+
+  const missing = makeContext()
+  assert.throws(
+    () => apply(missing.ctx, { ...baseConfig, enablePersistentMemoryTools: true }),
+    /enablePersistentMemoryTools requires DSH storageDomain\.open, agents\.get, sessions\.get/u,
+  )
+  assert.equal(missing.tools.size, 0, 'missing persistent-memory services fail before any Tool registration')
+
+  const agent = Object.freeze({ id: 'persistent-memory-parent' })
+  const session = { id: agent.id, header: { id: agent.id, cwd: '/workspace/persistent-memory-project' } }
+  const records = new Map()
+  let opened = false
+  let closed = false
+  let holdNextWrite = false
+  let releaseWrite
+  const storageDomain = {
+    async open(spec) {
+      assert.equal(spec.name, 'dsh-omo-project-memory')
+      opened = true
+      const table = {
+        get: key => records.get(key),
+        async put(key, value) {
+          const parsed = spec.tables.projects.valueSchema.parse(value)
+          if (holdNextWrite) {
+            holdNextWrite = false
+            await new Promise(resolve => { releaseWrite = resolve })
+          }
+          records.set(key, structuredClone(parsed))
+        },
+        async delete(key) { return records.delete(key) },
+        get size() { return records.size },
+      }
+      return {
+        table: name => {
+          assert.equal(name, 'projects')
+          return table
+        },
+        async close() { closed = true },
+      }
+    },
+  }
+  const fixture = makeContext({ services: {
+    agents: { get: id => id === agent.id ? agent : undefined },
+    sessions: { get: id => id === agent.id ? session : undefined },
+    storageDomain,
+  } })
+  apply(fixture.ctx, { ...baseConfig, enablePersistentMemoryTools: true })
+  const memoryTool = fixture.tools.get('dsh_omo_persistent_memory')
+  assert.ok(memoryTool)
+  assert.match(memoryTool.description, /bounded notes/u)
+  const saved = await memoryTool.execute({ action: 'write', title: 'Setup', content: 'Run pnpm test.' }, { agent })
+  assert.equal(saved.saved, true)
+  assert.equal(opened, true)
+  assert.equal(records.size, 1)
+
+  holdNextWrite = true
+  const pendingSave = memoryTool.execute({ action: 'write', title: 'Pending', content: 'Drain before close.' }, { agent })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(typeof releaseWrite, 'function')
+
+  const effect = fixture.effects.find(item => item.label === 'dsh-omo persistent project memory Domain and Tool')
+  assert.ok(effect)
+  const unload = effect.dispose()
+  assert.equal(fixture.tools.has('dsh_omo_persistent_memory'), false)
+  assert.equal(closed, false, 'unload waits for the active KV write before closing its domain')
+  await assert.rejects(memoryTool.execute({ action: 'search', query: 'Setup' }, { agent }), /Tool is disposed/u)
+  releaseWrite()
+  await pendingSave
+  await unload
+  assert.equal(closed, true)
+  assert.equal([...records.values()][0].notes.length, 2)
+})
+
+test('pending storageDomain.open does not block unload and closes a late handle', async () => {
+  const agent = Object.freeze({ id: 'pending-memory-open' })
+  const session = { id: agent.id, header: { id: agent.id, cwd: '/workspace/pending-memory-open' } }
+  const table = {
+    get: () => undefined,
+    async put() {},
+    async delete() { return false },
+    size: 0,
+  }
+  let resolveOpen
+  let closed = false
+  const fixture = makeContext({ services: {
+    agents: { get: id => id === agent.id ? agent : undefined },
+    sessions: { get: id => id === agent.id ? session : undefined },
+    storageDomain: { open: () => new Promise(resolve => { resolveOpen = resolve }) },
+  } })
+  apply(fixture.ctx, { ...baseConfig, enablePersistentMemoryTools: true })
+  const memoryTool = fixture.tools.get('dsh_omo_persistent_memory')
+  const pending = memoryTool.execute({ action: 'search', query: 'anything' }, { agent })
+  await new Promise(resolve => setImmediate(resolve))
+
+  const effect = fixture.effects.find(item => item.label === 'dsh-omo persistent project memory Domain and Tool')
+  const unload = effect.dispose()
+  await unload
+  await assert.rejects(pending, /Tool is disposed/u)
+  assert.equal(fixture.tools.has('dsh_omo_persistent_memory'), false)
+  assert.equal(closed, false, 'unload does not await an uninterruptible Host open')
+
+  resolveOpen({
+    table: name => {
+      assert.equal(name, 'projects')
+      return table
+    },
+    async close() { closed = true },
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(closed, true, 'a Domain returned after unload is closed immediately')
+})
+
+test('persistent memory close failures are logged without backend details or unload rejection', async () => {
+  const agent = Object.freeze({ id: 'memory-close-failure' })
+  const session = { id: agent.id, header: { id: agent.id, cwd: '/workspace/memory-close-failure' } }
+  const table = {
+    get: () => undefined,
+    async put() {},
+    async delete() { return false },
+    size: 0,
+  }
+  const warnings = []
+  const fixture = makeContext({ services: {
+    agents: { get: id => id === agent.id ? agent : undefined },
+    sessions: { get: id => id === agent.id ? session : undefined },
+    storageDomain: {
+      async open() {
+        return { table: () => table, async close() { throw new Error('secret backend path') } }
+      },
+    },
+  } })
+  fixture.ctx.logger = { warn: message => warnings.push(message) }
+  apply(fixture.ctx, { ...baseConfig, enablePersistentMemoryTools: true })
+  await fixture.tools.get('dsh_omo_persistent_memory').execute(
+    { action: 'search', query: 'none' }, { agent },
+  )
+  const effect = fixture.effects.find(item => item.label === 'dsh-omo persistent project memory Domain and Tool')
+  await assert.doesNotReject(effect.dispose())
+  assert.ok(warnings.some(message => /persistent memory storage close failed \(Error\)/u.test(message)))
+  assert.equal(warnings.some(message => message.includes('secret backend path')), false)
 })
 
 test('uses the current Host startActivation request and preserves the caller-owned result relay', async () => {
@@ -2899,6 +3268,7 @@ test('uses the current Host startActivation request and preserves the caller-own
   }
   apply(fixture.ctx, {
     ...baseConfig,
+    enableTaskResultTool: true,
     maxDepth: 2,
     roleRoutes: [{ role: 'test', provider: 'route-provider', model: 'route-model' }],
   })
@@ -2909,7 +3279,7 @@ test('uses the current Host startActivation request and preserves the caller-own
     { role: 'test', task: 'Use the current Host activation API' },
     { agent: parent, signal },
   )
-  assert.deepEqual(result, { childId: 'child-current-activation', role: 'test', status: 'started' })
+  assert.deepEqual(result, { childId: 'child-current-activation', role: 'test', status: 'started', resultTracked: true })
   assert.equal(fixture.starts.length, 0, 'the old ctx.subagents.start contract is not called when startActivation exists')
   assert.equal(activationSpecs.length, 1)
   const spec = activationSpecs[0]
@@ -2931,6 +3301,19 @@ test('uses the current Host startActivation request and preserves the caller-own
   assert.ok(fixture.followups.some(message => message.source.kind === 'agent-message'
     && message.content.some(block => block.text.includes('Current activation result.'))))
   assert.deepEqual(fixture.disposals, ['child-current-activation'])
+  const resultTool = fixture.tools.get('dsh_omo_task_result')
+  assert.ok(resultTool)
+  assert.deepEqual(await resultTool.execute({ childId: 'child-current-activation' }, { agent: parent }), {
+    childId: 'child-current-activation',
+    status: 'completed',
+    output: 'Current activation result.',
+    truncated: false,
+    omittedNonText: false,
+    stopReason: 'completed',
+  })
+  await assert.rejects(resultTool.execute({ childId: 'child-current-activation' }, { agent: { id: parent.id } }), /No unexpired dsh-omo result/u)
+  for (const listener of fixture.eventListeners.get('agent/disposed') ?? []) listener({ agent: parent })
+  await assert.rejects(resultTool.execute({ childId: 'child-current-activation' }, { agent: parent }), /No unexpired dsh-omo result/u)
 })
 
 test('passes registered custom agent presets only as request.agentPreset on current Host activations', async () => {
@@ -3983,6 +4366,13 @@ test('requires live filesystem and session services when project agent files are
   const fixture = makeContext()
   assert.throws(() => apply(fixture.ctx, { ...baseConfig, enableProjectAgentFiles: true }), /enableProjectAgentFiles requires/u)
   assert.equal(fixture.tools.size, 0)
+})
+
+test('requires exact Agent, Session, Commands, and filesystem APIs when project commands are enabled', () => {
+  const fixture = makeContext()
+  assert.throws(() => apply(fixture.ctx, { ...baseConfig, enableProjectCommands: true }), /enableProjectCommands requires/u)
+  assert.equal(fixture.tools.size, 0)
+  assert.equal(fixture.commands.size, 0)
 })
 
 test('rejects reserved run_code in category and role filters before registering tools', () => {
@@ -5790,7 +6180,7 @@ test('slash commands steer the current agent with explicit work modes', async ()
   assert.equal(messages.length, 2, 'oversized slash input is not copied to the parent inbox')
 })
 
-test('/ulw-execute queues one prompt-only plan request and rejects unsupported flags before follow-up', () => {
+test('/ulw-execute queues one prompt-only plan request and rejects unsupported flags before follow-up', async () => {
   const fixture = makeContext()
   const messages = []
   const agent = { id: 'parent-agent', followup: message => messages.push(message) }
@@ -5799,14 +6189,14 @@ test('/ulw-execute queues one prompt-only plan request and rejects unsupported f
   assert.ok(command)
   assert.match(command.description, /Prompt-only/u)
   assert.equal(fixture.tools.has('ulw-execute'), false, 'the command is not a model-facing Tool')
-  assert.match(fixture.sections[0].text, /\/ulw-execute <existing plan name> is a bounded prompt-only adapter/u)
-  assert.match(fixture.sections[0].text, /Unsupported --worktree, --make-pr, and --ship flags are rejected/u)
+  assert.match(fixture.sections[0].text, /\/ulw-execute <existing plan name> \[--worktree\] is a bounded prompt-only adapter/u)
+  assert.match(fixture.sections[0].text, /The explicit --worktree option requests a DSH-managed worktree/u)
   const fsTouches = []
   let hostServiceCalls = 0
   fixture.ctx.fs = new Proxy({}, { get(_target, property) { fsTouches.push(String(property)); throw new Error('unexpected filesystem access') } })
   fixture.ctx.get = () => { hostServiceCalls += 1; throw new Error('unexpected Host service call') }
 
-  const result = command.handler({ agent, rawInput: 'Existing migration plan' })
+  const result = await command.handler({ agent, rawInput: 'Existing migration plan' })
   assert.equal(result.kind, 'success')
   assert.match(result.text, /prompt-only plan execution/u)
   assert.equal(messages.length, 1)
@@ -5820,9 +6210,40 @@ test('/ulw-execute queues one prompt-only plan request and rejects unsupported f
   assert.equal(hostServiceCalls, 0, 'the prompt-only adapter makes no Host service calls')
 
   for (const rawInput of [undefined, '', '   ', 'Plan --worktree /tmp', 'Plan --make-pr', 'Plan --ship', `x`.repeat(baseConfig.maxTaskChars + 1)]) {
-    assert.equal(command.handler({ agent, rawInput }).kind, 'error')
+    assert.equal((await command.handler({ agent, rawInput })).kind, 'error')
   }
   assert.equal(messages.length, 1, 'invalid and unsupported requests queue no additional follow-up')
+})
+
+test('creates a DSH worktree only for explicit /ulw-execute --worktree and queues bounded plan guidance', async () => {
+  const messages = []
+  const agent = { id: 'parent-agent', followup: value => messages.push(value) }
+  const abort = new AbortController().signal
+  const calls = []
+  const fixture = makeContext({ services: { worktrees: {
+    async create(...args) {
+      calls.push(args)
+      return { path: '/workspace/.worktrees/plan-a', branch: 'plan-a', baseCommit: 'abc123', repositoryRoot: '/workspace' }
+    },
+  } } })
+  apply(fixture.ctx, baseConfig)
+  const command = fixture.commands.get('ulw-execute')
+  const result = await command.handler({ agent, rawInput: 'Approved plan --worktree', signal: abort })
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /Created DSH worktree branch plan-a at \/workspace\/\.worktrees\/plan-a from abc123/u)
+  assert.deepEqual(calls, [[agent, {}, abort]])
+  assert.equal(messages.length, 1)
+  assert.match(messages[0].content[0].text, /already been created and selected as this Agent’s current working directory/u)
+  assert.match(messages[0].content[0].text, /Approved plan/u)
+
+  const noService = makeContext()
+  const noServiceMessages = []
+  const noServiceAgent = { id: 'parent-agent', followup: value => noServiceMessages.push(value) }
+  apply(noService.ctx, baseConfig)
+  const unavailable = await noService.commands.get('ulw-execute').handler({ agent: noServiceAgent, rawInput: 'Approved plan --worktree' })
+  assert.equal(unavailable.kind, 'error')
+  assert.match(unavailable.text, /worktrees.create service is unavailable/u)
+  assert.equal(noServiceMessages.length, 0)
 })
 
 test('parses /refactor options and queues only bounded prompt guidance to the current agent', () => {
@@ -5961,4 +6382,63 @@ test('attempts interruption only for resident label-matched children under exact
   assert.equal((await fixture.commands.get('omo-interrupt').handler({ agent, rawInput: 'omo-grandchild', signal })).kind, 'error')
   assert.equal((await fixture.commands.get('omo-interrupt').handler({ agent, rawInput: '  ', signal })).kind, 'error')
   assert.equal(fixture.interrupts.length, 2)
+})
+
+test('manual context pruning is opt-in, current-Agent scoped, and requires exact Host services', () => {
+  const defaultFixture = makeContext()
+  apply(defaultFixture.ctx, baseConfig)
+  assert.match(defaultFixture.commands.get('omo').handler({ rawInput: 'prune-context' }).text, /disabled/u)
+
+  const missingPrunerFixture = makeContext({ services: {
+    agents: { get() {} },
+    sessions: { get() {} },
+    toolResultPruner: { pruneContent() {} },
+  } })
+  assert.throws(
+    () => apply(missingPrunerFixture.ctx, { ...baseConfig, enableManualContextPruning: true }),
+    /enableManualContextPruning requires DSH toolResultPruner\.pruneSession/u,
+  )
+
+  const missingSessionFixture = makeContext({ services: {
+    agents: { get() {} },
+    toolResultPruner: { pruneSession() {} },
+  } })
+  assert.throws(
+    () => apply(missingSessionFixture.ctx, { ...baseConfig, enableManualContextPruning: true }),
+    /enableManualContextPruning requires DSH agents\.get and sessions\.get/u,
+  )
+
+  const agent = Object.freeze({ id: 'manual-prune-session' })
+  const session = Object.freeze({ id: agent.id })
+  const calls = []
+  const fixture = makeContext({ services: {
+    agents: { get(id) { calls.push(['agents.get', id]); return agent } },
+    sessions: { get(id) { calls.push(['sessions.get', id]); return session } },
+    toolResultPruner: {
+      pruneContent(blocks) { return blocks },
+      pruneSession(value) {
+        calls.push(['pruneSession', value])
+        return { pruned: [{ replacementSeq: 1 }], charsRemoved: 24 }
+      },
+    },
+  } })
+  apply(fixture.ctx, { ...baseConfig, enableManualContextPruning: true })
+  assert.match(fixture.commands.get('omo').handler().text, /Manual DSH context pruning: enabled via \/omo prune-context/u)
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'typo' }).text, /prune-context/u)
+  const result = fixture.commands.get('omo').handler({
+    agent, rawInput: 'prune-context', signal: new AbortController().signal,
+  })
+  assert.deepEqual(result, {
+    kind: 'success',
+    text: 'Host context pruning completed for the invoking Agent’s current session. Review the current conversation to see whether content changed.',
+  })
+  assert.deepEqual(calls, [
+    ['agents.get', agent.id],
+    ['sessions.get', agent.id],
+    ['pruneSession', session],
+    ['agents.get', agent.id],
+    ['sessions.get', agent.id],
+  ])
+  fixture.commands.get('omo').handler({ agent, rawInput: 'prune-context other-session', signal: new AbortController().signal })
+  assert.equal(calls.filter(([name]) => name === 'pruneSession').length, 1, 'an arbitrary session id is never accepted')
 })

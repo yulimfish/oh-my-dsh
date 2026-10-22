@@ -93,6 +93,10 @@ test('requires exact list services and registers with a disposer', () => {
   dispose()
   assert.equal(registered.has('session_list'), false)
   assert.equal(typeof registerSessionListTool({}, undefined), 'function')
+  assert.throws(
+    () => registerSessionListTool({ tools: { register: () => undefined } }, fixture.sessionQuery),
+    /did not return a disposer/u,
+  )
 })
 
 test('defaults to current workspace, applies inclusive date filters, and caps metadata output', async () => {

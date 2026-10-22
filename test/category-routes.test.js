@@ -17,6 +17,9 @@ test('normalizes immutable category primary routes and rejects invalid entries',
   }))), /at most 32/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: ' ', model: 'm' }]), /provider/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: '' }]), /model/u)
+  assert.throws(() => normalizeCategoryRoutes([{ name: `bu\u202Eild`, provider: 'p', model: 'm' }]), /name/u)
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', description: `plain\u2066text` }]), /description/u)
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', tools: { [`read\u202E`]: true } }]), /invalid tool name/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p' }]), /together/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build' }]), /requires both provider and model/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', reasoningEffort: ' ' }]), /reasoningEffort/u)
@@ -98,6 +101,13 @@ test('requires a paired role pin before resolving role fallback chains', () => {
   }
   assert.strictEqual(resolveCategoryRoute(categoryRoutes, undefined, pinnedRole).fallbackModels, pinnedRole.fallbackModels)
   assert.strictEqual(resolveCategoryRoute(categoryRoutes, 'chain', pinnedRole).fallbackModels, pinnedRole.fallbackModels)
+
+  const pinnedRoleWithoutFallback = {
+    role: 'explore', provider: 'role-primary', model: 'role-primary-model',
+  }
+  const pinnedRoute = resolveCategoryRoute(categoryRoutes, 'chain', pinnedRoleWithoutFallback)
+  assert.equal(Object.hasOwn(pinnedRoute, 'fallbackModels'), false,
+    'a paired role pin without its own chain must not inherit the category fallback chain')
 })
 
 test('resolves explicit category before the role default category', () => {

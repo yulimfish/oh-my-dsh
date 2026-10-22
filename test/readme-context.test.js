@@ -486,3 +486,26 @@ test('exports listener and validates its DSH dependencies', () => {
   assert.throws(() => createRootReadmeContextListener({ get() {} }, {}, {}), /sessions.get/u)
   assert.throws(() => createRootReadmeContextListener({ get() {} }, { get() {} }, {}), /fs.resolve/u)
 })
+
+test('failed Cordis lifecycle registration leaves an attached README listener inert', async () => {
+  const { fs, calls } = makeFileSystem(new Map([['/workspace/rollback', { text: 'must not be read' }]]))
+  const agent = { id: 'rollback', ctx: { systemPrompt: { context() { throw new Error('must not register context') } } } }
+  let attachedListener
+  const registrationError = new Error('effect registration failed')
+  const ctx = {
+    on(event, listener) {
+      assert.equal(event, 'agent/created')
+      attachedListener = listener
+    },
+    effect() { throw registrationError },
+  }
+
+  assert.throws(() => registerRootReadmeContext(
+    ctx,
+    { get: id => id === agent.id ? agent : undefined },
+    { get: id => ({ header: { id, cwd: '/workspace/rollback' } }) },
+    fs,
+  ), error => error === registrationError)
+  await attachedListener({ agent })
+  assert.equal(calls.some(call => call[0] === 'resolve'), false)
+})

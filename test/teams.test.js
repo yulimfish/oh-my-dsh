@@ -141,6 +141,10 @@ test('registers eleven uniquely named team tools with bounded, strict output con
   dispose()
   assert.equal(fixture.registered.size, 0)
   dispose()
+  assert.throws(
+    () => registerTeamTools({ tools: { register: () => undefined } }, makeService()),
+    /did not return a disposer/u,
+  )
 })
 
 test('resolves the optional Host service and registers nothing when unavailable', () => {

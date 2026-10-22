@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createSearchToolResultPruningListener } from '../src/search-tool-result-pruning.js'
+import { createGeneralToolResultPruningListener, createSearchToolResultPruningListener, normalizeAdditionalToolResultPruningNames } from '../src/search-tool-result-pruning.js'
 
 const caller = Object.freeze({ id: 'agent-1' })
 
@@ -36,10 +36,21 @@ function makePruner(pruneContent = blocks => blocks) {
   return { pruneContent }
 }
 
-async function assertSkipped({ exec = makeExec(), result = makeResult(), decision = makeDecision(), tools = makeTools(), pruner = makePruner(), expectedPruneCalls = 0 } = {}) {
+test('normalizes a bounded exact additional Tool-name allowlist', () => {
+  assert.deepEqual(normalizeAdditionalToolResultPruningNames(undefined), [])
+  assert.deepEqual(normalizeAdditionalToolResultPruningNames(['custom:read', 'my_tool']), ['custom:read', 'my_tool'])
+  assert.throws(() => normalizeAdditionalToolResultPruningNames('custom_tool'), /must be an array/u)
+  assert.throws(() => normalizeAdditionalToolResultPruningNames(Array.from({ length: 33 }, (_, index) => `tool_${index}`)), /at most 32/u)
+  for (const invalid of ['', ' custom_tool', 'custom_tool ', 'x'.repeat(129), 'é'.repeat(65), 'run_code', 'safe\u202ename']) {
+    assert.throws(() => normalizeAdditionalToolResultPruningNames([invalid]), /exact safe Tool name/u)
+  }
+  assert.throws(() => normalizeAdditionalToolResultPruningNames(['custom_tool', 'custom_tool']), /must not contain duplicates/u)
+})
+
+async function assertSkipped({ listenerFactory = createSearchToolResultPruningListener, exec = makeExec(), result = makeResult(), decision = makeDecision(), tools = makeTools(), pruner = makePruner(), expectedPruneCalls = 0 } = {}) {
   let nextCalls = 0
   let pruneCalls = 0
-  const pruning = createSearchToolResultPruningListener(tools, {
+  const pruning = listenerFactory(tools, {
     pruneContent(...args) {
       pruneCalls += 1
       return pruner.pruneContent(...args)
@@ -55,8 +66,65 @@ async function assertSkipped({ exec = makeExec(), result = makeResult(), decisio
   return pruning
 }
 
-test('prunes downstream mixed content for exact caller-scoped grep and glob Tools without mutation', async () => {
-  for (const name of ['grep', 'glob']) {
+test('general pruning accepts an unlisted exact visible Tool when enabled', async () => {
+  const originalContent = Object.freeze([
+    Object.freeze({ type: 'text', text: 'long custom Tool result' }),
+    Object.freeze({ type: 'image', data: 'keep rich block' }),
+  ])
+  const replacementContent = Object.freeze([{ type: 'text', text: '[pruned]' }])
+  const decision = Object.freeze({ kind: 'accept', content: originalContent, marker: 'preserve decision metadata' })
+  const lookups = []
+  let prunedInput
+  const pruning = createGeneralToolResultPruningListener({
+    get(name, agent) {
+      lookups.push([name, agent])
+      return { name }
+    },
+  }, {
+    pruneContent(content) {
+      prunedInput = content
+      return replacementContent
+    },
+  })
+
+  const returned = await pruning.listener(
+    makeExec({ name: 'custom_report_tool' }),
+    makeResult(),
+    async () => decision,
+  )
+  assert.notStrictEqual(returned, decision)
+  assert.strictEqual(returned.content, replacementContent)
+  assert.equal(returned.marker, 'preserve decision metadata')
+  assert.strictEqual(prunedInput, originalContent)
+  assert.deepEqual(lookups, [['custom_report_tool', caller]])
+  pruning.dispose()
+})
+
+test('general pruning leaves non-eligible and Tool-finalized outcomes unchanged', async () => {
+  const customDefinition = makeTools(() => ({ name: 'custom_tool' }))
+  const aborted = new AbortController()
+  aborted.abort()
+  const cases = [
+    { exec: makeExec({ name: 'run_code' }) },
+    { exec: makeExec({ name: 'custom_tool', parent: caller }), tools: customDefinition },
+    { exec: makeExec({ name: 'custom_tool', signal: aborted.signal }), tools: customDefinition },
+    { exec: makeExec({ name: 'custom_tool' }), result: makeResult({ isError: true }), tools: customDefinition },
+    { exec: makeExec({ name: 'custom_tool' }), decision: { kind: 'accept', value: { structured: true } }, tools: customDefinition },
+    { exec: makeExec({ name: 'custom_tool' }), decision: { kind: 'block', feedback: [] }, tools: customDefinition },
+    { exec: makeExec({ name: 'custom_tool' }), tools: makeTools(() => undefined) },
+    { exec: makeExec({ name: 'custom_tool' }), tools: makeTools(() => ({ name: 'different_tool' })) },
+    { exec: makeExec({ name: 'custom_tool' }), tools: makeTools(() => ({ name: 'custom_tool', projectContent() {} })) },
+    { exec: makeExec({ name: 'custom_tool' }), tools: makeTools(() => ({ name: 'custom_tool', finalizeContent() {} })) },
+    { exec: makeExec({ name: 'custom_tool' }), tools: customDefinition, pruner: makePruner(() => { throw new Error('private pruner failure') }), expectedPruneCalls: 1 },
+  ]
+
+  for (const options of cases) {
+    await assertSkipped({ listenerFactory: createGeneralToolResultPruningListener, ...options })
+  }
+})
+
+test('prunes downstream mixed content for exact caller-scoped grep, glob, and web_fetch Tools without mutation', async () => {
+  for (const name of ['grep', 'glob', 'web_fetch']) {
     const blocks = Object.freeze([
       Object.freeze({ type: 'text', text: `${name} heading` }),
       Object.freeze({ type: 'image', data: 'opaque-image' }),
@@ -118,8 +186,8 @@ test('prunes downstream mixed content for exact caller-scoped grep and glob Tool
   }
 })
 
-test('uses only the exact case-sensitive grep/glob allowlist and direct dispatches', async () => {
-  for (const name of ['Grep', 'Glob', 'grep_extra', 'glob ', 'websearch', 'webfetch']) {
+test('uses only the exact case-sensitive grep/glob/web_fetch allowlist and direct dispatches', async () => {
+  for (const name of ['Grep', 'Glob', 'grep_extra', 'glob ', 'websearch', 'webfetch', 'WebFetch', 'web_fetch_extra']) {
     let lookups = 0
     const pruning = await assertSkipped({
       exec: makeExec({ name }),

@@ -347,6 +347,7 @@ export function registerImageQueryTool(ctx, llm, route) {
     ctx.on('agent/pre-step', onPreStep)
     ctx.on('agent/disposed', onAgentDisposed)
     disposeTool = ctx.tools.register(createImageQueryTool(llm, normalizedRoute, captures))
+    if (typeof disposeTool !== 'function') throw new TypeError('Image-query Tool registration did not return a disposer')
   } catch (error) {
     disposed = true
     captures.clear()

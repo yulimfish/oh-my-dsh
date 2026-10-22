@@ -1,6 +1,7 @@
 const ACTIONS = new Set(['pause', 'resume', 'complete', 'clear'])
 const MAX_OBJECTIVE_CHARS = 4_000
 const MAX_DISPLAY_CHARS = 1_600
+const CONTROL_OR_BIDI_GLOBAL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu
 
 const USAGE = 'Usage: /goal [status | <objective> | pause | resume | complete | clear]'
 const UNAVAILABLE = 'The native DSH Goal service is unavailable in this profile.'
@@ -12,7 +13,7 @@ function result(kind, text) {
 
 function cleanText(value, maxChars, fallback = 'unknown') {
   if (typeof value !== 'string') return fallback
-  const clean = value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ').replace(/\s+/gu, ' ').trim()
+  const clean = value.replace(CONTROL_OR_BIDI_GLOBAL, ' ').replace(/\s+/gu, ' ').trim()
   if (!clean) return fallback
   return clean.length > maxChars ? `${clean.slice(0, maxChars - 1)}…` : clean
 }

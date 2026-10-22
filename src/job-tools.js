@@ -626,8 +626,12 @@ export function registerJobTools(ctx, jobController, { toolResultPruner } = {}) 
   }
   const disposers = []
   try {
-    disposers.push(ctx.tools.register(createJobListTool(jobController)))
-    disposers.push(ctx.tools.register(createJobFollowTool(jobController, toolResultPruner)))
+    const listDispose = ctx.tools.register(createJobListTool(jobController))
+    if (typeof listDispose !== 'function') throw new TypeError('DSH job list Tool registration did not return a disposer')
+    disposers.push(listDispose)
+    const followDispose = ctx.tools.register(createJobFollowTool(jobController, toolResultPruner))
+    if (typeof followDispose !== 'function') throw new TypeError('DSH job follow Tool registration did not return a disposer')
+    disposers.push(followDispose)
   } catch (error) {
     for (const dispose of [...disposers].reverse()) {
       try {

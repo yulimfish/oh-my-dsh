@@ -64,6 +64,15 @@ test('registers /goal and supports empty/status display and objective creation',
   assert.ok(!Object.hasOwn(events[2][2], 'maxGoalRounds'), 'round settings are not inferred from objective text')
 })
 
+test('sanitizes bidi controls from the native Goal command display', async () => {
+  const command = createGoalCommand({ get: () => validGoal({ objective: 'Build\u202e feature' }) })
+  const response = await invoke(command, { id: 'agent-current' }, '')
+
+  assert.equal(response.kind, 'success')
+  assert.match(response.text, /Objective: Build feature/u)
+  assert.doesNotMatch(response.text, /\p{Bidi_Control}/u)
+})
+
 test('passes the exact live agent and freshly-read Goal revision to each mutation', async () => {
   const agent = { id: 'agent-identity' }
   const events = []

@@ -80,6 +80,9 @@ export function createContinuableTaskRegistry() {
 
     let parent = parents.get(parentId)
     if (parent && parent.agent !== parentAgent) {
+      // A same-ID replacement makes the displaced object stale. Prevent a late
+      // start completion from that old Agent from reclaiming the new bucket.
+      disposedAgents.add(parent.agent)
       removeParent(parentId, parent)
       parent = undefined
     }

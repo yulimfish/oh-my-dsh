@@ -7,6 +7,8 @@ const MAX_CONTENT_BLOCKS = 64
 const MAX_RAW_TEXT_CHARS = 4_096
 const MAX_EVENT_TEXT_CHARS = 1_200
 const MAX_TOTAL_TEXT_CHARS = 8_000
+const CONTROL_OR_BIDI_GLOBAL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu
+const CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
 const OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -62,7 +64,7 @@ function assertNotAborted(signal) {
 
 function validateSessionId(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_SESSION_ID_CHARS
-    || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) {
+    || CONTROL_OR_BIDI.test(value)) {
     throw new TypeError(`sessionId must be a non-empty session id of at most ${MAX_SESSION_ID_CHARS} characters`)
   }
   return value
@@ -87,7 +89,7 @@ function cleanText(value, max) {
   const bounded = value.slice(0, MAX_RAW_TEXT_CHARS)
   const normalized = bounded
     .replace(/\r\n?/gu, '\n')
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, ' ')
+    .replace(CONTROL_OR_BIDI_GLOBAL, ' ')
     .replace(/[ \t]+/gu, ' ')
     .replace(/\n{3,}/gu, '\n\n')
     .trim()
@@ -306,5 +308,6 @@ export function registerSessionReadTool(ctx, sessionQuery) {
     throw new TypeError('registerSessionReadTool requires ctx.tools.register')
   }
   const dispose = ctx.tools.register(createSessionReadTool(sessionQuery))
-  return typeof dispose === 'function' ? dispose : () => {}
+  if (typeof dispose !== 'function') throw new TypeError('session_read Tool registration did not return a disposer')
+  return dispose
 }

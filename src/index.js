@@ -24,6 +24,7 @@ import { registerPlanChecklistTool } from './plan-checklist.js'
 import { createPlanFormatAdvisoryListener } from './plan-format-advisory.js'
 import { createModelCapabilitiesCommand } from './model-capabilities.js'
 import { createOmoWebSearchHandler } from './web-search-command.js'
+import { createDshWebSearchTool } from './web-search-tool.js'
 import { normalizeCategoryRoutes, normalizeExplicitFallbackModels, resolveCategoryRoute } from './category-routes.js'
 import { normalizeRuntimeFallback, registerRuntimeFallback } from './runtime-fallback.js'
 import { buildRefactorDirective, parseRefactorInput, REFACTOR_COMMAND_HINT } from './refactor-command.js'
@@ -40,12 +41,17 @@ import { createTeamStatusContext } from './team-status-context.js'
 import { createGoalUseReminder } from './goal-use-reminder.js'
 import { createAgentUsageReminder } from './agent-usage-reminder.js'
 import { createCompactionResumeAdvisory } from './compaction-resume-advisory.js'
-import { createSearchToolResultPruningListener } from './search-tool-result-pruning.js'
+import { createGeneralToolResultPruningListener, createSearchToolResultPruningListener, normalizeAdditionalToolResultPruningNames } from './search-tool-result-pruning.js'
+import { createManualContextPruningHandler } from './manual-context-pruning-command.js'
 import { normalizeImageQueryRoute, registerImageQueryTool } from './image-query-tool.js'
 import { createContinuableTaskRegistry } from './continuable-task-registry.js'
 import { createBashFileReadGuidanceListener } from './bash-file-read-guidance.js'
 import { createProjectAgentFilesAdapter, PROJECT_AGENT_FILE_NAME } from './project-agent-files.js'
 import { createPromptFileExpander } from './prompt-file-expansion.js'
+import { createProjectCommandAdapter, makeProjectCommandDefinition } from './project-commands.js'
+import { createTaskResultRegistry, createTaskResultTool, TASK_RESULT_MAX_CHARS } from './task-result-tool.js'
+import { createTaskCancelTool } from './task-cancel-tool.js'
+import { createPersistentMemoryTool, disposePersistentMemoryTool, openPersistentMemoryDomain } from './persistent-memory-tools.js'
 
 export const name = 'dsh-omo'
 export const inject = ['tools', 'subagents', 'systemPrompt', 'commands', 'skills', 'fs']
@@ -56,6 +62,7 @@ const DEFAULT_MAX_DEPTH = 1
 const DEFAULT_MAX_TASK_CHARS = 12_000
 const MAX_CHILD_OUTPUT_BLOCKS = 256
 const MAX_CHILD_OUTPUT_CHARS = 65_536
+const MAX_TASK_RESULT_TOOL_CHARS = TASK_RESULT_MAX_CHARS
 const MAX_PROVIDER_CONCURRENCY_ENTRIES = 64
 const MAX_MODEL_CONCURRENCY_ENTRIES = 128
 const MAX_PROVIDER_CONCURRENCY_KEY_BYTES = 128
@@ -83,6 +90,9 @@ export const Config = z.object({
   maxDepth: z.number().default(DEFAULT_MAX_DEPTH),
   maxTaskChars: z.number().default(DEFAULT_MAX_TASK_CHARS),
   maxResultChars: z.number().default(8_000),
+  enableTaskResultTool: z.boolean().default(false),
+  enableTaskCancelTool: z.boolean().default(false),
+  enablePersistentMemoryTools: z.boolean().default(false),
   enableContinuableTasks: z.boolean().default(false),
   enableContinuableTaskFollowups: z.boolean().default(false),
   enableGoalTools: z.boolean().default(false),
@@ -102,9 +112,13 @@ export const Config = z.object({
   enablePlanFormatAdvisory: z.boolean().default(false),
   enableModelCapabilitiesRefresh: z.boolean().default(false),
   enableWebSearchCommand: z.boolean().default(false),
+  enableWebSearchTool: z.boolean().default(false),
   enableJobTools: z.boolean().default(false),
   enableToolResultPruning: z.boolean().default(false),
+  enableManualContextPruning: z.boolean().default(false),
   enableSearchToolResultPruning: z.boolean().default(false),
+  enableGeneralToolResultPruning: z.boolean().default(false),
+  additionalSearchToolResultPruningTools: z.array(z.string()).default([]),
   enableImageQueryTool: z.boolean().default(false),
   imageQueryRoute: z.union([z.object({
     provider: z.string().required(),
@@ -115,6 +129,7 @@ export const Config = z.object({
   enableRootAgentsContext: z.boolean().default(false),
   enableAgentsOnRead: z.boolean().default(false),
   enableProjectAgentFiles: z.boolean().default(false),
+  enableProjectCommands: z.boolean().default(false),
   enablePromptFileExpansion: z.boolean().default(false),
   enableRootReadmeContext: z.boolean().default(false),
   enableReadmeOnRead: z.boolean().default(false),
@@ -206,7 +221,7 @@ function buildUltraworkGuidance(disabledOmoCommands, activeRoleNames, writeExist
     : '/omo-interrupt rejects inactive rows and only attempts resident-child signals; DSH is fire-and-return and may no-op.'
   const planExecutionGuidance = disabledOmoCommands.has('ulw-execute')
     ? 'dsh-omo /ulw-execute is disabled by configuration.'
-    : '/ulw-execute <existing plan name> is a bounded prompt-only adapter for an existing approved project plan: ask if missing or ambiguous; it does not invoke OMO hooks, use OMO history or agent selection, create boulder/notepad state, or perform worktree/PR/shipping/merge automation. Unsupported --worktree, --make-pr, and --ship flags are rejected.'
+    : '/ulw-execute <existing plan name> [--worktree] is a bounded prompt-only adapter for an existing approved project plan: ask if missing or ambiguous; it does not invoke OMO hooks, use OMO history or agent selection, create boulder/notepad state, or perform PR/shipping/merge automation. The explicit --worktree option requests a DSH-managed worktree when the Host service is available; --make-pr and --ship remain unsupported.'
   const writeGuardGuidance = writeExistingFileGuardEnabled
     ? 'The opt-in write-existing-file guard grants one same-live-Agent case-insensitive Tool call named `write` only after a final successful `tools/result` (`isError: false`) for a case-insensitive call named `read` whose preflight classified an in-cwd regular file. Same-named custom Tools qualify, but a custom `read` Tool need not prove it returned file contents. A case-sensitive `.omo` segment on the POSIX-normalized path bypasses this guard; canceled `..` aliases do not bypass, and symlink targets are not resolved by this lexical check; `overwrite` boolean `true` or exact case-insensitive string `"true"` (not trimmed) also bypasses, and arguments pass through unchanged. Both bypasses are honored while a bounded decision slot is available; saturated ledgers may busy-deny them. Verified missing/outside targets normally pass below the caps, but capacity limits may busy-deny writes before/after classification. All write pass-throughs are token-bound; guard-relevant path changes, schema incompatibility, live-Agent identity changes, or effective bypass-status changes are rejected. Differently named writers, shell, and edit are not covered. Read/write preflights are non-atomic (TOCTOU); this is a UX aid, not a hard permission boundary.'
     : 'The opt-in write-existing-file guard is disabled.'
@@ -508,6 +523,117 @@ function queueParentMessage(parent, text, source = { kind: 'user' }) {
   }))
 }
 
+const MAX_PROJECT_COMMAND_AGENT_SCOPES = 256
+const PROJECT_COMMAND_SCAN_TIMEOUT_MS = 5_000
+function createProjectCommandManager(ctx, sessionsService, agentsService, lifecycle) {
+  const adapter = createProjectCommandAdapter(ctx.fs, { sessions: sessionsService })
+  const scopes = new Map()
+  let disposed = false
+
+  const warn = error => {
+    try { ctx.logger?.warn?.(`[dsh-omo] project command discovery failed (${safeErrorName(error)})`) } catch {}
+  }
+  const live = agent => {
+    try { return agentsService.get(agent.id) === agent } catch { return false }
+  }
+  const disposeScope = async state => {
+    if (!state || state.disposed) return
+    state.disposed = true
+    if (typeof state.fiber?.dispose === 'function') {
+      try { await state.fiber.dispose() } catch (error) { warn(error) }
+    }
+  }
+  const clearAgent = payload => {
+    const agent = payload?.agent
+    const id = agent?.id
+    if (typeof id !== 'string') return
+    const state = scopes.get(id)
+    if (!state || state.agent !== agent) return
+    scopes.delete(id)
+    return disposeScope(state)
+  }
+
+  const listener = async payload => {
+    const agent = payload?.agent
+    const id = agent?.id
+    if (disposed || lifecycle.disposed || !agent || typeof agent !== 'object'
+      || typeof id !== 'string' || !id || id.length > 256 || payload?.signal?.aborted === true
+      || !live(agent) || typeof agent.ctx?.inject !== 'function') return
+    const prior = scopes.get(id)
+    if (prior?.agent === agent) return
+    if (prior) {
+      scopes.delete(id)
+      await disposeScope(prior)
+    }
+    if (disposed || lifecycle.disposed || !live(agent) || scopes.size >= MAX_PROJECT_COMMAND_AGENT_SCOPES) return
+
+    const state = { agent, fiber: undefined, disposed: false }
+    scopes.set(id, state)
+    let fiber
+    try {
+      const signals = [lifecycle.controller.signal, AbortSignal.timeout(PROJECT_COMMAND_SCAN_TIMEOUT_MS)]
+      if (payload.signal && typeof payload.signal.aborted === 'boolean'
+        && typeof payload.signal.addEventListener === 'function' && typeof payload.signal.removeEventListener === 'function') {
+        signals.push(payload.signal)
+      }
+      const signal = AbortSignal.any(signals)
+      const found = await adapter.list(agent, signal)
+      if (disposed || lifecycle.disposed || signal.aborted || scopes.get(id) !== state || !live(agent)) {
+        if (scopes.get(id) === state) scopes.delete(id)
+        state.disposed = true
+        return
+      }
+      if (found.commands.length === 0) {
+        scopes.delete(id)
+        state.disposed = true
+        return
+      }
+
+      fiber = agent.ctx.inject(['commands'], injectedCtx => {
+        const commandService = injectedCtx?.commands
+        if (!commandService || typeof commandService.find !== 'function' || typeof commandService.register !== 'function') {
+          throw new TypeError('Agent command scope does not expose the DSH Commands registry')
+        }
+        for (const projectCommand of found.commands) {
+          if (disposed || lifecycle.disposed || signal.aborted || scopes.get(id) !== state) return
+          if (commandService.find(agent, projectCommand.name)) continue
+          const definition = makeProjectCommandDefinition(projectCommand, (caller, prompt) => {
+            if (disposed || lifecycle.disposed || scopes.get(id) !== state || caller !== agent || !live(agent)) {
+              return { kind: 'error', text: 'This project command is no longer active for the current Agent.' }
+            }
+            queueParentMessage(agent, prompt)
+            return { kind: 'success', text: `Queued project command /${projectCommand.name} as untrusted prompt text; no shell snippets or file references were executed.` }
+          })
+          const unregister = commandService.register(definition)
+          if (typeof unregister !== 'function') throw new TypeError(`Project command ${projectCommand.name} did not return a disposer`)
+          injectedCtx.effect(() => unregister, `dsh-omo project command ${projectCommand.name}`)
+        }
+      })
+      if (!fiber || typeof fiber.dispose !== 'function') throw new TypeError('Agent command scope did not return a Cordis Fiber')
+      state.fiber = fiber
+      await fiber
+      if (disposed || lifecycle.disposed || signal.aborted || scopes.get(id) !== state || !live(agent)) {
+        scopes.delete(id)
+        await disposeScope(state)
+      }
+    } catch (error) {
+      scopes.delete(id)
+      if (fiber && state.fiber === undefined) state.fiber = fiber
+      await disposeScope(state)
+      if (!disposed && !lifecycle.disposed) warn(error)
+    }
+  }
+
+  const dispose = async () => {
+    if (disposed) return
+    disposed = true
+    const current = [...scopes.values()]
+    scopes.clear()
+    await Promise.all(current.map(disposeScope))
+  }
+  return { listener, clearAgent, dispose }
+}
+
 function settlementSource(childId, summary) {
   return {
     kind: 'subagent-settled',
@@ -589,13 +715,14 @@ function childOutputExcerpt(result, maxChars) {
   return { content, truncated, omittedNonText, whitespaceOnlyText }
 }
 
-async function settleBackgroundChild({ run, role, task, parent, ctx, activeChildren, activeRuns, lifecycle, maxResultChars, releaseRouteConcurrency }) {
+async function settleBackgroundChild({ run, role, task, parent, ctx, activeChildren, activeRuns, activeRunOwners, lifecycle, maxResultChars, releaseRouteConcurrency, taskResultRegistry }) {
   const taskSummary = task.trim().replace(/\s+/gu, ' ').slice(0, 240)
   try {
     let result
     try {
       result = await run.result
     } catch (error) {
+      try { taskResultRegistry?.recordFailure(parent, run.id) } catch {}
       if (!lifecycle.disposed) {
         try {
           const source = settlementSource(run.id, `dsh-omo ${role} specialist failed`)
@@ -613,6 +740,19 @@ async function settleBackgroundChild({ run, role, task, parent, ctx, activeChild
     const resultCharLimit = Math.min(maxResultChars, MAX_CHILD_OUTPUT_CHARS)
     const excerpt = childOutputExcerpt(result, resultCharLimit)
     const stopReason = String(result.stopReason).replace(/[\r\n]+/gu, ' ').slice(0, 80)
+    const cachedExcerpt = childOutputExcerpt(result, Math.min(resultCharLimit, MAX_TASK_RESULT_TOOL_CHARS))
+    const cachedOutput = cachedExcerpt.content.map(block => block.text).join('\n\n')
+    try {
+      taskResultRegistry?.recordResult(parent, run.id, {
+        status: result.stopReason === 'completed' ? 'completed' : 'incomplete',
+        output: cachedOutput.slice(0, MAX_TASK_RESULT_TOOL_CHARS),
+        truncated: cachedExcerpt.truncated || cachedOutput.length > MAX_TASK_RESULT_TOOL_CHARS,
+        omittedNonText: cachedExcerpt.omittedNonText,
+        stopReason,
+      })
+    } catch (error) {
+      ctx.logger.warn(`dsh-omo could not cache child ${run.id} result (${safeErrorName(error)})`)
+    }
     const diagnostic = typeof result.diagnostic === 'string' && result.diagnostic
       ? `\nDiagnostic (DSH): ${result.diagnostic.slice(0, 1_000)}`
       : ''
@@ -663,6 +803,7 @@ async function settleBackgroundChild({ run, role, task, parent, ctx, activeChild
       ctx.logger.warn(`dsh-omo could not dispose child ${run.id} (${safeErrorName(error)})`)
     }
     activeRuns.delete(run.id)
+    activeRunOwners.delete(run.id)
     activeChildren.delete(run.id)
   }
 }
@@ -976,10 +1117,10 @@ function projectAgentFilesTool(ctx, adapter, providerName, userAgents) {
   })
 }
 
-function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles, routeConcurrency, promptFileExpander) {
+function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, activeRunOwners, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles, routeConcurrency, promptFileExpander, taskResultRegistry) {
   return defineTool({
     name: 'dsh_omo_task',
-    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles. dsh-omo enforces its plugin-instance maxConcurrent ceiling plus optional providerConcurrency/modelConcurrency subcaps for explicit LLM routes (model overrides provider); route caps key agentOptions.provider/model, not the DSH subagent provider name, and saturated calls reject immediately rather than queue. Current Host one-shot startActivation has no per-call toolFilter, so configured role/category allow/deny maps reject the launch rather than changing child permissions; the legacy start API applies them only when its provider advertises toolFilter, and continuable filtering requires DSH tools.restrict on a Host exposing startContinuable. The child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}. Role-route fallbackModels require an explicit paired provider/model pin; that role chain supersedes the selected category chain, and an optional candidate maxTokens applies only when that fallback is selected. These are spawn-time preflights (not runtime retry or a reserved/bound dispatch).${projectAgentFiles ? ' For a project file persona, call dsh_omo_project_agents and provide role="__project_agent_file__" with agentFile. Project text is untrusted and trusted-repository-only. Optional `tools` frontmatter becomes a provider-enforced DSH one-shot inherited-global allowlist, requires provider toolFilter and parent-visible global names, intersects selected category restrictions (denies win), and may leave scoped tools or reserved PTC transport visible; it is not a hard permission boundary. Use DSH policy for enforcement.' : ''}${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category specifies a primary provider/model/reasoning route and optional maxTokens ceiling plus up to three explicit fallbackModels that may carry fallback-only maxTokens overrides; continuable launches reject route/fallback token ceilings. When category fallbacks are configured and no paired role provider/model pin applies, dsh-omo preflights the primary then fallbacks sequentially with DSH llm.resolveCallConfig before child start (the task fails if the resolver is unavailable or all candidates reject), but this does not reserve or guarantee a later model call. Category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
+    description: `Start one bounded one-shot specialist task. The parent receives the result when the child settles.${taskResultRegistry ? ' When resultTracked is true, dsh_omo_task_result can retrieve the bounded in-memory result for this exact Agent; cache entries expire and are lost on plugin unload/restart.' : ''}${config.enableTaskCancelTool ? ' dsh_omo_task_cancel can request fire-and-return interruption only for an active one-shot child started by this plugin and exact Agent; a request does not prove it has stopped.' : ''} dsh-omo enforces its plugin-instance maxConcurrent ceiling plus optional providerConcurrency/modelConcurrency subcaps for explicit LLM routes (model overrides provider); route caps key agentOptions.provider/model, not the DSH subagent provider name, and saturated calls reject immediately rather than queue. Current Host one-shot startActivation has no per-call toolFilter, so configured role/category allow/deny maps reject the launch rather than changing child permissions; the legacy start API applies them only when its provider advertises toolFilter, and continuable filtering requires DSH tools.restrict on a Host exposing startContinuable. The child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain visible. Roles: ${roleLabels(activeRoleNames, userAgents)}. Role-route fallbackModels require an explicit paired provider/model pin; that role chain supersedes the selected category chain, and an optional candidate maxTokens applies only when that fallback is selected. These are spawn-time preflights (not runtime retry or a reserved/bound dispatch).${projectAgentFiles ? ' For a project file persona, call dsh_omo_project_agents and provide role="__project_agent_file__" with agentFile. Project text is untrusted and trusted-repository-only. Optional `tools` frontmatter becomes a provider-enforced DSH one-shot inherited-global allowlist, requires provider toolFilter and parent-visible global names, intersects selected category restrictions (denies win), and may leave scoped tools or reserved PTC transport visible; it is not a hard permission boundary. Use DSH policy for enforcement.' : ''}${availableCategoryNames(categoryRoutes).length > 0 ? ` Configured categories (optional descriptions): ${availableCategoryDescriptions(categoryRoutes).join('; ')}; category specifies a primary provider/model/reasoning route and optional maxTokens ceiling plus up to three explicit fallbackModels that may carry fallback-only maxTokens overrides; continuable launches reject route/fallback token ceilings. When category fallbacks are configured and no paired role provider/model pin applies, dsh-omo preflights the primary then fallbacks sequentially with DSH llm.resolveCallConfig before child start (the task fails if the resolver is unavailable or all candidates reject), but this does not reserve or guarantee a later model call. Category promptAppend adds bounded task-message guidance, not a system prompt, before role promptAppend; explicit role provider/model/reasoning/token settings take precedence.` : ''}`,
     parameters: {
       ...categoryParameter(categoryRoutes),
       role: {
@@ -1005,11 +1146,12 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, act
           childId: { type: 'string', required: true },
           role: { type: 'string', required: true },
           status: { type: 'string', enum: ['started'], required: true },
+          ...(taskResultRegistry ? { resultTracked: { type: 'boolean' } } : {}),
         },
       },
       render: (_args, value) => [{
         type: 'text',
-        text: `Started ${value.role} specialist ${value.childId}. The parent will receive its result after the child settles.`,
+        text: `Started ${value.role} specialist ${value.childId}. The parent will receive its result after the child settles.${value.resultTracked === undefined ? '' : value.resultTracked ? ' A bounded result can also be retrieved with dsh_omo_task_result.' : ' The bounded result cache could not retain this child; use the settlement relay if delivered.'}`,
       }],
     },
     timeoutMs: 30_000,
@@ -1176,11 +1318,18 @@ function specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, act
       activeChildren.delete(reservation)
       activeChildren.add(run.id)
       activeRuns.set(run.id, run)
+      if (config.enableTaskCancelTool) activeRunOwners.set(run.id, exec.agent)
+      const resultTracked = taskResultRegistry?.recordStart(exec.agent, run.id) === true
       void settleBackgroundChild({
-        run, role: roleName, task: args.task, parent: exec.agent, ctx, activeChildren, activeRuns, lifecycle,
-        maxResultChars: config.maxResultChars, releaseRouteConcurrency,
+        run, role: roleName, task: args.task, parent: exec.agent, ctx, activeChildren, activeRuns, activeRunOwners, lifecycle,
+        maxResultChars: config.maxResultChars, releaseRouteConcurrency, taskResultRegistry,
       })
-      return { childId: run.id, role: roleName, status: 'started' }
+      return {
+        childId: run.id,
+        role: roleName,
+        status: 'started',
+        ...(taskResultRegistry ? { resultTracked } : {}),
+      }
     },
   })
 }
@@ -1463,7 +1612,7 @@ function renderCapabilityStatus(ctx, providerName) {
   }
 }
 
-function registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName, webService, lifecycleSignal) {
+function registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName, webService, worktreeService, manualContextPruningHandler, lifecycleSignal) {
   let availableCommandNames = ''
   let taskCommandHelp = ''
   let skillRefreshHelp = ''
@@ -1517,15 +1666,37 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
     },
     {
       name: 'ulw-execute',
-      description: 'Prompt-only request to execute an existing approved plan with ordinary DSH tools; no OMO state, worktree, PR, or shipping lifecycle is provided.',
+      description: 'Prompt-only request to execute an existing approved plan; optional --worktree creates a DSH-managed Git worktree first. No OMO state, PR, or shipping lifecycle is provided.',
       input: { hint: ULW_EXECUTE_COMMAND_HINT },
-      handler: ({ agent, rawInput }) => {
+      handler: async ({ agent, rawInput, signal }) => {
         const parsed = parseUlwExecuteInput(rawInput, config.maxTaskChars)
         if (!parsed.ok) return { kind: 'error', text: parsed.error }
-        return queueTask(agent, parsed.planName, {
+        let createdWorktree
+        if (parsed.worktree) {
+          if (typeof worktreeService?.create !== 'function') {
+            return { kind: 'error', text: 'Cannot create a DSH worktree: the Host worktrees.create service is unavailable. No plan task was queued.' }
+          }
+          try {
+            createdWorktree = await worktreeService.create(agent, {}, signal)
+          } catch {
+            return { kind: 'error', text: 'The Host could not confirm DSH worktree creation. No plan task was queued; inspect the workspace because Host failures may retain partial Git/filesystem artifacts.' }
+          }
+          if (!createdWorktree || typeof createdWorktree.path !== 'string' || !createdWorktree.path
+            || typeof createdWorktree.branch !== 'string' || !createdWorktree.branch
+            || typeof createdWorktree.baseCommit !== 'string' || !createdWorktree.baseCommit) {
+            return { kind: 'error', text: 'The Host returned incomplete DSH worktree metadata. Worktree creation may have completed, but no plan task was queued.' }
+          }
+        }
+        const queued = queueTask(agent, parsed.planName, {
           command: 'ulw-execute', hint: ULW_EXECUTE_COMMAND_HINT,
-          label: 'prompt-only plan execution', directive: buildUlwExecuteDirective(),
+          label: parsed.worktree ? 'plan execution in DSH worktree' : 'prompt-only plan execution',
+          directive: buildUlwExecuteDirective({ worktree: parsed.worktree === true }),
         })
+        if (queued.kind !== 'success' || !createdWorktree) return queued
+        return {
+          ...queued,
+          text: `${queued.text} Created DSH worktree branch ${createdWorktree.branch} at ${createdWorktree.path} from ${createdWorktree.baseCommit}.`,
+        }
       },
     },
     {
@@ -1644,12 +1815,16 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
     },
     {
       name: 'omo',
-      description: config.enableWebSearchCommand
-        ? 'Show installed DSH OMO-inspired specialist roles and commands; /omo status is passive, while /omo status capabilities explicitly queries read-only provider registries. Optional /omo web-search performs one human-invoked DSH web.search and never fetches result URLs.'
-        : 'Show installed DSH OMO-inspired specialist roles and commands; /omo status is passive, while /omo status capabilities explicitly queries read-only provider registries.',
-      input: { hint: config.enableWebSearchCommand ? '[status|status capabilities|web-search <query>]' : '[status|status capabilities]' },
+      description: `Show installed DSH OMO-inspired specialist roles and commands; /omo status is passive, while /omo status capabilities explicitly queries read-only provider registries.${config.enableManualContextPruning ? ' Optional /omo prune-context manually prunes over-budget tool outputs in only the current live Session; it does not automate overflow recovery.' : ''}${config.enableWebSearchCommand ? ' Optional /omo web-search performs one human-invoked DSH web.search and never fetches result URLs.' : ''}`,
+      input: { hint: `[status|status capabilities${config.enableManualContextPruning ? '|prune-context' : ''}${config.enableWebSearchCommand ? '|web-search <query>' : ''}]` },
       handler: invocation => {
         const rawInput = typeof invocation?.rawInput === 'string' ? invocation.rawInput.trim() : ''
+        if (rawInput === 'prune-context') {
+          if (!manualContextPruningHandler) {
+            return { kind: 'error', text: 'Manual context pruning is disabled; set enableManualContextPruning: true to enable it.' }
+          }
+          return manualContextPruningHandler({ ...invocation, rawInput: '' })
+        }
         const webSearchPrefix = /^web-search(?:\s+|$)/u.exec(rawInput)
         if (webSearchPrefix) {
           if (!webSearchHandler) return { kind: 'error', text: 'DSH web search is disabled by configuration; set enableWebSearchCommand: true to enable /omo web-search.' }
@@ -1663,21 +1838,19 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; continuableTaskFollowups=${enabled(statusSnapshot.flags.continuableTaskFollowups)}; goalTools=${enabled(statusSnapshot.flags.goalTools)}; goalUseReminder=${enabled(statusSnapshot.flags.goalUseReminder)}; agentUsageReminder=${enabled(statusSnapshot.flags.agentUsageReminder)}; compactionResumeAdvisory=${enabled(statusSnapshot.flags.compactionResumeAdvisory)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; teamModeContext=${enabled(statusSnapshot.flags.teamModeContext)}; teamStatusContext=${enabled(statusSnapshot.flags.teamStatusContext)}; teamTaskUseReminder=${enabled(statusSnapshot.flags.teamTaskUseReminder)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; imageQueryTool=${enabled(statusSnapshot.flags.imageQueryTool)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; searchToolResultPruning=${enabled(statusSnapshot.flags.searchToolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; planFormatAdvisory=${enabled(statusSnapshot.flags.planFormatAdvisory)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; webSearchCommand=${enabled(statusSnapshot.flags.webSearchCommand)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; promptFileExpansion=${enabled(statusSnapshot.flags.promptFileExpansion)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; notepadWriteGuard=${enabled(statusSnapshot.flags.notepadWriteGuard)}; editErrorRecovery=${enabled(statusSnapshot.flags.editErrorRecovery)}; jsonErrorRecovery=${enabled(statusSnapshot.flags.jsonErrorRecovery)}; delegateTaskErrorGuidance=${enabled(statusSnapshot.flags.delegateTaskErrorGuidance)}; bashFileReadGuidance=${enabled(statusSnapshot.flags.bashFileReadGuidance)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionEventSearch=${enabled(statusSnapshot.flags.sessionEventSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
-              `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; web=${presence('web')}; agentTeams=${presence('agentTeams')}; agents=${presence('agents')}; jobController=${presence('jobController')}; toolResultPruner=${presence('toolResultPruner')}; terminals=${presence('terminals')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; mcpResources=${presence('mcpResources')}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; continuableTaskFollowups=${enabled(statusSnapshot.flags.continuableTaskFollowups)}; taskResultTool=${enabled(statusSnapshot.flags.taskResultTool)}; taskCancelTool=${enabled(statusSnapshot.flags.taskCancelTool)}; persistentMemoryTools=${enabled(statusSnapshot.flags.persistentMemoryTools)}; goalTools=${enabled(statusSnapshot.flags.goalTools)}; goalUseReminder=${enabled(statusSnapshot.flags.goalUseReminder)}; agentUsageReminder=${enabled(statusSnapshot.flags.agentUsageReminder)}; compactionResumeAdvisory=${enabled(statusSnapshot.flags.compactionResumeAdvisory)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; teamModeContext=${enabled(statusSnapshot.flags.teamModeContext)}; teamStatusContext=${enabled(statusSnapshot.flags.teamStatusContext)}; teamTaskUseReminder=${enabled(statusSnapshot.flags.teamTaskUseReminder)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; imageQueryTool=${enabled(statusSnapshot.flags.imageQueryTool)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; manualContextPruning=${enabled(statusSnapshot.flags.manualContextPruning)}; searchToolResultPruning=${enabled(statusSnapshot.flags.searchToolResultPruning)}; generalToolResultPruning=${enabled(statusSnapshot.flags.generalToolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; planFormatAdvisory=${enabled(statusSnapshot.flags.planFormatAdvisory)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; webSearchCommand=${enabled(statusSnapshot.flags.webSearchCommand)}; webSearchTool=${enabled(statusSnapshot.flags.webSearchTool)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; projectCommands=${enabled(statusSnapshot.flags.projectCommands)}; promptFileExpansion=${enabled(statusSnapshot.flags.promptFileExpansion)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; notepadWriteGuard=${enabled(statusSnapshot.flags.notepadWriteGuard)}; editErrorRecovery=${enabled(statusSnapshot.flags.editErrorRecovery)}; jsonErrorRecovery=${enabled(statusSnapshot.flags.jsonErrorRecovery)}; delegateTaskErrorGuidance=${enabled(statusSnapshot.flags.delegateTaskErrorGuidance)}; bashFileReadGuidance=${enabled(statusSnapshot.flags.bashFileReadGuidance)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionEventSearch=${enabled(statusSnapshot.flags.sessionEventSearch)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Optional DSH service presence: goals=${presence('goals')}; llm=${presence('llm')}; web=${presence('web')}; agentTeams=${presence('agentTeams')}; agents=${presence('agents')}; jobController=${presence('jobController')}; toolResultPruner=${presence('toolResultPruner')}; terminals=${presence('terminals')}; lsp=${presence('lsp')}; sessionQuery=${presence('sessionQuery')}; sessions=${presence('sessions')}; storageDomain=${presence('storageDomain')}; mcpResources=${presence('mcpResources')}.`,
               'Presence does not prove readiness or health. This status path does not call service methods, query models, read session content, or mutate feature state.',
             ].join('\n'),
           }
         }
         if (rawInput) return {
           kind: 'error',
-          text: config.enableWebSearchCommand
-            ? 'Usage: /omo [status|status capabilities|web-search <query>].'
-            : 'Usage: /omo [status|status capabilities].',
+          text: `Usage: /omo [status|status capabilities${config.enableManualContextPruning ? '|prune-context' : ''}${config.enableWebSearchCommand ? '|web-search <query>' : ''}].`,
         }
         return {
           kind: 'success',
-          text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Team task-use reminder: ${config.enableTeamTaskUseReminder ? 'enabled' : 'disabled'} (Team Agents only; 10 accepted non-task Tool calls; fixed advisory). Model-facing DSH Goal tools: ${config.enableGoalTools ? 'enabled' : 'disabled'} (exact calling Agent only). Goal-use reminder: ${config.enableGoalUseReminder ? 'enabled' : 'disabled'} (non-Team; every 10 accepted non-Goal outcomes; maximum 3 per Agent). Agent-usage reminder: ${config.enableAgentUsageReminder ? 'enabled' : 'disabled'} (root Agents with a visible DSH delegation Tool; maximum 3 per Agent). Compaction-resume advisory: ${config.enableCompactionResumeAdvisory ? 'enabled' : 'disabled'} (fixed per-step context after compact; no summary rewrite). Human-only DSH web search: ${config.enableWebSearchCommand ? 'enabled via /omo web-search <query>; no URLs are auto-fetched' : 'disabled' }. Search Tool result pruning: ${config.enableSearchToolResultPruning ? 'enabled for direct grep/glob calls only when downstream accepts successful content-only results and the visible Tool has no content projection/finalizer; name-routed, Host character budget' : 'disabled'}. Edit error recovery: ${config.enableEditErrorRecovery ? 'enabled' : 'disabled'} (post-failure read-before-retry context only). JSON error recovery: ${config.enableJsonErrorRecovery ? 'enabled' : 'disabled'} (matched Tool failures only; no argument rewrite). Task input/selection guidance: ${config.enableDelegateTaskErrorGuidance ? 'enabled' : 'disabled'} (blank/oversized task text plus exact unavailable-role and explicit unknown/disabled-category errors; fixed context only, no retries). Bash file-read guidance: ${config.enableBashFileReadGuidance ? 'enabled' : 'disabled'} (simple cat/head/tail commands only; advisory after successful execution). Notepad write guard: ${config.enableNotepadWriteGuard ? 'enabled' : 'disabled'} (global lexical ToolGuard only; not filesystem authorization). Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Continuable task follow-ups: ${config.enableContinuableTaskFollowups ? 'enabled' : 'disabled'} (tracked direct children only; acceptance is not completion). Project agent files: ${config.enableProjectAgentFiles ? 'enabled' : 'disabled'} (current-session cwd only; prompt persona with optional DSH toolFilter allowlist). Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session event search: ${config.enableSessionEventSearch ? 'enabled' : 'disabled'} (current Agent session only; Host indexing may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). LSP navigation: ${config.enableLspTools ? 'enabled' : 'disabled'} (two read-only queries; provider-dependent and not a path authorization boundary). Root AGENTS context: ${config.enableRootAgentsContext ? 'enabled' : 'disabled'} (bounded cwd/AGENTS.md snapshot for new Agent scopes before their first step; root-only, no watcher, repository text is untrusted). AGENTS-on-read: ${config.enableAgentsOnRead ? 'enabled' : 'disabled'} (post-read injection; root AGENTS skipped only after a successful per-Agent snapshot; repository text is untrusted). Root README context: ${config.enableRootReadmeContext ? 'enabled' : 'disabled'} (opt-in root README.md snapshot for Agent prompt context). README-on-read: ${config.enableReadmeOnRead ? 'enabled' : 'disabled'} (post-read injection; root README skipped only after a successful per-Agent snapshot). Claude rules after read/write/edit: ${config.enableClaudeRulesOnRead ? 'enabled' : 'disabled'} (legacy opt-in flag; no verified multiedit schema). Write-existing-file guard: ${config.enableWriteExistingFileGuard ? 'enabled' : 'disabled'} (final isError:false result for case-insensitive read of preflighted in-cwd regular file required before one same-Agent case-insensitive write; same-named custom Tools count; case-sensitive .omo segment on the POSIX-normalized path; canceled .. aliases do not bypass and symlink targets are not resolved; overwrite boolean true/exact case-insensitive "true" without trimming bypass; args unchanged; verified missing/outside normally pass below caps, but caps may busy-deny writes; UX only, read/write TOCTOU remains). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
+          text: `dsh-omo is active. Roles: ${activeRoleNames.join(', ')}. Commands: ${availableCommandNames || '(none)'}. Native Agent Teams tools: ${config.enableTeamTools ? 'enabled' : 'disabled'}. Team task-use reminder: ${config.enableTeamTaskUseReminder ? 'enabled' : 'disabled'} (Team Agents only; 10 accepted non-task Tool calls; fixed advisory). Model-facing DSH Goal tools: ${config.enableGoalTools ? 'enabled' : 'disabled'} (exact calling Agent only). Goal-use reminder: ${config.enableGoalUseReminder ? 'enabled' : 'disabled'} (non-Team; every 10 accepted non-Goal outcomes; maximum 3 per Agent). Agent-usage reminder: ${config.enableAgentUsageReminder ? 'enabled' : 'disabled'} (root Agents with a visible DSH delegation Tool; maximum 3 per Agent). Compaction-resume advisory: ${config.enableCompactionResumeAdvisory ? 'enabled' : 'disabled'} (fixed per-step context after compact; no summary rewrite). Human-only DSH web search: ${config.enableWebSearchCommand ? 'enabled via /omo web-search <query>; no URLs are auto-fetched' : 'disabled' }. Model-facing DSH web-search Tool: ${config.enableWebSearchTool ? 'enabled as dsh_omo_web_search; bounded, untrusted results; no URLs are auto-fetched' : 'disabled'}. Search Tool result pruning: ${config.enableSearchToolResultPruning ? 'enabled for default grep/glob/web_fetch plus configured exact Tool names; only successful content-only downstream decisions with a visible Tool that has no content projection/finalizer are pruned; name-routed, Host character budget' : 'disabled'}. General Tool result pruning: ${config.enableGeneralToolResultPruning ? 'enabled for eligible top-level successful content-only Tool results without Tool-owned content projection/finalization; may hide useful output; Host character budget, not OMO token/context heuristic' : 'disabled'}. Manual DSH context pruning: ${config.enableManualContextPruning ? 'enabled via /omo prune-context; explicit current-session action only, not automatic overflow recovery' : 'disabled'}. Edit error recovery: ${config.enableEditErrorRecovery ? 'enabled' : 'disabled'} (post-failure read-before-retry context only). JSON error recovery: ${config.enableJsonErrorRecovery ? 'enabled' : 'disabled'} (matched Tool failures only; no argument rewrite). Task input/selection guidance: ${config.enableDelegateTaskErrorGuidance ? 'enabled' : 'disabled'} (blank/oversized task text plus exact unavailable-role and explicit unknown/disabled-category errors; fixed context only, no retries). Bash file-read guidance: ${config.enableBashFileReadGuidance ? 'enabled' : 'disabled'} (simple cat/head/tail commands only; advisory after successful execution). Notepad write guard: ${config.enableNotepadWriteGuard ? 'enabled' : 'disabled'} (global lexical ToolGuard only; not filesystem authorization). Continuable tasks: ${config.enableContinuableTasks ? 'enabled' : 'disabled'}. Continuable task follow-ups: ${config.enableContinuableTaskFollowups ? 'enabled' : 'disabled'} (tracked direct children only; acceptance is not completion). Project agent files: ${config.enableProjectAgentFiles ? 'enabled' : 'disabled'} (current-session cwd only; prompt persona with optional DSH toolFilter allowlist). Session search: ${config.enableSessionSearch ? 'enabled' : 'disabled'} (bounded results; Host indexing/cold scope may do full-session work). Session event search: ${config.enableSessionEventSearch ? 'enabled' : 'disabled'} (current Agent session only; Host indexing may do full-session work). Session read: ${config.enableSessionRead ? 'enabled' : 'disabled'} (bounded output; Host loads the full target log before slicing). Session list: ${config.enableSessionList ? 'enabled' : 'disabled'} (metadata output, full corpus filter; cold scope may load Agent log). Session info: ${config.enableSessionInfo ? 'enabled' : 'disabled'} (header/title output; full target-log I/O). LSP navigation: ${config.enableLspTools ? 'enabled' : 'disabled'} (two read-only queries; provider-dependent and not a path authorization boundary). Root AGENTS context: ${config.enableRootAgentsContext ? 'enabled' : 'disabled'} (bounded cwd/AGENTS.md snapshot for new Agent scopes before their first step; root-only, no watcher, repository text is untrusted). AGENTS-on-read: ${config.enableAgentsOnRead ? 'enabled' : 'disabled'} (post-read injection; root AGENTS skipped only after a successful per-Agent snapshot; repository text is untrusted). Root README context: ${config.enableRootReadmeContext ? 'enabled' : 'disabled'} (opt-in root README.md snapshot for Agent prompt context). README-on-read: ${config.enableReadmeOnRead ? 'enabled' : 'disabled'} (post-read injection; root README skipped only after a successful per-Agent snapshot). Claude rules after read/write/edit: ${config.enableClaudeRulesOnRead ? 'enabled' : 'disabled'} (legacy opt-in flag; no verified multiedit schema). Write-existing-file guard: ${config.enableWriteExistingFileGuard ? 'enabled' : 'disabled'} (final isError:false result for case-insensitive read of preflighted in-cwd regular file required before one same-Agent case-insensitive write; same-named custom Tools count; case-sensitive .omo segment on the POSIX-normalized path; canceled .. aliases do not bypass and symlink targets are not resolved; overwrite boolean true/exact case-insensitive "true" without trimming bypass; args unchanged; verified missing/outside normally pass below caps, but caps may busy-deny writes; UX only, read/write TOCTOU remains). DSH job tools: ${jobToolHelp} (Host DSH jobs only, not OMO background-agent results).${taskCommandHelp} Bundled skills: ${activeBundledSkills.map(skill => skill.name).join(', ') || '(none)'}. Project skill roots: ${(config.projectSkillDirs ?? DEFAULT_PROJECT_SKILL_DIRS).join(', ')}${skillRefreshHelp}. Use /omo status for configuration and optional-service presence only, not service health. allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain. Enforce hard boundaries with DSH policy/guards.`,
         }
       },
     },
@@ -1725,6 +1898,10 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
 
 export function apply(ctx, rawConfig) {
   const config = rawConfig
+  const additionalSearchToolResultPruningTools = normalizeAdditionalToolResultPruningNames(config.additionalSearchToolResultPruningTools)
+  if (additionalSearchToolResultPruningTools.length > 0 && !config.enableSearchToolResultPruning) {
+    throw new Error('dsh-omo: additionalSearchToolResultPruningTools requires enableSearchToolResultPruning')
+  }
   const userAgents = normalizeUserAgents(config.userAgents ?? [])
   const usesStartActivation = typeof ctx.subagents?.startActivation === 'function'
   if (!usesStartActivation && typeof ctx.subagents?.start !== 'function') {
@@ -1744,6 +1921,7 @@ export function apply(ctx, rawConfig) {
   }
   const runtimeFallbackPolicy = normalizeRuntimeFallback(config.runtimeFallback)
   const goalService = optionalService(ctx, 'goals')
+  const worktreeService = optionalService(ctx, 'worktrees')
   if (config.enableGoalTools && (!goalService
     || ['get', 'create', 'edit', 'pause', 'resume', 'complete'].some(method => typeof goalService[method] !== 'function'))) {
     throw new Error('dsh-omo: enableGoalTools requires DSH goals.get/create/edit/pause/resume/complete')
@@ -1764,6 +1942,12 @@ export function apply(ctx, rawConfig) {
   if (config.enableWebSearchCommand && (!webService || typeof webService.search !== 'function')) {
     throw new Error('dsh-omo: enableWebSearchCommand requires the optional DSH web.search service')
   }
+  if (config.enableWebSearchTool && (!webService || typeof webService.search !== 'function')) {
+    throw new Error('dsh-omo: enableWebSearchTool requires the optional DSH web.search service')
+  }
+  if (config.enableWebSearchTool && (typeof ctx.tools?.register !== 'function' || typeof ctx.effect !== 'function')) {
+    throw new Error('dsh-omo: enableWebSearchTool requires DSH tools.register and Cordis ctx.effect')
+  }
   if (config.enableContinuableTaskFollowups && !config.enableContinuableTasks) {
     throw new Error('dsh-omo: enableContinuableTaskFollowups requires enableContinuableTasks')
   }
@@ -1779,8 +1963,17 @@ export function apply(ctx, rawConfig) {
   const continuableTaskRegistry = config.enableContinuableTaskFollowups
     ? createContinuableTaskRegistry()
     : undefined
+  if (config.enableTaskResultTool && (typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
+    throw new Error('dsh-omo: enableTaskResultTool requires Cordis ctx.on and ctx.effect')
+  }
+  if (config.enableTaskCancelTool && (typeof ctx.subagents?.interrupt !== 'function'
+    || typeof ctx.tools?.register !== 'function' || typeof ctx.effect !== 'function')) {
+    throw new Error('dsh-omo: enableTaskCancelTool requires DSH subagents.interrupt, tools.register, and Cordis ctx.effect')
+  }
+  const taskResultRegistry = config.enableTaskResultTool ? createTaskResultRegistry() : undefined
   const teamService = optionalService(ctx, 'agentTeams')
   const agentsService = optionalService(ctx, 'agents')
+  const storageDomainService = optionalService(ctx, 'storageDomain')
   const systemPromptService = optionalService(ctx, 'systemPrompt')
   if (config.enableAgentUsageReminder && (config.enableGoalUseReminder || config.enableTeamTaskUseReminder)) {
     throw new Error('dsh-omo: enableAgentUsageReminder cannot be combined with enableGoalUseReminder or enableTeamTaskUseReminder')
@@ -1866,6 +2059,9 @@ export function apply(ctx, rawConfig) {
     throw new Error('dsh-omo: enableToolResultPruning requires enableJobTools or enableAgentTerminalTools')
   }
   const toolResultPruner = optionalService(ctx, 'toolResultPruner')
+  if (config.enableManualContextPruning && typeof toolResultPruner?.pruneSession !== 'function') {
+    throw new Error('dsh-omo: enableManualContextPruning requires DSH toolResultPruner.pruneSession')
+  }
   const activeToolResultPruner = config.enableToolResultPruning
     && toolResultPruner && typeof toolResultPruner.pruneContent === 'function'
     ? toolResultPruner
@@ -1879,7 +2075,17 @@ export function apply(ctx, rawConfig) {
   if (config.enableSearchToolResultPruning && (typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
     throw new Error('dsh-omo: enableSearchToolResultPruning requires Cordis ctx.on and ctx.effect')
   }
+  if (config.enableGeneralToolResultPruning && typeof toolResultPruner?.pruneContent !== 'function') {
+    throw new Error('dsh-omo: enableGeneralToolResultPruning requires DSH toolResultPruner.pruneContent')
+  }
+  if (config.enableGeneralToolResultPruning && typeof ctx.tools?.get !== 'function') {
+    throw new Error('dsh-omo: enableGeneralToolResultPruning requires DSH tools.get')
+  }
+  if (config.enableGeneralToolResultPruning && (typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
+    throw new Error('dsh-omo: enableGeneralToolResultPruning requires Cordis ctx.on and ctx.effect')
+  }
   const activeSearchToolResultPruner = config.enableSearchToolResultPruning ? toolResultPruner : undefined
+  const activeGeneralToolResultPruner = config.enableGeneralToolResultPruning ? toolResultPruner : undefined
   const terminalsService = optionalService(ctx, 'terminals')
   let terminalBackendTypes
   if (config.enableAgentTerminalTools) {
@@ -1892,6 +2098,17 @@ export function apply(ctx, rawConfig) {
   const sessionQueryService = optionalService(ctx, 'sessionQuery')
   const lspService = optionalService(ctx, 'lsp')
   const sessionsService = optionalService(ctx, 'sessions')
+  if (config.enablePersistentMemoryTools && (typeof storageDomainService?.open !== 'function'
+    || typeof agentsService?.get !== 'function' || typeof sessionsService?.get !== 'function'
+    || typeof ctx.tools?.register !== 'function' || typeof ctx.effect !== 'function')) {
+    throw new Error('dsh-omo: enablePersistentMemoryTools requires DSH storageDomain.open, agents.get, sessions.get, tools.register, and Cordis ctx.effect')
+  }
+  if (config.enableManualContextPruning && (typeof agentsService?.get !== 'function' || typeof sessionsService?.get !== 'function')) {
+    throw new Error('dsh-omo: enableManualContextPruning requires DSH agents.get and sessions.get')
+  }
+  const manualContextPruningHandler = config.enableManualContextPruning
+    ? createManualContextPruningHandler({ agents: agentsService, sessions: sessionsService, pruner: toolResultPruner })
+    : undefined
   const mcpResourcesService = optionalService(ctx, 'mcpResources')
   if (config.enablePlanChecklist && (!sessionQueryService || typeof sessionQueryService.observeSession !== 'function'
     || !ctx.fs || ['resolve', 'contains', 'lstat', 'stat', 'readBytes'].some(method => typeof ctx.fs[method] !== 'function'))) {
@@ -1972,6 +2189,13 @@ export function apply(ctx, rawConfig) {
     || !ctx.tools || typeof ctx.tools.register !== 'function' || typeof ctx.effect !== 'function')) {
     throw new Error('dsh-omo: enableProjectAgentFiles requires DSH agents.get, sessions.get, fs.resolve/contains/lstat/stat/listDir/readBytes, subagents.getProvider, tools.register, and ctx.effect')
   }
+  if (config.enableProjectCommands && (!sessionsService || typeof sessionsService.get !== 'function'
+    || !agentsService || typeof agentsService.get !== 'function'
+    || !ctx.fs || ['resolve', 'contains', 'lstat', 'stat', 'listDir', 'readBytes'].some(method => typeof ctx.fs[method] !== 'function')
+    || !ctx.commands || typeof ctx.commands.find !== 'function' || typeof ctx.commands.register !== 'function'
+    || typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
+    throw new Error('dsh-omo: enableProjectCommands requires DSH agents.get, sessions.get, commands.find/register, fs.resolve/contains/lstat/stat/listDir/readBytes, and Cordis ctx.on/effect')
+  }
   if (config.enablePromptFileExpansion && (!agentsService || typeof agentsService.get !== 'function'
     || !sessionsService || typeof sessionsService.get !== 'function'
     || !ctx.fs || ['resolve', 'contains', 'lstat', 'stat', 'readBytes'].some(method => typeof ctx.fs[method] !== 'function'))) {
@@ -2012,6 +2236,9 @@ export function apply(ctx, rawConfig) {
     flags: Object.freeze({
       continuableTasks: config.enableContinuableTasks === true,
       continuableTaskFollowups: config.enableContinuableTaskFollowups === true,
+      taskResultTool: config.enableTaskResultTool === true,
+      taskCancelTool: config.enableTaskCancelTool === true,
+      persistentMemoryTools: config.enablePersistentMemoryTools === true,
       goalTools: config.enableGoalTools === true,
       goalUseReminder: config.enableGoalUseReminder === true,
       agentUsageReminder: config.enableAgentUsageReminder === true,
@@ -2024,12 +2251,15 @@ export function apply(ctx, rawConfig) {
       jobTools: config.enableJobTools === true,
       imageQueryTool: config.enableImageQueryTool === true,
       toolResultPruning: activeToolResultPruner !== undefined,
+      manualContextPruning: config.enableManualContextPruning === true,
       searchToolResultPruning: activeSearchToolResultPruner !== undefined,
+      generalToolResultPruning: activeGeneralToolResultPruner !== undefined,
       agentTerminalTools: config.enableAgentTerminalTools === true && Array.isArray(terminalBackendTypes) && terminalBackendTypes.length > 0,
       planChecklist: config.enablePlanChecklist === true,
       planFormatAdvisory: config.enablePlanFormatAdvisory === true,
       modelCapabilitiesRefresh: config.enableModelCapabilitiesRefresh === true,
       webSearchCommand: config.enableWebSearchCommand === true,
+      webSearchTool: config.enableWebSearchTool === true,
       sessionSearch: config.enableSessionSearch === true,
       sessionEventSearch: config.enableSessionEventSearch === true,
       sessionRead: config.enableSessionRead === true,
@@ -2039,6 +2269,7 @@ export function apply(ctx, rawConfig) {
       rootAgentsContext: config.enableRootAgentsContext === true,
       agentsOnRead: config.enableAgentsOnRead === true,
       projectAgentFiles: config.enableProjectAgentFiles === true,
+      projectCommands: config.enableProjectCommands === true,
       promptFileExpansion: config.enablePromptFileExpansion === true,
       rootReadmeContext: config.enableRootReadmeContext === true,
       readmeOnRead: config.enableReadmeOnRead === true,
@@ -2062,6 +2293,7 @@ export function apply(ctx, rawConfig) {
       lsp: lspService !== undefined && lspService !== null,
       sessionQuery: sessionQueryService !== undefined && sessionQueryService !== null,
       sessions: sessionsService !== undefined && sessionsService !== null,
+      storageDomain: storageDomainService !== undefined && storageDomainService !== null,
       mcpResources: mcpResourcesService !== undefined && mcpResourcesService !== null,
     }),
   })
@@ -2089,6 +2321,7 @@ export function apply(ctx, rawConfig) {
   const disabledSkillSet = new Set(disabledSkills)
   const activeChildren = new Set()
   const activeRuns = new Map()
+  const activeRunOwners = new Map()
   const routeConcurrency = createRouteConcurrencyAdmission(providerConcurrency, modelConcurrency)
   const lifecycle = { disposed: false, controller: new AbortController() }
   const promptFileExpander = config.enablePromptFileExpansion
@@ -2113,10 +2346,95 @@ export function apply(ctx, rawConfig) {
     const disposeNotepadWriteGuard = registerNotepadWriteGuard(ctx)
     ctx.effect(() => disposeNotepadWriteGuard, 'dsh-omo notepad write guard')
   }
-  ctx.tools.register(specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles, routeConcurrency, promptFileExpander))
+  ctx.tools.register(specialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, activeRunOwners, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles, routeConcurrency, promptFileExpander, taskResultRegistry))
+  if (config.enableTaskCancelTool) {
+    const disposeTaskCancelTool = ctx.tools.register(createTaskCancelTool({
+      subagents: ctx.subagents,
+      activeRuns,
+      activeRunOwners,
+    }))
+    ctx.effect(() => () => {
+      activeRunOwners.clear()
+      disposeTaskCancelTool()
+    }, 'dsh-omo exact-Agent active task cancellation Tool')
+  }
+  if (taskResultRegistry) {
+    const disposeTaskResultTool = ctx.tools.register(createTaskResultTool(taskResultRegistry))
+    ctx.effect(() => disposeTaskResultTool, 'dsh-omo exact-Agent task result Tool')
+    ctx.on('agent/disposed', payload => taskResultRegistry.clearAgent(payload?.agent))
+    ctx.effect(() => taskResultRegistry.dispose, 'dsh-omo task result cache')
+  }
+  if (config.enablePersistentMemoryTools) {
+    const memoryDomainState = { status: 'pending', domain: undefined, disposed: false, closePromise: undefined }
+    function closePersistentMemoryDomain(domain) {
+      if (!domain) return Promise.resolve()
+      if (!memoryDomainState.closePromise) {
+        memoryDomainState.closePromise = Promise.resolve().then(() => domain.close()).catch(error => {
+          try { ctx.logger?.warn?.(`[dsh-omo] persistent memory storage close failed (${safeErrorName(error)})`) } catch {}
+        })
+      }
+      return memoryDomainState.closePromise
+    }
+    const persistentMemoryDomainPromise = openPersistentMemoryDomain(storageDomainService).then(domain => {
+      memoryDomainState.status = 'opened'
+      memoryDomainState.domain = domain
+      if (memoryDomainState.disposed) void closePersistentMemoryDomain(domain)
+      return domain
+    }, error => {
+      memoryDomainState.status = 'failed'
+      try { ctx.logger?.warn?.(`[dsh-omo] persistent memory storage could not be opened (${safeErrorName(error)})`) } catch {}
+      throw new Error('Persistent memory storage is unavailable.')
+    })
+    persistentMemoryDomainPromise.catch(() => undefined)
+    let memoryTool
+    let unregisterMemoryTool
+    try {
+      memoryTool = createPersistentMemoryTool({
+        agents: agentsService,
+        sessions: sessionsService,
+        domainPromise: persistentMemoryDomainPromise,
+        onStorageError: error => ctx.logger?.warn?.(`[dsh-omo] persistent memory storage operation failed (${safeErrorName(error)})`),
+      })
+      unregisterMemoryTool = ctx.tools.register(memoryTool)
+      if (typeof unregisterMemoryTool !== 'function') {
+        throw new Error('DSH tools.register did not return the persistent memory Tool disposer')
+      }
+      ctx.effect(() => async () => {
+        memoryDomainState.disposed = true
+        const drain = disposePersistentMemoryTool(memoryTool)
+        try {
+          unregisterMemoryTool()
+        } finally {
+          try {
+            await drain
+          } finally {
+            if (memoryDomainState.status === 'opened') {
+              await closePersistentMemoryDomain(memoryDomainState.domain)
+            }
+          }
+        }
+      }, 'dsh-omo persistent project memory Domain and Tool')
+    } catch (error) {
+      memoryDomainState.disposed = true
+      const drain = memoryTool ? disposePersistentMemoryTool(memoryTool) : Promise.resolve()
+      if (typeof unregisterMemoryTool === 'function') {
+        try { unregisterMemoryTool() } catch {}
+      }
+      void Promise.resolve(drain)
+        .then(() => memoryDomainState.status === 'opened'
+          ? closePersistentMemoryDomain(memoryDomainState.domain)
+          : undefined)
+        .catch(() => undefined)
+      throw error
+    }
+  }
   if (config.enableImageQueryTool) {
     const disposeImageQueryTool = registerImageQueryTool(ctx, llmService, imageQueryRoute)
     ctx.effect(() => disposeImageQueryTool, 'dsh-omo image-query Tool and pre-step capture')
+  }
+  if (config.enableWebSearchTool) {
+    const disposeWebSearchTool = ctx.tools.register(createDshWebSearchTool(webService, lifecycle.controller.signal))
+    ctx.effect(() => disposeWebSearchTool, 'dsh-omo model-facing DSH web-search Tool')
   }
   if (projectAgentFiles) ctx.tools.register(projectAgentFilesTool(ctx, projectAgentFiles, providerName, userAgents))
   if (config.enableContinuableTasks) ctx.tools.register(continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, userAgents, lifecycle, providerName, disabledOmoCommands, activeRoleNames, activeRoleSet, continuableTaskRegistry, promptFileExpander))
@@ -2145,7 +2463,7 @@ export function apply(ctx, rawConfig) {
     interpolate: false,
     text: buildUltraworkGuidance(disabledOmoCommands, activeRoleNames, config.enableWriteExistingFileGuard, config.enableProjectAgentFiles),
   })
-  registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName, webService, lifecycle.controller.signal)
+  registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName, webService, worktreeService, manualContextPruningHandler, lifecycle.controller.signal)
   if (config.enableSessionSearch) {
     const disposeSessionSearch = registerSessionSearchTool(ctx, sessionQueryService)
     ctx.effect(() => disposeSessionSearch, 'dsh-omo session search tool')
@@ -2215,6 +2533,12 @@ export function apply(ctx, rawConfig) {
     ctx.on('agent/disposed', payload => continuableTaskRegistry.clearAgent(payload?.agent))
     ctx.effect(() => continuableTaskRegistry.dispose, 'dsh-omo continuable task follow-up registry')
   }
+  if (config.enableProjectCommands) {
+    const projectCommands = createProjectCommandManager(ctx, sessionsService, agentsService, lifecycle)
+    ctx.on('agent/created', projectCommands.listener)
+    ctx.on('agent/disposed', projectCommands.clearAgent)
+    ctx.effect(() => projectCommands.dispose, 'dsh-omo project command source')
+  }
   if (config.enableTeamModeContext) {
     const context = createTeamModeContext(teamService, agentsService)
     ctx.on('agent/created', context.listener)
@@ -2250,9 +2574,14 @@ export function apply(ctx, rawConfig) {
   }
   if (config.enableBashFileReadGuidance) ctx.on('tools/post-execute', createBashFileReadGuidanceListener())
   if (config.enableSearchToolResultPruning) {
-    const pruning = createSearchToolResultPruningListener(ctx.tools, activeSearchToolResultPruner)
+    const pruning = createSearchToolResultPruningListener(ctx.tools, activeSearchToolResultPruner, additionalSearchToolResultPruningTools)
     ctx.on('tools/post-execute', pruning.listener)
     ctx.effect(() => pruning.dispose, 'dsh-omo direct search Tool result pruning')
+  }
+  if (config.enableGeneralToolResultPruning) {
+    const pruning = createGeneralToolResultPruningListener(ctx.tools, activeGeneralToolResultPruner)
+    ctx.on('tools/post-execute', pruning.listener)
+    ctx.effect(() => pruning.dispose, 'dsh-omo general Tool result pruning')
   }
   ctx.effect(() => async () => {
     lifecycle.disposed = true

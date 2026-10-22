@@ -54,6 +54,10 @@ test('requires the inspected searchEvents service and registers with a disposer'
   assert.deepEqual(fixture.searches, [], 'registration does not search in the background')
   dispose()
   assert.equal(tools.has('session_event_search'), false)
+  assert.throws(
+    () => registerSessionEventSearchTool({ tools: { register: () => undefined } }, fixture.sessionQuery),
+    /did not return a disposer/u,
+  )
 })
 
 test('binds search to the executing Agent, forwards bounded query/cursor and cancellation', async () => {
@@ -116,19 +120,22 @@ test('bounds query, limit, and cursor before any service calls', async () => {
     { query: '  ' },
     { query: 'x'.repeat(513) },
     { query: 'bad\nquery' },
+    { query: 'deceptive\u202equery' },
     { query: 'valid', limit: 0 },
     { query: 'valid', limit: 21 },
     { query: 'valid', limit: 1.5 },
     { query: 'valid', cursor: '' },
     { query: 'valid', cursor: 'x'.repeat(2_049) },
     { query: 'valid', cursor: 'bad\ncursor' },
+    { query: 'valid', cursor: 'bad\u202ecursor' },
   ]
   for (const args of invalid) await assert.rejects(tool.execute(args, currentAgent()))
+  await assert.rejects(tool.execute({ query: 'valid' }, currentAgent(`${SESSION_ID}\u202e`)), /valid current Agent/u)
   assert.deepEqual(fixture.searches, [])
 })
 
 test('sanitizes excerpts, caps them at 600 code points, and accepts only the declared surface variants', async () => {
-  const snippet = `${'a'.repeat(598)}😀${'b'.repeat(20)}\nunsafe\u0000text`
+  const snippet = `${'a'.repeat(598)}😀${'b'.repeat(20)}\nunsafe\u0000\u202etext`
   const fixture = makeSessionQuery({ page: page({ items: [hit({ snippet })] }) })
   const tool = createSessionEventSearchTool(fixture.sessionQuery)
   const result = await tool.execute({ query: 'match', limit: 1 }, currentAgent())
@@ -136,6 +143,7 @@ test('sanitizes excerpts, caps them at 600 code points, and accepts only the dec
   assert.equal(result.results[0].snippet.endsWith('…'), true)
   assert.equal(result.results[0].snippet.includes('\n'), false)
   assert.equal(result.results[0].snippet.includes('\u0000'), false)
+  assert.doesNotMatch(result.results[0].snippet, /\p{Bidi_Control}/u)
 
   for (const surface of ['current', 'shadowed', 'log-only']) {
     const projected = await createSessionEventSearchTool(makeSessionQuery({

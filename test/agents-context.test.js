@@ -303,3 +303,26 @@ test('cancellation and transient reads do not block Agent creation or leak a par
     await harness.dispose()
   }
 })
+
+test('failed Cordis lifecycle registration leaves an attached AGENTS listener inert', async () => {
+  const { fs, calls } = makeFileSystem(new Map([['/workspace/rollback', { text: 'must not be read' }]]))
+  const agent = { id: 'rollback', ctx: { systemPrompt: { context() { throw new Error('must not register context') } } } }
+  let attachedListener
+  const registrationError = new Error('effect registration failed')
+  const ctx = {
+    on(event, listener) {
+      assert.equal(event, 'agent/created')
+      attachedListener = listener
+    },
+    effect() { throw registrationError },
+  }
+
+  assert.throws(() => registerRootAgentsContext(
+    ctx,
+    { get: id => id === agent.id ? agent : undefined },
+    { get: id => ({ header: { id, cwd: '/workspace/rollback' } }) },
+    fs,
+  ), error => error === registrationError)
+  await attachedListener({ agent })
+  assert.equal(calls.some(call => call[0] === 'resolve'), false)
+})

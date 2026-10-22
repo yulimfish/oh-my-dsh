@@ -46,6 +46,16 @@ test('normalizes only advisory model fields and merges duplicate IDs case-insens
   assert.equal(Object.hasOwn(entry, 'description'), false)
   assert.equal(Object.hasOwn(entry, 'api_key'), false)
   assert.equal(Object.isFrozen(snapshot), true)
+  assert.equal(snapshot.models instanceof Map, true)
+  assert.equal(Object.isFrozen(snapshot.models), true)
+  assert.equal(Object.isFrozen(entry), true)
+  assert.equal(Object.isFrozen(entry.modalities), true)
+  assert.equal(Object.isFrozen(entry.modalities.input), true)
+  assert.equal(Object.isFrozen(entry.limit), true)
+  assert.throws(() => snapshot.models.set('mutated', { id: 'mutated' }), /read-only/u)
+  assert.throws(() => snapshot.models.delete('gpt-4o'), /read-only/u)
+  assert.throws(() => { entry.modalities.input.push('audio') }, TypeError)
+  assert.equal(snapshot.modelCount, 1, 'the published catalog cannot be changed through its public Map or entries')
 })
 
 test('parses bounded JSON and rejects malformed, empty, or structurally invalid catalog data', () => {
