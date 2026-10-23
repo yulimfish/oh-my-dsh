@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { posix as path } from 'node:path'
 import picomatch from 'picomatch'
+import { isMap, parseDocument } from 'yaml'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 const FILE_OPERATION_TOOL_NAMES = new Set(['read', 'write', 'edit'])
@@ -8,6 +9,7 @@ const OMO_PROJECT_RULES_DIRECTORY = '.omo/rules'
 const RULES_DIRECTORY = '.claude/rules'
 const CURSOR_PROJECT_RULES_DIRECTORY = '.cursor/rules'
 const GITHUB_PROJECT_INSTRUCTIONS_DIRECTORY = '.github/instructions'
+const GITHUB_COPILOT_INSTRUCTIONS_FILE = '.github/copilot-instructions.md'
 const GITHUB_INSTRUCTION_FILE_PATTERN = /\.instructions\.md$/u
 const OPENCODE_USER_RULE_SOURCES = Object.freeze([
   Object.freeze({ suffix: '.omo/rules', labelPrefix: 'user/.omo/rules' }),
@@ -340,6 +342,26 @@ async function getFileTarget(fs, cwd, cwdTarget, rulesTarget, relative, entry, s
   return { target, key, pathInfo, info }
 }
 
+async function getStandaloneFileTarget(fs, cwd, cwdTarget, rulesTarget, relative, signal, expectedKey, knownPathInfo) {
+  assertNotAborted(signal)
+  const pathInfo = await lstat(fs, relative, cwd, signal)
+  assertNotAborted(signal)
+  if (pathInfo?.type !== 'file' || (knownPathInfo && !metadataMatches(knownPathInfo, pathInfo))) return undefined
+  if (!validSize(pathInfo.size, MAX_FILE_BYTES)) throw LIMIT_REACHED
+
+  const target = await resolve(fs, relative, cwd, signal)
+  assertNotAborted(signal)
+  const key = safeTargetKey(target)
+  if (!key || (expectedKey && key !== expectedKey)
+    || !contains(fs, cwdTarget, target) || !contains(fs, rulesTarget, target)) return undefined
+
+  const info = await stat(fs, target, signal)
+  assertNotAborted(signal)
+  if (info?.type !== 'file' || !metadataMatches(pathInfo, info)) return undefined
+  if (!validSize(info.size, MAX_FILE_BYTES)) throw LIMIT_REACHED
+  return { target, key, pathInfo, info }
+}
+
 async function readRuleFile(fs, cwd, cwdTarget, rulesTarget, relative, entry, aggregate, signal, knownFile) {
   const file = knownFile ?? await getFileTarget(fs, cwd, cwdTarget, rulesTarget, relative, entry, signal)
   if (!file) return undefined
@@ -570,6 +592,40 @@ function parseFrontmatter(text) {
   return { ...fields, body: source.slice(bodyStart) }
 }
 
+function copilotInstructionsBody(text) {
+  const source = text.startsWith('\ufeff') ? text.slice(1) : text
+  const openingLength = source.startsWith('---\r\n') ? 5 : source.startsWith('---\n') ? 4 : 0
+  if (openingLength === 0) return source
+
+  let lineStart = openingLength
+  let bodyStart = source.length
+  let closingStart
+  while (lineStart <= source.length) {
+    const nextNewline = source.indexOf('\n', lineStart)
+    const lineEnd = nextNewline === -1 ? source.length : nextNewline
+    if (source.slice(lineStart, lineEnd).replace(/\r$/u, '') === '---') {
+      closingStart = lineStart
+      bodyStart = nextNewline === -1 ? source.length : nextNewline + 1
+      break
+    }
+    if (nextNewline === -1) break
+    lineStart = nextNewline + 1
+  }
+  if (closingStart === undefined) return source
+
+  try {
+    const document = parseDocument(source.slice(openingLength, closingStart).replace(/\r\n/gu, '\n'), {
+      schema: 'core',
+      uniqueKeys: true,
+    })
+    if (document.errors.length > 0 || !isMap(document.contents)) return source
+    return source.slice(bodyStart)
+  } catch {
+    // Keep the full source when YAML frontmatter cannot be parsed safely.
+    return source
+  }
+}
+
 function compilePattern(pattern) {
   try {
     return picomatch(pattern, { dot: true, bash: true })
@@ -673,6 +729,7 @@ async function prepareRulesContext({
   includeProjectClaudeRoot = true,
   includeProjectCursorRoot = false,
   includeProjectGitHubInstructionsRoot = false,
+  includeProjectGitHubCopilotInstructionsFile = false,
   userClaudeRulesRoots = [],
   userOpenCodeRulesRoots = [],
 }) {
@@ -759,6 +816,29 @@ async function prepareRulesContext({
       }
     }
   }
+  if (includeProjectGitHubCopilotInstructionsFile) {
+    const github = await getDirectoryTarget(fs, cwd, cwdTarget, '.github', undefined, undefined, signal)
+    if (github) {
+      const file = await getStandaloneFileTarget(
+        fs, cwd, cwdTarget, github.target, GITHUB_COPILOT_INSTRUCTIONS_FILE, signal,
+      )
+      if (file) {
+        roots.push({
+          cwd,
+          cwdTarget,
+          rulesTarget: github.target,
+          relative: GITHUB_COPILOT_INSTRUCTIONS_FILE,
+          rootKey: file.key,
+          pathInfo: file.pathInfo,
+          parentKey: github.key,
+          parentPathInfo: github.pathInfo,
+          parentInfo: github.info,
+          labelPrefix: '',
+          singleFile: true,
+        })
+      }
+    }
+  }
   // Pinned upstream orders these user sources: ~/.omo, ~/.opencode, then ~/.claude.
   for (const rootPath of userOpenCodeRulesRoots) {
     const root = await getConfiguredUserRulesRoot(fs, rootPath, signal)
@@ -795,9 +875,38 @@ async function prepareRulesContext({
     assertNotAborted(signal)
     if (depth > MAX_RULE_DEPTH) throw LIMIT_REACHED
     if (scan.visited.has(directoryKey)) return
-    if (++scan.directories > MAX_RULE_DIRECTORIES) throw LIMIT_REACHED
     scan.visited.add(directoryKey)
 
+    if (root.singleFile) {
+      if (++scan.entries > MAX_PROCESSED_ENTRIES) throw LIMIT_REACHED
+      const parentBefore = await getDirectoryTarget(
+        fs, root.cwd, root.cwdTarget, '.github', root.parentKey, undefined, signal,
+      )
+      if (!parentBefore || !metadataMatches(root.parentPathInfo, parentBefore.pathInfo)
+        || !metadataMatches(root.parentInfo, parentBefore.info)) throw LIMIT_REACHED
+      const before = await getStandaloneFileTarget(
+        fs, root.cwd, root.cwdTarget, parentBefore.target, root.relative, signal, root.rootKey, root.pathInfo,
+      )
+      if (!before) throw LIMIT_REACHED
+      const read = await readRuleFile(fs, root.cwd, root.cwdTarget, parentBefore.target, root.relative, undefined, scan, signal, before)
+      const parentAfter = await getDirectoryTarget(
+        fs, root.cwd, root.cwdTarget, '.github', root.parentKey, undefined, signal,
+      )
+      if (!parentAfter || !metadataMatches(parentBefore.pathInfo, parentAfter.pathInfo)
+        || !metadataMatches(parentBefore.info, parentAfter.info)) throw LIMIT_REACHED
+      if (!read) return
+      const body = copilotInstructionsBody(read.text)
+      if (body.trim() === '') return
+      scan.files.push({
+        key: contentHash(body),
+        relativePath: root.relative,
+        reason: 'copilot-instructions (always apply)',
+        body,
+      })
+      return
+    }
+
+    if (++scan.directories > MAX_RULE_DIRECTORIES) throw LIMIT_REACHED
     const before = await getDirectoryTarget(
       fs, root.cwd, root.cwdTarget, directoryRelative, directoryKey, undefined, signal,
       depth === 0 ? root.pathInfo : undefined,
@@ -907,6 +1016,7 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs, use
   const includeProjectClaudeRoot = options?.includeProjectClaudeRoot !== false
   const includeProjectCursorRoot = options?.includeProjectCursorRoot === true
   const includeProjectGitHubInstructionsRoot = options?.includeProjectGitHubInstructionsRoot === true
+  const includeProjectGitHubCopilotInstructionsFile = options?.includeProjectGitHubCopilotInstructionsFile === true
   const normalizedUserClaudeRulesRoots = normalizeUserClaudeRulesRoots(userClaudeRulesRoots)
   const normalizedUserOpenCodeRulesRoots = normalizeUserOpenCodeRulesRoots(options?.userOpenCodeRulesRoots)
 
@@ -995,6 +1105,7 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs, use
         includeProjectClaudeRoot,
         includeProjectCursorRoot,
         includeProjectGitHubInstructionsRoot,
+        includeProjectGitHubCopilotInstructionsFile,
         userClaudeRulesRoots: normalizedUserClaudeRulesRoots,
         userOpenCodeRulesRoots: normalizedUserOpenCodeRulesRoots,
       })

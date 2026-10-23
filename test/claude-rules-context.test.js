@@ -329,6 +329,7 @@ async function makeHarness(options = {}) {
       includeProjectClaudeRoot: options.includeProjectClaudeRoot ?? true,
       includeProjectCursorRoot: options.includeProjectCursorRoot ?? false,
       includeProjectGitHubInstructionsRoot: options.includeProjectGitHubInstructionsRoot ?? false,
+      includeProjectGitHubCopilotInstructionsFile: options.includeProjectGitHubCopilotInstructionsFile ?? false,
       userOpenCodeRulesRoots: options.userOpenCodeRulesRoots ?? [],
     },
   ))
@@ -578,9 +579,12 @@ test('session-cwd Cursor project rules remain default-off', async () => {
   }
 })
 
-test('session-cwd GitHub instruction rules remain default-off', async () => {
+test('session-cwd GitHub instruction sources remain default-off', async () => {
   const harness = await makeHarness({
-    rules: { '.github/instructions/disabled.instructions.md': rule('must remain unread without the opt-in', 'alwaysApply: true') },
+    rules: {
+      '.github/instructions/disabled.instructions.md': rule('must remain unread without the opt-in', 'alwaysApply: true'),
+      '.github/copilot-instructions.md': 'Copilot instructions must remain unread without the opt-in.',
+    },
   })
   try {
     const agent = await harness.createAgent()
@@ -665,6 +669,152 @@ test('GitHub-only mode matches cwd-relative applyTo and ignores non-instruction 
   }
 })
 
+test('always applies the Copilot single file after instructions and before user roots', async () => {
+  const copilotBody = 'Copilot guidance is always applied'
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubInstructionsRoot: true,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    userOpenCodeRulesRoots: [USER_OPENCODE_RULES_ROOT, USER_OMO_RULES_ROOT],
+    rules: {
+      '.github/instructions/first.instructions.md': rule('GitHub directory source', 'alwaysApply: true'),
+      '.github/copilot-instructions.md': rule(copilotBody, 'applyTo: "docs/*.ts"'),
+      '@opencode0/duplicate.md': rule(copilotBody, 'alwaysApply: true'),
+      '@opencode1/user.md': rule('explicit user source after Copilot', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.github/instructions/first.instructions.md',
+      '.github/copilot-instructions.md',
+      'user/.omo/rules/user.md',
+    ])
+    assert.ok(texts[1].includes('[Match: copilot-instructions (always apply)]'))
+    assert.ok(texts[1].includes(copilotBody))
+    assert.equal(texts[1].includes('applyTo:'), false, 'valid frontmatter is stripped from the injected body')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('injects plain Markdown Copilot instructions without requiring frontmatter', async () => {
+  const body = '# Repository guidance\nUse the project formatter.'
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    rules: { '.github/copilot-instructions.md': body },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    const texts = contextTexts(result)
+    assert.equal(texts.length, 1)
+    assert.ok(texts[0].includes('[Rule: .github/copilot-instructions.md]'))
+    assert.ok(texts[0].includes('[Match: copilot-instructions (always apply)]'))
+    assert.ok(texts[0].includes(body))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('strips valid Copilot YAML frontmatter without applying rule-matcher pattern limits', async () => {
+  const body = 'Copilot content after the valid YAML header.'
+  const frontmatterValue = 'x'.repeat(4_097)
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    rules: {
+      '.github/copilot-instructions.md': `---\napplyTo: "${frontmatterValue}"\n---\n${body}`,
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    const texts = contextTexts(result)
+    assert.equal(texts.length, 1)
+    assert.ok(texts[0].includes(body))
+    assert.equal(texts[0].includes('applyTo:'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('omits deprecated .sisyphus project rules while loading the prioritized Copilot source', async () => {
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    rules: {
+      '.github/copilot-instructions.md': rule('supported Copilot instructions', 'alwaysApply: true'),
+      '.sisyphus/rules/deprecated.md': rule('deprecated Sisyphus rules must remain omitted', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.github/copilot-instructions.md',
+    ])
+    assert.ok(contextTexts(result)[0].includes('supported Copilot instructions'))
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === '.sisyphus'), false)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '.sisyphus/rules/deprecated.md'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('rejects a regular Copilot file whose resolved target escapes the .github parent', async () => {
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    rules: {
+      '.github/copilot-instructions.md': rule('escaped Copilot file must not be read', 'alwaysApply: true'),
+      'outside/copilot-instructions.md': rule('outside target', 'alwaysApply: true'),
+    },
+  })
+  const resolve = harness.fileSystem.fs.resolve.bind(harness.fileSystem.fs)
+  harness.fileSystem.fs.resolve = async (value, options = {}) => {
+    if (value === '.github/copilot-instructions.md' && options.cwd === CWD) {
+      return resolve('outside/copilot-instructions.md', { cwd: CWD })
+    }
+    return resolve(value, options)
+  }
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === '.github/copilot-instructions.md'), true)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+      && call.target?.relative === '.github/copilot-instructions.md'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('does not inject a Copilot file after its resolved target identity changes during read', async () => {
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    rules: {
+      '.github/copilot-instructions.md': {
+        text: rule('stale Copilot file contents must not inject', 'alwaysApply: true'),
+        afterTargetKey: 'file:replacement-after-read',
+      },
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'readBytes'
+      && call.target?.relative === '.github/copilot-instructions.md').length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
+
 test('keeps the session cwd as the matching root for files beneath a nested project path', async () => {
   const nestedFilePath = 'apps/appA/src/app.ts'
   const harness = await makeHarness({
@@ -723,6 +873,25 @@ test('does not search an ancestor .github/instructions tree', async () => {
   }
 })
 
+test('does not search an ancestor GitHub Copilot single-file source', async () => {
+  const ancestorPath = '../.github/copilot-instructions.md'
+  const harness = await makeHarness({
+    cwd: '/workspace/nested',
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    rules: { [ancestorPath]: 'ancestor Copilot instructions must not be read' },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === '../.github'), false)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === ancestorPath), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
 test('OMO-only mode scans the session-cwd .omo/rules root without inspecting Claude rules', async () => {
   const harness = await makeHarness({
     includeProjectOmoRoot: true,
@@ -745,11 +914,12 @@ test('OMO-only mode scans the session-cwd .omo/rules root without inspecting Cla
   }
 })
 
-test('scans session-cwd OMO, Claude, Cursor, and GitHub instruction roots in pinned priority before user roots', async () => {
+test('scans session-cwd OMO, Claude, Cursor, GitHub Instructions, and Copilot sources in pinned priority before user roots', async () => {
   const harness = await makeHarness({
     includeProjectOmoRoot: true,
     includeProjectCursorRoot: true,
     includeProjectGitHubInstructionsRoot: true,
+    includeProjectGitHubCopilotInstructionsFile: true,
     userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
     userOpenCodeRulesRoots: [USER_OPENCODE_RULES_ROOT, USER_OMO_RULES_ROOT],
     rules: {
@@ -760,6 +930,7 @@ test('scans session-cwd OMO, Claude, Cursor, and GitHub instruction roots in pin
       '.cursor/rules/project-cursor.mdc': rule('cwd Cursor source', 'alwaysApply: true'),
       '.github/instructions/project-duplicate.instructions.md': rule('shared project body', 'alwaysApply: true'),
       '.github/instructions/project-github.instructions.md': rule('cwd GitHub instructions source', 'alwaysApply: true'),
+      '.github/copilot-instructions.md': rule('cwd GitHub Copilot single-file source', 'applyTo: "no-match/**/*.md"'),
       '@opencode1/user-omo.md': rule('user OMO source', 'alwaysApply: true'),
       '@opencode0/user-opencode.md': rule('user OpenCode source', 'alwaysApply: true'),
       '@user/user-claude.md': rule('user Claude source', 'alwaysApply: true'),
@@ -774,11 +945,13 @@ test('scans session-cwd OMO, Claude, Cursor, and GitHub instruction roots in pin
       '.claude/rules/project-claude.md',
       '.cursor/rules/project-cursor.mdc',
       '.github/instructions/project-github.instructions.md',
+      '.github/copilot-instructions.md',
       'user/.omo/rules/user-omo.md',
       'user/.opencode/rules/user-opencode.md',
       'user/.claude/rules/user-claude.md',
     ])
     assert.equal(texts.filter(text => text.includes('shared project body')).length, 1)
+    assert.ok(texts[4].includes('[Match: copilot-instructions (always apply)]'))
   } finally {
     await harness.dispose()
   }
@@ -840,6 +1013,28 @@ test('rejects symlinked session-cwd GitHub instruction-root components', async t
         assert.deepEqual(contextTexts(result), [])
         assert.ok(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === symlinkPath))
         assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.github/instructions'), false)
+      } finally {
+        await harness.dispose()
+      }
+    })
+  }
+})
+
+test('rejects symlinked session-cwd Copilot source roots and files', async t => {
+  for (const symlinkPath of ['.github', '.github/copilot-instructions.md']) {
+    await t.test(symlinkPath, async () => {
+      const harness = await makeHarness({
+        includeProjectClaudeRoot: false,
+        includeProjectGitHubCopilotInstructionsFile: true,
+        types: { [symlinkPath]: 'symlink' },
+        rules: { '.github/copilot-instructions.md': 'a symlinked Copilot source must not be read' },
+      })
+      try {
+        const agent = await harness.createAgent()
+        const result = await harness.executeRead(agent, 'src/app.ts')
+        assert.deepEqual(contextTexts(result), [])
+        assert.ok(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === symlinkPath))
+        assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '.github/copilot-instructions.md'), false)
       } finally {
         await harness.dispose()
       }
@@ -1229,17 +1424,19 @@ test('skips OpenCode root aliases sharing one canonical targetKey before listing
   }
 })
 
-test('uses shared per-invocation byte budgets across Cursor and GitHub project plus explicit user rules', async () => {
+test('uses shared per-invocation byte budgets across Copilot and explicit user rules', async () => {
   const body = 'x'.repeat(8_000)
   const harness = await makeHarness({
     includeProjectCursorRoot: true,
     includeProjectGitHubInstructionsRoot: true,
+    includeProjectGitHubCopilotInstructionsFile: true,
     userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
     userOpenCodeRulesRoots: [USER_OMO_RULES_ROOT],
     rules: {
       '.claude/rules/a.md': rule(body, 'alwaysApply: true'),
       '.cursor/rules/b.mdc': rule(body, 'alwaysApply: true'),
       '.github/instructions/c.instructions.md': rule(body, 'alwaysApply: true'),
+      '.github/copilot-instructions.md': rule(body, 'alwaysApply: true'),
       '@opencode0/d.md': rule(body, 'alwaysApply: true'),
       '@user/e.md': rule(body, 'alwaysApply: true'),
     },
@@ -1252,8 +1449,10 @@ test('uses shared per-invocation byte budgets across Cursor and GitHub project p
     assert.equal(harness.fileSystem.calls.filter(call => call.method === 'readBytes').length, 4)
     assert.ok(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '.cursor/rules/b.mdc'))
     assert.ok(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '.github/instructions/c.instructions.md'))
-    assert.ok(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@opencode0/d.md'),
-      'the GitHub instruction source shares the aggregate allowance before OpenCode user roots')
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '.github/copilot-instructions.md'),
+      'the single-file source shares the aggregate allowance before user roots')
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@opencode0/d.md'), false,
+      'the Copilot source consumes the aggregate allowance before OpenCode user roots')
     assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@user/e.md'), false,
       'all configured user roots share the same byte allowance')
   } finally {

@@ -253,6 +253,7 @@ const baseConfig = {
   enableOmoProjectRulesOnRead: false,
   enableCursorProjectRulesOnRead: false,
   enableGitHubProjectInstructionsOnRead: false,
+  enableGitHubCopilotInstructionsOnRead: false,
   userClaudeRulesRoots: [],
   enableOpenCodeRulesOnRead: false,
   userOpenCodeRulesRoots: [],
@@ -419,6 +420,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableCursorProjectRulesOnRead: true }).enableCursorProjectRulesOnRead, true)
   assert.equal(Config({}).enableGitHubProjectInstructionsOnRead, false)
   assert.equal(Config({ enableGitHubProjectInstructionsOnRead: true }).enableGitHubProjectInstructionsOnRead, true)
+  assert.equal(Config({}).enableGitHubCopilotInstructionsOnRead, false)
+  assert.equal(Config({ enableGitHubCopilotInstructionsOnRead: true }).enableGitHubCopilotInstructionsOnRead, true)
   assert.deepEqual(Config({}).userClaudeRulesRoots, [])
   assert.deepEqual(Config({ userClaudeRulesRoots: ['/Users/alice/.claude/rules'] }).userClaudeRulesRoots, ['/Users/alice/.claude/rules'])
   assert.equal(Config({}).enableOpenCodeRulesOnRead, false)
@@ -646,7 +649,7 @@ test('/omo status reports feature flags and service presence without calling bus
   assert.match(status.text, /taskResultTool=disabled; taskCancelTool=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
   assert.match(status.text, /goalUseReminder=disabled; agentUsageReminder=disabled; compactionResumeAdvisory=disabled/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamModeContext=disabled; teamStatusContext=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; manualContextPruning=disabled; searchToolResultPruning=disabled; generalToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; webSearchTool=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamModeContext=disabled; teamStatusContext=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; manualContextPruning=disabled; searchToolResultPruning=disabled; generalToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; webSearchTool=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
   assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; storageDomain=absent; mcpResources=present/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
@@ -1591,7 +1594,7 @@ test('mounts opt-in README-on-read injection only with DSH prerequisites and kee
   assert.deepEqual(includedRoot.readTargets, [{ targetKey: 'root-readme' }])
 })
 
-test('mounts opt-in cwd OMO, Cursor, GitHub, and Claude rules-on-read independently with complete prerequisites', async () => {
+test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude rules-on-read independently', async () => {
   const calls = []
   const prerequisites = () => ({
     services: {
@@ -1611,7 +1614,7 @@ test('mounts opt-in cwd OMO, Cursor, GitHub, and Claude rules-on-read independen
   const disabled = makeContext(prerequisites())
   apply(disabled.ctx, baseConfig)
   assert.equal(disabled.events.has('tools/post-execute'), false, 'the default-off flag registers no post-execute hook')
-  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; openCodeRulesOnRead=disabled/u)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled/u)
   assert.match(disabled.commands.get('omo').handler().text, /Claude rules after read\/write\/edit: disabled/u)
   assert.match(disabled.commands.get('omo').handler().text, /OpenCode user rules after file operations: disabled \(explicit roots only\)/u)
   assert.deepEqual(calls, [], 'disabled setup and status do not call filesystem or Service methods')
@@ -1688,20 +1691,34 @@ test('mounts opt-in cwd OMO, Cursor, GitHub, and Claude rules-on-read independen
   )
   assert.equal(missingGitHubInstructionsFixture.events.size, 0)
 
+  const missingGitHubCopilotApi = prerequisites()
+  delete missingGitHubCopilotApi.fs.listDir
+  const missingGitHubCopilotFixture = makeContext(missingGitHubCopilotApi)
+  assert.throws(
+    () => apply(missingGitHubCopilotFixture.ctx, { ...baseConfig, enableGitHubCopilotInstructionsOnRead: true }),
+    /enableGitHubCopilotInstructionsOnRead requires DSH agents\.get/u,
+  )
+  assert.equal(missingGitHubCopilotFixture.events.size, 0)
+
   const omoProjectOnly = makeContext(prerequisites())
   apply(omoProjectOnly.ctx, { ...baseConfig, enableOmoProjectRulesOnRead: true })
   assert.equal(typeof omoProjectOnly.events.get('tools/post-execute'), 'function')
-  assert.match(omoProjectOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; omoProjectRulesOnRead=enabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; openCodeRulesOnRead=disabled/u)
+  assert.match(omoProjectOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; omoProjectRulesOnRead=enabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled/u)
 
   const cursorProjectOnly = makeContext(prerequisites())
   apply(cursorProjectOnly.ctx, { ...baseConfig, enableCursorProjectRulesOnRead: true })
   assert.equal(typeof cursorProjectOnly.events.get('tools/post-execute'), 'function')
-  assert.match(cursorProjectOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=enabled; githubProjectInstructionsOnRead=disabled; openCodeRulesOnRead=disabled/u)
+  assert.match(cursorProjectOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=enabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled/u)
 
   const githubProjectOnly = makeContext(prerequisites())
   apply(githubProjectOnly.ctx, { ...baseConfig, enableGitHubProjectInstructionsOnRead: true })
   assert.equal(typeof githubProjectOnly.events.get('tools/post-execute'), 'function')
-  assert.match(githubProjectOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=enabled; openCodeRulesOnRead=disabled/u)
+  assert.match(githubProjectOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=enabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled/u)
+
+  const githubCopilotOnly = makeContext(prerequisites())
+  apply(githubCopilotOnly.ctx, { ...baseConfig, enableGitHubCopilotInstructionsOnRead: true })
+  assert.equal(typeof githubCopilotOnly.events.get('tools/post-execute'), 'function')
+  assert.match(githubCopilotOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=enabled; openCodeRulesOnRead=disabled/u)
 
   const cursorWiringCalls = []
   const cursorWiringAgent = { id: 'agent-cursor-wiring' }
@@ -1817,6 +1834,68 @@ test('mounts opt-in cwd OMO, Cursor, GitHub, and Claude rules-on-read independen
   assert.ok(githubWiringCalls.some(call => call.method === 'listDir' && call.target === githubWiringRoot))
   assert.equal(githubWiringCalls.some(call => call.method === 'lstat' && (call.path === '.omo' || call.path === '.claude' || call.path === '.cursor')), false)
 
+  const copilotWiringCalls = []
+  const copilotWiringAgent = { id: 'agent-github-copilot-wiring' }
+  const copilotWiringCwd = { targetKey: 'github-copilot-wiring-cwd' }
+  const copilotWiringReadFile = { targetKey: 'github-copilot-wiring-read-file' }
+  const copilotWiringParent = { targetKey: 'github-copilot-wiring-parent' }
+  const copilotWiringFile = { targetKey: 'github-copilot-wiring-file' }
+  const copilotWiringBytes = new TextEncoder().encode('Copilot project guidance without frontmatter.')
+  const copilotWiringFixture = makeContext({
+    services: {
+      agents: { get: id => id === copilotWiringAgent.id ? copilotWiringAgent : undefined },
+      sessions: { get: id => id === copilotWiringAgent.id ? { header: { id, cwd: '/workspace' } } : undefined },
+    },
+    fs: {
+      resolve: async (value, options = {}) => {
+        copilotWiringCalls.push({ method: 'resolve', path: value, cwd: options.cwd })
+        if (value === '/workspace') return copilotWiringCwd
+        if (value === 'src/app.ts' && options.cwd === '/workspace') return copilotWiringReadFile
+        if (value === '.github' && options.cwd === '/workspace') return copilotWiringParent
+        if (value === '.github/copilot-instructions.md' && options.cwd === '/workspace') return copilotWiringFile
+        return undefined
+      },
+      contains: (parent, child) => parent === child
+        || (parent === copilotWiringCwd && (child === copilotWiringReadFile || child === copilotWiringParent || child === copilotWiringFile))
+        || (parent === copilotWiringParent && child === copilotWiringFile),
+      lstat: async (value, options = {}) => {
+        copilotWiringCalls.push({ method: 'lstat', path: value, cwd: options.cwd })
+        if (value === '.github') return { type: 'directory', version: 'v1' }
+        if (value === '.github/copilot-instructions.md') return { type: 'file', version: 'v1', size: copilotWiringBytes.byteLength }
+        if (value === 'src/app.ts') return { type: 'file', version: 'v1' }
+        return undefined
+      },
+      stat: async target => target === copilotWiringCwd || target === copilotWiringParent
+        ? { type: 'directory', version: 'v1' }
+        : target === copilotWiringFile ? { type: 'file', version: 'v1', size: copilotWiringBytes.byteLength }
+          : target === copilotWiringReadFile ? { type: 'file', version: 'v1' } : undefined,
+      readBytes: async (target, _signal, maxBytes) => {
+        copilotWiringCalls.push({ method: 'readBytes', target, maxBytes })
+        return target === copilotWiringFile ? copilotWiringBytes : new Uint8Array()
+      },
+      listDir: async target => {
+        copilotWiringCalls.push({ method: 'listDir', target })
+        return []
+      },
+    },
+  })
+  apply(copilotWiringFixture.ctx, { ...baseConfig, enableGitHubCopilotInstructionsOnRead: true })
+  const copilotWiringResult = await copilotWiringFixture.events.get('tools/post-execute')(
+    {
+      name: 'read',
+      arguments: { file_path: 'src/app.ts' },
+      agent: { id: copilotWiringAgent.id },
+      signal: new AbortController().signal,
+    },
+    { isError: false },
+    async () => ({ kind: 'accept', value: { body: 'native' }, content: [] }),
+  )
+  assert.equal(copilotWiringResult.additionalContexts.length, 1)
+  assert.match(copilotWiringResult.additionalContexts[0].content[0].text, /Copilot project guidance without frontmatter/u)
+  assert.match(copilotWiringResult.additionalContexts[0].content[0].text, /copilot-instructions \(always apply\)/u)
+  assert.ok(copilotWiringCalls.some(call => call.method === 'lstat' && call.path === '.github/copilot-instructions.md'))
+  assert.equal(copilotWiringCalls.some(call => call.method === 'listDir'), false, 'single-file discovery does not enumerate the .github directory')
+
   const missingOpenCodeApi = prerequisites()
   delete missingOpenCodeApi.fs.listDir
   const missingOpenCodeFixture = makeContext(missingOpenCodeApi)
@@ -1833,12 +1912,13 @@ test('mounts opt-in cwd OMO, Cursor, GitHub, and Claude rules-on-read independen
     enableOmoProjectRulesOnRead: true,
     enableCursorProjectRulesOnRead: true,
     enableGitHubProjectInstructionsOnRead: true,
+    enableGitHubCopilotInstructionsOnRead: true,
     userClaudeRulesRoots: ['/Users/alice/.claude/rules'],
     enableOpenCodeRulesOnRead: true,
     userOpenCodeRulesRoots: ['/Users/alice/.opencode/rules', '/Users/alice/.omo/rules'],
   })
   assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
-  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=enabled; omoProjectRulesOnRead=enabled; cursorProjectRulesOnRead=enabled; githubProjectInstructionsOnRead=enabled; openCodeRulesOnRead=enabled/u)
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=enabled; omoProjectRulesOnRead=enabled; cursorProjectRulesOnRead=enabled; githubProjectInstructionsOnRead=enabled; githubCopilotInstructionsOnRead=enabled; openCodeRulesOnRead=enabled/u)
   assert.match(enabled.commands.get('omo').handler().text, /Claude rules after read\/write\/edit: enabled/u)
   assert.match(enabled.commands.get('omo').handler().text, /OpenCode user rules after file operations: enabled \(explicit roots only\)/u)
   assert.deepEqual(calls, [], 'enabled registration/status do not perform filesystem or Service operations')
@@ -1904,12 +1984,12 @@ test('mounts opt-in cwd OMO, Cursor, GitHub, and Claude rules-on-read independen
   const readmeOnReadOnly = makeContext(prerequisites())
   apply(readmeOnReadOnly.ctx, { ...baseConfig, enableReadmeOnRead: true })
   assert.equal(typeof readmeOnReadOnly.events.get('tools/post-execute'), 'function')
-  assert.match(readmeOnReadOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /readmeOnRead=enabled; claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
+  assert.match(readmeOnReadOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /readmeOnRead=enabled; claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
 
   const rootSnapshotsOnly = makeContext(prerequisites())
   apply(rootSnapshotsOnly.ctx, { ...baseConfig, enableRootReadmeContext: true, enableRootAgentsContext: true })
   assert.equal(rootSnapshotsOnly.events.has('tools/post-execute'), false)
-  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
+  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
 
   const combined = makeContext(prerequisites())
   apply(combined.ctx, {
@@ -1920,7 +2000,7 @@ test('mounts opt-in cwd OMO, Cursor, GitHub, and Claude rules-on-read independen
     enableRootAgentsContext: true,
   })
   assert.equal(typeof combined.events.get('tools/post-execute'), 'function', 'independent on-read and root-context flags can be combined')
-  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
+  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
   assert.deepEqual(calls, [], 'combined registration/status remain free of runtime filesystem and Service calls')
 })
 
