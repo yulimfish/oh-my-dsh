@@ -2262,9 +2262,9 @@ export function apply(ctx, rawConfig) {
     || !sessionsService || typeof sessionsService.get !== 'function'
     || !ctx.fs || typeof ctx.fs.resolve !== 'function' || typeof ctx.fs.contains !== 'function'
     || typeof ctx.fs.lstat !== 'function' || typeof ctx.fs.stat !== 'function'
-    || typeof ctx.fs.readBytes !== 'function' || typeof ctx.fs.listDir !== 'function'
+    || typeof ctx.fs.readBytes !== 'function'
     || typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
-    throw new Error('dsh-omo: enableGitHubCopilotInstructionsOnRead requires DSH agents.get, sessions.get, fs.resolve/contains/lstat/stat/readBytes/listDir, and Cordis ctx.on/ctx.effect')
+    throw new Error('dsh-omo: enableGitHubCopilotInstructionsOnRead requires DSH agents.get, sessions.get, fs.resolve/contains/lstat/stat/readBytes, and Cordis ctx.on/ctx.effect')
   }
   if (config.enableOpenCodeRulesOnRead && (!agentsService || typeof agentsService.get !== 'function'
     || !sessionsService || typeof sessionsService.get !== 'function'

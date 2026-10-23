@@ -295,11 +295,14 @@ async function stat(fs, target, signal) {
   return safeCall(() => fs.stat(target, signal), signal)
 }
 
-function assertFileSystem(fs) {
+function assertFileSystem(fs, requireListDir = true) {
   if (!fs || typeof fs.resolve !== 'function' || typeof fs.contains !== 'function'
     || typeof fs.lstat !== 'function' || typeof fs.stat !== 'function'
-    || typeof fs.readBytes !== 'function' || typeof fs.listDir !== 'function') {
-    throw new TypeError('rules context requires DSH fs.resolve, contains, lstat, stat, readBytes, and listDir')
+    || typeof fs.readBytes !== 'function' || (requireListDir && typeof fs.listDir !== 'function')) {
+    const methods = requireListDir
+      ? 'resolve, contains, lstat, stat, readBytes, and listDir'
+      : 'resolve, contains, lstat, stat, and readBytes'
+    throw new TypeError(`rules context requires DSH fs.${methods}`)
   }
 }
 
@@ -1011,7 +1014,6 @@ async function prepareRulesContext({
 export function createClaudeRulesOnReadContextListener(agents, sessions, fs, userClaudeRulesRoots = [], options = {}) {
   if (!agents || typeof agents.get !== 'function') throw new TypeError('Rules context requires DSH agents.get')
   if (!sessions || typeof sessions.get !== 'function') throw new TypeError('Rules context requires DSH sessions.get')
-  assertFileSystem(fs)
   const includeProjectOmoRoot = options?.includeProjectOmoRoot === true
   const includeProjectClaudeRoot = options?.includeProjectClaudeRoot !== false
   const includeProjectCursorRoot = options?.includeProjectCursorRoot === true
@@ -1019,6 +1021,10 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs, use
   const includeProjectGitHubCopilotInstructionsFile = options?.includeProjectGitHubCopilotInstructionsFile === true
   const normalizedUserClaudeRulesRoots = normalizeUserClaudeRulesRoots(userClaudeRulesRoots)
   const normalizedUserOpenCodeRulesRoots = normalizeUserOpenCodeRulesRoots(options?.userOpenCodeRulesRoots)
+  const requiresListDir = includeProjectOmoRoot || includeProjectClaudeRoot || includeProjectCursorRoot
+    || includeProjectGitHubInstructionsRoot || normalizedUserClaudeRulesRoots.length > 0
+    || normalizedUserOpenCodeRulesRoots.length > 0
+  assertFileSystem(fs, requiresListDir)
 
   const states = new WeakMap()
   const lifecycle = new AbortController()

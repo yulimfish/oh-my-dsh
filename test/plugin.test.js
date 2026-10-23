@@ -1691,14 +1691,11 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
   )
   assert.equal(missingGitHubInstructionsFixture.events.size, 0)
 
-  const missingGitHubCopilotApi = prerequisites()
-  delete missingGitHubCopilotApi.fs.listDir
-  const missingGitHubCopilotFixture = makeContext(missingGitHubCopilotApi)
-  assert.throws(
-    () => apply(missingGitHubCopilotFixture.ctx, { ...baseConfig, enableGitHubCopilotInstructionsOnRead: true }),
-    /enableGitHubCopilotInstructionsOnRead requires DSH agents\.get/u,
-  )
-  assert.equal(missingGitHubCopilotFixture.events.size, 0)
+  const githubCopilotWithoutDirectoryListing = prerequisites()
+  delete githubCopilotWithoutDirectoryListing.fs.listDir
+  const githubCopilotWithoutDirectoryListingFixture = makeContext(githubCopilotWithoutDirectoryListing)
+  apply(githubCopilotWithoutDirectoryListingFixture.ctx, { ...baseConfig, enableGitHubCopilotInstructionsOnRead: true })
+  assert.equal(typeof githubCopilotWithoutDirectoryListingFixture.events.get('tools/post-execute'), 'function')
 
   const omoProjectOnly = makeContext(prerequisites())
   apply(omoProjectOnly.ctx, { ...baseConfig, enableOmoProjectRulesOnRead: true })
@@ -1873,13 +1870,10 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
         copilotWiringCalls.push({ method: 'readBytes', target, maxBytes })
         return target === copilotWiringFile ? copilotWiringBytes : new Uint8Array()
       },
-      listDir: async target => {
-        copilotWiringCalls.push({ method: 'listDir', target })
-        return []
-      },
     },
   })
   apply(copilotWiringFixture.ctx, { ...baseConfig, enableGitHubCopilotInstructionsOnRead: true })
+  assert.equal(typeof copilotWiringFixture.ctx.fs.listDir, 'undefined', 'Copilot-only mode does not require directory listing')
   const copilotWiringResult = await copilotWiringFixture.events.get('tools/post-execute')(
     {
       name: 'read',
