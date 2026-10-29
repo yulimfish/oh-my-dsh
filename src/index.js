@@ -3013,7 +3013,10 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
     ? createVerifyCommand(sessionQueryService, ctx.fs, workingDirectoryService, sessionsService)
     : undefined
   const handoffCommand = config.enableTaskHandoffCommand
-    ? createHandoffCommand(taskResultRegistry, { queueMessage: queueParentMessage })
+    ? createHandoffCommand(taskResultRegistry, {
+      queueMessage: queueParentMessage,
+      isParentCurrent: parent => agentsService.get(parent.id) === parent,
+    })
     : undefined
   const registrations = [
     ...(projectCommandManager ? [{

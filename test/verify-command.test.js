@@ -171,6 +171,20 @@ test('prioritizes bash evidence and disclaimer when scripts exceed the display b
   assert.match(response.text, /omitted/u)
 })
 
+test('preserves the latest result and disclaimer when command evidence is oversized', async () => {
+  const events = []
+  for (let index = 0; index < 16; index += 1) {
+    events.push(call(index * 2, `long-${index}`, `pnpm test -- ${index}-${'x'.repeat(4_000)}`), resultEvent(index * 2 + 1, `long-${index}`, `result-${index}`))
+  }
+  const response = await createVerifyCommand({ observeSession: async () => observation(events) }, fsFixture()).handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  assert.equal(response.kind, 'success')
+  assert.equal(response.text.length, 4_000)
+  assert.match(response.text, /command\/output excerpts truncated/u)
+  assert.match(response.text, /result-15/u)
+  assert.match(response.text, /#31 completed without Tool error/u)
+  assert.match(response.text, /Missing evidence means unverified, not failed/u)
+})
+
 test('passes cancellation as the third lstat argument', async () => {
   const controller = new AbortController()
   let received
@@ -242,4 +256,15 @@ test('releases session observation on success and query failure', async () => {
   const success = await createVerifyCommand(service, fsFixture()).handler({ agent: { id: 'agent-1' }, rawInput: '' })
   assert.equal(success.kind, 'success')
   assert.equal(disposals, 1)
+
+  const cleanupFailure = createVerifyCommand({
+    observeSession: async () => ({
+      header: { id: 'agent-1', cwd }, events: [],
+      [Symbol.dispose]: async () => { throw new Error('private cleanup failure') },
+    }),
+  }, fsFixture())
+  const cleanupResponse = await cleanupFailure.handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  assert.equal(cleanupResponse.kind, 'error')
+  assert.match(cleanupResponse.text, /could not be released safely/u)
+  assert.equal(cleanupResponse.text.includes('private cleanup failure'), false)
 })

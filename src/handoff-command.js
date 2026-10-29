@@ -35,11 +35,14 @@ function validResult(value, childId) {
  * Queue an explicitly new-task handoff, never a transparent child-session resume.
  * The command itself does not launch a worker or mutate task/Goal state.
  */
-export function createHandoffCommand(registry, { queueMessage } = {}) {
+export function createHandoffCommand(registry, { queueMessage, isParentCurrent } = {}) {
   if (!registry || (typeof registry.readAsync !== 'function' && typeof registry.read !== 'function')) {
     throw new TypeError('Task handoff requires the exact-Agent result registry.')
   }
   if (typeof queueMessage !== 'function') throw new TypeError('Task handoff requires a parent-message queue.')
+  if (isParentCurrent !== undefined && typeof isParentCurrent !== 'function') {
+    throw new TypeError('Task handoff requires a parent-liveness predicate when provided.')
+  }
 
   return {
     name: 'omo-handoff',
@@ -62,6 +65,11 @@ export function createHandoffCommand(registry, { queueMessage } = {}) {
         return result('error', 'Could not read the exact-Agent one-shot result; no handoff was queued.')
       }
       if (args?.signal?.aborted) return result('error', 'Task handoff was cancelled before it was queued.')
+      if (isParentCurrent) {
+        let current = false
+        try { current = isParentCurrent(agent) === true } catch {}
+        if (!current) return result('error', 'The parent Agent changed or was disposed; no handoff was queued.')
+      }
       if (!validResult(snapshot, input.childId)) {
         return result('error', 'Handoff requires a retained failed or incomplete one-shot result for this exact Agent and child ID.')
       }

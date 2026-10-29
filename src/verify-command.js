@@ -5,6 +5,7 @@ const MAX_MANIFEST_BYTES = 64 * 1024
 const MAX_SCRIPTS = 32
 const MAX_SCRIPT_CHARS = 512
 const MAX_EVENTS = 128
+const MAX_EVIDENCE_CHARS = 2_800
 const MAX_OUTPUT_CHARS = 4_000
 const CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
 const CONTROL_OR_BIDI_GLOBAL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu
@@ -127,7 +128,11 @@ function render(scripts, checks, sessionId) {
   }
   const disclaimer = 'Interpretation: a completed bash Tool result is not by itself a passing test. Check its exit code/output. Missing evidence means unverified, not failed. Run an explicitly chosen script through normal DSH tools/approvals, then rerun /omo verify.'
   const header = `Read-only verification evidence for session ${sessionId}. No tests were run and no Goal or workspace state was changed.`
-  const suffix = ['', ...evidenceLines, '', disclaimer].join('\n')
+  let evidenceText = evidenceLines.join('\n')
+  if (evidenceText.length > MAX_EVIDENCE_CHARS) {
+    evidenceText = `${evidenceText.slice(0, MAX_EVIDENCE_CHARS)}\n- … command/output excerpts truncated; the latest retained result and interpretation follow …`
+  }
+  const suffix = ['', evidenceText, '', disclaimer].join('\n')
   const scriptLines = ['', 'Suggested project scripts (inspect before running):']
   if (scripts.length === 0) scriptLines.push('- (no bounded test/check/build/lint scripts found)')
   for (const script of scripts) scriptLines.push(`- ${script.name}: ${script.command}`)
@@ -164,6 +169,8 @@ export function createVerifyCommand(sessionQuery, fs, workingDirectory, sessions
       }
 
       let observation
+      let response
+      let cleanupFailure = false
       try {
         observation = await sessionQuery.observeSession(agent.id, { signal, projectionMode: 'none' })
         assertActive(signal)
@@ -184,16 +191,18 @@ export function createVerifyCommand(sessionQuery, fs, workingDirectory, sessions
         // semantic-only documents without call arguments and cannot pair bash evidence.
         const events = observation.events.filter(event => event?.type === 'tool/call' || event?.type === 'tool/result')
         assertActive(signal)
-        return render(scripts, collectBashResults(events), agent.id)
+        response = render(scripts, collectBashResults(events), agent.id)
       } catch (error) {
-        return result('error', clean(error?.message, 500) || 'Could not inspect verification evidence safely.')
+        response = result('error', clean(error?.message, 500) || 'Could not inspect verification evidence safely.')
       } finally {
         try {
           if (typeof observation?.[Symbol.dispose] === 'function') await observation[Symbol.dispose]()
         } catch {
-          // Observation cleanup failure is deliberately not converted into a verification claim.
+          cleanupFailure = true
         }
       }
+      if (cleanupFailure) return result('error', 'The verification observation could not be released safely; no verification result was claimed.')
+      return response
     },
   }
 }

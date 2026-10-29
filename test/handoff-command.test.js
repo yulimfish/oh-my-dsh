@@ -87,6 +87,26 @@ test('validates input, Agent, cancellation, and registry contracts before queuei
   assert.throws(() => createHandoffCommand({ read() {} }, {}), /parent-message queue/u)
 })
 
+test('does not queue handoff after the exact parent is replaced during async result reading', async () => {
+  const agent = { id: 'parent-replaced' }
+  let release
+  let current = true
+  const queued = []
+  const command = createHandoffCommand({
+    async readAsync() {
+      await new Promise(resolve => { release = resolve })
+      current = false
+      return failed()
+    },
+  }, { queueMessage: (...args) => queued.push(args), isParentCurrent: () => current })
+  const pending = command.handler({ agent, rawInput: 'child-1' })
+  release()
+  const response = await pending
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /parent Agent changed or was disposed/u)
+  assert.equal(queued.length, 0)
+})
+
 test('returns a bounded error when the handoff queue rejects delivery', async () => {
   const command = createHandoffCommand({ read: () => failed() }, {
     async queueMessage() { throw new Error('private queue failure') },
