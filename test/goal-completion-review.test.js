@@ -141,6 +141,18 @@ test('isolates same-ID replacements and does not evict live Agent state at capac
   review.dispose()
 })
 
+test('does not consume a Goal review when steer is unavailable', async () => {
+  const { live, review } = harness()
+  const messages = []
+  const agent = { id: 'agent-steer-later' }
+  live.set(agent.id, agent)
+  await review.listener(payload(agent))
+  agent.steer = message => messages.push(message)
+  await review.listener(payload(agent, 2))
+  assert.equal(messages.length, 1, 'a later available steer still receives the one-shot review')
+  review.dispose()
+})
+
 test('contains steer and Goal service failures and stops future work after disposal', async () => {
   const { live, goal, review } = harness()
   const agent = { id: 'agent-failures', steer() { throw new Error('private driver failure') } }

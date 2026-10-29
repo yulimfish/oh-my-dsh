@@ -102,6 +102,7 @@ export function createGoalCompletionReview(goals, agents) {
     const goal = activeGoal(goals, position.agent)
     if (!goal || disposed || position.signal.aborted) return
 
+    if (typeof position.agent.steer !== 'function') return
     const key = `${goal.id}:${goal.revision}`
     const state = stateFor(position.agent, position.id)
     if (!state || state.reviewed === key) return
@@ -110,7 +111,7 @@ export function createGoalCompletionReview(goals, agents) {
     if (disposed || position.signal.aborted || disposedAgents.has(position.agent)
       || !exactLiveAgent(agents, position.id, position.agent)) return
     try {
-      if (typeof position.agent.steer === 'function') position.agent.steer(reviewMessage(goal))
+      position.agent.steer(reviewMessage(goal))
     } catch {
       // A failed/disposed driver closes normally; this advisory never forces a retry loop.
     }
