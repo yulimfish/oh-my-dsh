@@ -205,6 +205,16 @@ test('does not let an older todo result overwrite a newer plan when results arri
   assert.match(withFailure.render(), /new plan/u)
 })
 
+test('keeps the newest successful plan when a later call fails before an older result succeeds', () => {
+  const projection = createProgressProjection(sessionWith([
+    todoEvent(1, 'old-call', [{ content: 'old successful plan', status: 'in_progress' }]),
+    todoEvent(2, 'new-call', [{ content: 'new failed plan', status: 'in_progress' }]),
+    resultEvent(3, 'new-call', { error: true }),
+    resultEvent(4, 'old-call'),
+  ]))
+  assert.match(projection.render(), /old successful plan/u)
+})
+
 test('malformed session data and snapshot failures fail open', () => {
   const malformed = createProgressProjection({
     seq: 3,
