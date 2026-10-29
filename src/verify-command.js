@@ -123,14 +123,18 @@ function render(scripts, checks, sessionId) {
   const evidenceLines = [`Latest bash results observed in this session (${checks.length}):`]
   if (checks.length === 0) evidenceLines.push('- (no completed bash Tool results observed; this is not proof that checks were never run elsewhere)')
   for (const check of checks) {
-    evidenceLines.push(`- #${check.seq} ${check.isError ? 'FAIL/ERROR' : 'completed without Tool error'}: ${check.command}`)
+    evidenceLines.push(`- #${check.seq} ${check.isError ? 'FAIL/ERROR' : 'completed without Tool error'}: ${check.command.slice(0, 256)}`)
     if (check.text) evidenceLines.push(`  Output excerpt (untrusted): ${clean(check.text, 300)}`)
   }
   const disclaimer = 'Interpretation: a completed bash Tool result is not by itself a passing test. Check its exit code/output. Missing evidence means unverified, not failed. Run an explicitly chosen script through normal DSH tools/approvals, then rerun /omo verify.'
   const header = `Read-only verification evidence for session ${sessionId}. No tests were run and no Goal or workspace state was changed.`
   let evidenceText = evidenceLines.join('\n')
   if (evidenceText.length > MAX_EVIDENCE_CHARS) {
-    evidenceText = `${evidenceText.slice(0, MAX_EVIDENCE_CHARS)}\n- … command/output excerpts truncated; the latest retained result and interpretation follow …`
+    const marker = '- … older evidence omitted to retain the latest result and interpretation …'
+    const budget = MAX_EVIDENCE_CHARS - marker.length - 1
+    let end = evidenceText.lastIndexOf('\n- #', evidenceText.length - budget)
+    if (end < 0) end = evidenceText.length - budget
+    evidenceText = `${marker}${evidenceText.slice(end)}`
   }
   const suffix = ['', evidenceText, '', disclaimer].join('\n')
   const scriptLines = ['', 'Suggested project scripts (inspect before running):']

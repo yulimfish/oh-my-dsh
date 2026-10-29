@@ -178,8 +178,8 @@ test('preserves the latest result and disclaimer when command evidence is oversi
   }
   const response = await createVerifyCommand({ observeSession: async () => observation(events) }, fsFixture()).handler({ agent: { id: 'agent-1' }, rawInput: '' })
   assert.equal(response.kind, 'success')
-  assert.equal(response.text.length, 4_000)
-  assert.match(response.text, /command\/output excerpts truncated/u)
+  assert.ok(response.text.length <= 4_000)
+  assert.match(response.text, /older evidence omitted/u)
   assert.match(response.text, /result-15/u)
   assert.match(response.text, /#31 completed without Tool error/u)
   assert.match(response.text, /Missing evidence means unverified, not failed/u)
