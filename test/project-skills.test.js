@@ -2806,7 +2806,7 @@ test('format compatibility derives flat and directory names for absent or falsy 
   for (const [relative, , name] of documents) {
     const skill = await registry.get(name, { cwd })
     assert.ok(skill, relative)
-    assert.equal(skill.description, name === 'description-only' ? 'Explicit description' : `Project skill ${name}`)
+    assert.equal(skill.description, `(opencode-project - Skill) ${name === 'description-only' ? 'Explicit description' : `Project skill ${name}`}`)
     assert.ok(skill.content.includes('body.'))
   }
   assert.equal((await registry.get('indented-guide', { cwd })).content, 'body.\r\n\tindented line')
@@ -2872,6 +2872,44 @@ test('format compatibility preserves literal POSIX backslashes in canonical disp
   assert.equal((await registry.get('guide', { cwd: backslashCwd })).content, `Run ${canonicalDirectory}/scripts/search.py now.`)
 })
 
+test('compatibility descriptions reflect source scopes in list and get', async t => {
+  const cwd = await makeWorkspace(t)
+  const open = path.join(await makeWorkspace(t), 'skills')
+  const claude = path.join(await makeWorkspace(t), 'skills')
+  const agents = path.join(await makeWorkspace(t), 'skills')
+  const sources = [
+    [path.join(cwd, '.opencode/skills/open.md'), 'open-project', '(opencode-project - Skill)'],
+    [path.join(cwd, '.claude/skills/claude.md'), 'claude-project', '(project - Skill)'],
+    [path.join(cwd, '.agents/skills/agents.md'), 'agents-project', '(project - Skill)'],
+    [path.join(open, 'open.md'), 'open-user', '(opencode - Skill)'],
+    [path.join(claude, 'claude.md'), 'claude-user', '(user - Skill)'],
+    [path.join(agents, 'agents.md'), 'agents-user', '(user - Skill)'],
+  ]
+  for (const [file, name] of sources) await writeSkill(file, { name, description: 'Useful guidance' })
+  const { registry } = compatibilityRegistry(t, makeFileSystem().fs, {
+    projectSkillDirs: ['.opencode/skills', '.claude/skills', '.agents/skills'],
+    userOpenCodeSkillRoots: [open], userClaudeSkillRoots: [claude], userAgentsSkillRoots: [agents],
+  })
+  const snapshot = await registry.snapshot({ cwd })
+  assert.equal(snapshot.complete, true)
+  for (const [, name, prefix] of sources) {
+    assert.equal(snapshot.skills.find(skill => skill.name === name)?.description, `${prefix} Useful guidance`)
+    assert.equal((await registry.get(name, { cwd }))?.description, `${prefix} Useful guidance`)
+  }
+})
+
+test('formatted compatibility descriptions retain the 2000-character bound', async t => {
+  const cwd = await makeWorkspace(t)
+  const prefix = '(opencode-project - Skill) '
+  await writeSkill(path.join(cwd, '.opencode/skills/at-limit.md'), { name: 'at-limit', description: 'x'.repeat(2_000 - prefix.length) })
+  await writeSkill(path.join(cwd, '.opencode/skills/over-limit.md'), { name: 'over-limit', description: 'x'.repeat(2_001 - prefix.length) })
+  const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const snapshot = await registry.snapshot({ cwd })
+  assert.equal(snapshot.skills.find(skill => skill.name === 'at-limit')?.description.length, 2_000)
+  assert.equal(snapshot.skills.some(skill => skill.name === 'over-limit'), false)
+  assert.equal((await registry.get('at-limit', { cwd }))?.description.length, 2_000)
+})
+
 test('format compatibility is opt-in and validates its option without weakening strict documents', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'plain.md', 'Plain body.')
@@ -2884,6 +2922,7 @@ test('format compatibility is opt-in and validates its option without weakening 
     const provider = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'], ...options })
     t.after(() => provider.dispose())
     assert.deepEqual((await registry.snapshot({ cwd })).skills.map(skill => skill.name), ['strict-skill'])
+    assert.equal((await registry.get('strict-skill', { cwd }))?.description, 'Project skill')
   }
   for (const value of [null, 'true', 1]) {
     const { fs } = makeFileSystem()

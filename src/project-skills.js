@@ -398,6 +398,18 @@ function isSafeEntryName(name) {
     && !name.includes('\0')
 }
 
+function compatibleSkillDescription(description, scope) {
+  const formatted = `(${scope} - Skill) ${description}`
+  if (formatted.length > 2_000) throw new SkillFormatError('skill description exceeds the 2000-character limit after scope formatting')
+  return formatted
+}
+
+function skillDescriptionScope(rootPath, userRoot) {
+  if (userRoot?.source === 'user-opencode') return 'opencode'
+  if (userRoot) return 'user'
+  return rootPath === '.opencode/skills' ? 'opencode-project' : 'project'
+}
+
 function matchesCandidate(skill, candidate, disabledSkills) {
   const disabled = disabledSkills.has(skill.name)
   const invocation = {
@@ -774,7 +786,9 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     }
     return {
       name: skill.name,
-      description: skill.description,
+      description: formatCompatibility
+        ? compatibleSkillDescription(skill.description, skillDescriptionScope(rootPath, userRoot))
+        : skill.description,
       ...(skill.whenToUse === undefined ? {} : { whenToUse: skill.whenToUse }),
       path: fileTarget.displayPath,
       provider: PROJECT_SKILL_PROVIDER,
@@ -1144,7 +1158,9 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         }
         throwIfAborted(signal)
         if (locator.observationRevision !== observationRevision) return undefined
-        const candidateMatches = matchesCandidate(skill, candidate, disabledSkills)
+        const candidateMatches = matchesCandidate(formatCompatibility
+          ? { ...skill, description: compatibleSkillDescription(skill.description, skillDescriptionScope(locator.rootPath, userRoot)) }
+          : skill, candidate, disabledSkills)
         if (!candidateMatches) {
           invalidateObservation()
           return undefined
