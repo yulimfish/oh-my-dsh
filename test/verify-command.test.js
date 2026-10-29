@@ -95,6 +95,21 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
   ])
   assert.equal(nonText[0].text, '')
   assert.equal(nonText[0].hasNonText, true)
+  for (const malformed of ['{bad json', JSON.stringify({ command: 42 }), JSON.stringify({ command: 'x'.repeat(4_097) })]) {
+    assert.deepEqual(collectBashResults([
+      call(1, 'malformed-reuse', 'pnpm test -- first'),
+      { seq: 2, type: 'tool/call', data: { callId: 'malformed-reuse', name: 'bash', arguments: malformed } },
+      resultEvent(3, 'malformed-reuse', 'ambiguous result'),
+    ]), [], 'malformed or oversized reuse is quarantined before parsing')
+  }
+  const overflow = [call(1, 'target', 'pnpm test -- first'), call(2, 'target', 'pnpm test -- second')]
+  let seq = 3
+  for (let index = 0; index < 256; index += 1) {
+    const id = `overflow-${index}`
+    overflow.push(call(seq++, id, 'first'), call(seq++, id, 'second'))
+  }
+  overflow.push(call(seq++, 'target', 'pnpm test -- later'), resultEvent(seq++, 'target', 'ambiguous stale result'))
+  assert.deepEqual(collectBashResults(overflow), [], 'tombstone overflow cannot re-admit an ambiguous ID')
 })
 
 test('reports scripts and latest evidence without executing tests or changing state', async () => {
