@@ -123,6 +123,23 @@ test('uses the RC2 Disposable symbol and releases an invalid observation lease',
   assert.deepEqual(fixture.searches, [])
 })
 
+test('session snippets truncate by Unicode code point without splitting emoji', async () => {
+  for (const [snippet, expected] of [
+    ['a'.repeat(598) + '😀😀', 'a'.repeat(598) + '😀😀'],
+    ['a'.repeat(598) + '😀😀x', 'a'.repeat(598) + '😀…'],
+    ['😀'.repeat(601), '😀'.repeat(599) + '…'],
+  ]) {
+    const fixture = makeSessionQuery({ page: { items: [searchHit({ snippet })] } })
+    const tool = createSessionSearchTool(fixture.sessionQuery)
+    const args = { query: 'emoji', includeOtherProjects: true }
+    const value = await tool.execute(args, { agent: { id: 'current' } })
+    assert.equal(value.results[0].snippet, expected)
+    assert.equal(value.results[0].snippet.isWellFormed(), true)
+    assert.ok(Array.from(value.results[0].snippet).length <= 600)
+    assert.equal(tool.output.render(args, value)[0].text.isWellFormed(), true)
+  }
+})
+
 test('bounds query, limit, cursor, and scope arguments before any service calls', async () => {
   const fixture = makeSessionQuery()
   const tool = createSessionSearchTool(fixture.sessionQuery)
@@ -157,6 +174,21 @@ test('bounds returned excerpts and omits absent workspace metadata', async () =>
   assert.doesNotMatch(result.results[0].snippet, /\p{Bidi_Control}/u)
   assert.equal(result.results[0].cwd, undefined)
   assert.equal(result.hasMore, false)
+})
+
+test('returned session cursors obey input validation and valid opaque cursors round-trip unchanged', async () => {
+  for (const nextCursor of ['page-\u202e2', 'page-\u00012']) {
+    const fixture = makeSessionQuery({ page: { items: [], nextCursor } })
+    await assert.rejects(createSessionSearchTool(fixture.sessionQuery).execute({ query: 'cursor', includeOtherProjects: true }), /invalid session search page/u)
+  }
+  const nextCursor = ' opaque:page-2== '
+  const fixture = makeSessionQuery({ page: { items: [], nextCursor } })
+  const tool = createSessionSearchTool(fixture.sessionQuery)
+  const first = await tool.execute({ query: 'cursor', includeOtherProjects: true })
+  assert.equal(first.nextCursor, nextCursor)
+  assert.ok(tool.output.render({}, first)[0].text.includes(`cursor=${JSON.stringify(nextCursor)}`))
+  await tool.execute({ query: 'cursor', cursor: first.nextCursor, includeOtherProjects: true })
+  assert.equal(fixture.searches[1].request.cursor, nextCursor)
 })
 
 test('sanitizes service errors, propagates cancellation, and rejects malformed pages', async () => {

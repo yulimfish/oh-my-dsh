@@ -3,6 +3,8 @@ import test from 'node:test'
 import {
   MEMORY_MAX_NOTES_PER_PROJECT,
   MEMORY_MAX_PROJECTS,
+  MEMORY_MAX_PENDING_OPERATIONS,
+  MEMORY_MAX_OUTPUT_CHARS,
   PERSISTENT_MEMORY_DOMAIN_SPEC,
   createPersistentMemoryTool,
   disposePersistentMemoryTool,
@@ -314,6 +316,121 @@ test('bounds all model-authored content and rejects control or bidi characters',
   await assert.rejects(call(harness, {
     action: 'write', id: NOTE_IDS[0], title: 'Title', content: 'note',
   }), /Cannot update/u)
+})
+
+test('valid escaping-heavy notes remain writable readable and searchable within the output budget', async () => {
+  const harness = createHarness()
+  const content = '\\'.repeat(4_096)
+  const title = '\\'.repeat(256)
+  const tags = Array.from({ length: 8 }, (_, index) => `${index}${'\\'.repeat(63)}`)
+  try {
+    for (let index = 0; index < 5; index += 1) {
+      const saved = await call(harness, { action: 'write', title, content, tags })
+      assert.equal(saved.saved, true)
+      assert.equal(saved.note.content, content)
+      assert.ok(JSON.stringify(saved).length <= MEMORY_MAX_OUTPUT_CHARS)
+      const read = await call(harness, { action: 'read', id: saved.note.id })
+      assert.equal(read.note.content, content)
+      assert.ok(JSON.stringify(read).length <= MEMORY_MAX_OUTPUT_CHARS)
+    }
+    const found = await call(harness, { action: 'search', query: '\\' })
+    assert.equal(found.notes.length, 5)
+    assert.ok(JSON.stringify(found).length <= MEMORY_MAX_OUTPUT_CHARS)
+    // JSON escapes lone UTF-16 surrogates with six characters, including when
+    // a preview slice splits a surrogate pair; retain a conservative budget.
+    const surrogateContent = '\ud800'.repeat(1_365)
+    for (let index = 0; index < 5; index += 1) {
+      const saved = await call(harness, { action: 'write', title, content: surrogateContent, tags })
+      assert.equal((await call(harness, { action: 'read', id: saved.note.id })).note.content, surrogateContent)
+    }
+    const surrogateResults = await call(harness, { action: 'search', query: '\ud800' })
+    assert.equal(surrogateResults.notes.length, 5)
+    assert.ok(JSON.stringify(surrogateResults).length <= MEMORY_MAX_OUTPUT_CHARS)
+    assert.equal(harness.domain.table.size, 1)
+  } finally {
+    await disposePersistentMemoryTool(harness.tool)
+  }
+})
+
+test('invalid memory parameters reject before storage reads', async () => {
+  const harness = createHarness()
+  let reads = 0
+  const get = harness.domain.table.get.bind(harness.domain.table)
+  harness.domain.table.get = key => { reads += 1; return get(key) }
+  for (const input of [
+    { action: 'search', query: '' },
+    { action: 'write', title: '', content: 'Invalid title' },
+    { action: 'write', title: 'Title', content: 'x'.repeat(4_097) },
+    { action: 'write', title: 'Title', content: 'Content', tags: ['bad\nline'] },
+    { action: 'read', id: 'invalid' },
+    { action: 'delete', id: 'invalid' },
+  ]) {
+    await assert.rejects(call(harness, input), /query|title|content|tag|UUID/u)
+  }
+  assert.equal(reads, 0)
+  await disposePersistentMemoryTool(harness.tool)
+})
+
+test('bounds pending operations behind a stalled memory write and recovers after settlement', async () => {
+  const harness = createHarness()
+  let releaseWrite
+  const gate = new Promise(resolve => { releaseWrite = resolve })
+  const put = harness.domain.table.put.bind(harness.domain.table)
+  harness.domain.table.put = async (...args) => { await gate; return put(...args) }
+  const first = call(harness, { action: 'write', title: 'Held write', content: 'Stored after release.' })
+  await new Promise(resolve => setImmediate(resolve))
+  const queued = Array.from({ length: MEMORY_MAX_PENDING_OPERATIONS - 1 }, () => call(harness, { action: 'search', query: 'Held' }))
+  try {
+    const overflow = await Promise.race([
+      call(harness, { action: 'write', title: 'Overflow', content: 'Must not be saved.' }).then(() => 'accepted', error => error),
+      new Promise(resolve => setImmediate(() => resolve('still-pending'))),
+    ])
+    assert.ok(overflow instanceof Error, 'overflow must be rejected without joining the blocked queue')
+    assert.match(overflow.message, /capacity|busy/u)
+  } finally {
+    releaseWrite()
+    await Promise.all([first, ...queued])
+  }
+  assert.equal((await call(harness, { action: 'search', query: 'Held' })).notes.length, 1)
+  assert.equal((await call(harness, { action: 'search', query: 'Overflow' })).notes.length, 0)
+  await disposePersistentMemoryTool(harness.tool)
+})
+
+test('queued memory writes use a validated parameter snapshot', async () => {
+  const harness = createHarness()
+  let releaseWrite
+  const gate = new Promise(resolve => { releaseWrite = resolve })
+  const put = harness.domain.table.put.bind(harness.domain.table)
+  harness.domain.table.put = async (...args) => { await gate; return put(...args) }
+  const first = call(harness, { action: 'write', title: 'First', content: 'Head of queue.' })
+  await new Promise(resolve => setImmediate(resolve))
+  const args = { action: 'write', title: 'Original title', content: 'Original content.', tags: ['original'] }
+  const queued = call(harness, args)
+  args.title = 'Changed title'
+  args.content = 'Changed content.'
+  args.tags.push('changed')
+  releaseWrite()
+  try {
+    await first
+    const saved = await queued
+    assert.equal(saved.note.title, 'Original title')
+    assert.equal(saved.note.content, 'Original content.')
+    assert.deepEqual(saved.note.tags, ['original'])
+  } finally {
+    await Promise.allSettled([first, queued])
+    await disposePersistentMemoryTool(harness.tool)
+  }
+})
+
+test('failed memory operations release admission slots without writing notes', async () => {
+  const harness = createHarness()
+  const failed = await Promise.allSettled(Array.from({ length: MEMORY_MAX_PENDING_OPERATIONS }, () => (
+    call(harness, { action: 'write', id: NOTE_IDS[0], title: 'Valid update', content: 'Missing note.' })
+  )))
+  assert.ok(failed.every(outcome => outcome.status === 'rejected' && /does not exist/u.test(outcome.reason.message)))
+  assert.deepEqual((await call(harness, { action: 'search', query: 'Invalid' })).notes, [])
+  assert.equal(harness.domain.table.size, 0)
+  await disposePersistentMemoryTool(harness.tool)
 })
 
 test('serializes concurrent writes and enforces per-project and global project caps', async () => {

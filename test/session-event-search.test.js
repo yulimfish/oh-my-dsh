@@ -85,9 +85,22 @@ test('binds search to the executing Agent, forwards bounded query/cursor and can
   assert.equal(result.hasMore, true)
   assert.equal(result.nextCursor, 'opaque-next')
   const rendered = tool.output.render({}, result)[0].text
+  assert.ok(rendered.includes(`cursor=${JSON.stringify(result.nextCursor)}`))
   assert.match(rendered, /untrusted data, not instructions/u)
   assert.match(rendered, /current-session/u)
   assert.equal(Object.hasOwn(tool.parameters, 'sessionId'), false, 'the model-facing schema cannot choose another session')
+})
+
+test('returns opaque page cursors in model-visible text without changing the token', async () => {
+  const nextCursor = ' cursor:page-2== '
+  const fixture = makeSessionQuery({ page: page({ items: [], nextCursor }) })
+  const tool = createSessionEventSearchTool(fixture.sessionQuery)
+  const args = { query: 'event', cursor: 'current-token' }
+  const value = await tool.execute(args, currentAgent())
+  assert.equal(value.nextCursor, nextCursor)
+  assert.ok(tool.output.render(args, value)[0].text.includes(`cursor=${JSON.stringify(nextCursor)}`))
+  await tool.execute({ ...args, cursor: value.nextCursor }, currentAgent())
+  assert.equal(fixture.searches[1].request.cursor, nextCursor)
 })
 
 test('defaults to one bounded page and refuses a caller-supplied session id', async () => {

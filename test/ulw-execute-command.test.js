@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   buildUlwExecuteDirective,
+  formatUlwWorktreeMetadata,
+  normalizeUlwWorktreeMetadata,
   parseUlwExecuteInput,
   ULW_EXECUTE_COMMAND_HINT,
 } from '../src/ulw-execute-command.js'
@@ -45,9 +47,23 @@ test('rejects PR and shipping flags before queuing', () => {
   }
 })
 
+test('normalizes and JSON-quotes bounded Host worktree metadata', () => {
+  const metadata = { path: '/workspace/.worktrees/plan-a', branch: 'plan-a', baseCommit: 'abc123' }
+  assert.deepEqual(normalizeUlwWorktreeMetadata(metadata), metadata)
+  assert.equal(formatUlwWorktreeMetadata(metadata), 'path="/workspace/.worktrees/plan-a"; branch="plan-a"; baseCommit="abc123"')
+  assert.equal(formatUlwWorktreeMetadata({
+    path: '/workspace/line\nbreak\u202e', branch: 'plan-a', baseCommit: 'abc123',
+  }), 'path="/workspace/line\\nbreak\\u202e"; branch="plan-a"; baseCommit="abc123"')
+  assert.equal(normalizeUlwWorktreeMetadata({ path: 'x'.repeat(4_097), branch: 'b', baseCommit: 'c' }), undefined)
+  assert.equal(normalizeUlwWorktreeMetadata({ path: '\u202e'.repeat(2_000), branch: 'b', baseCommit: 'c' }), undefined, 'escaped metadata also has a serialized-output cap')
+  assert.equal(normalizeUlwWorktreeMetadata({ path: '/repo', branch: 'b'.repeat(257), baseCommit: 'c' }), undefined)
+  assert.equal(normalizeUlwWorktreeMetadata({ path: '/repo', branch: 'b', baseCommit: 'c'.repeat(257) }), undefined)
+})
+
 test('directive is explicit prompt-only guidance with no OMO lifecycle or external operations', () => {
   const directive = buildUlwExecuteDirective()
-  const worktreeDirective = buildUlwExecuteDirective({ worktree: true })
+  const worktreeDetails = { path: '/workspace/.worktrees/plan-a', branch: 'plan-a', baseCommit: 'abc123' }
+  const worktreeDirective = buildUlwExecuteDirective({ worktree: true, worktreeDetails })
   assert.match(directive, /Prompt-only DSH adapter/u)
   assert.match(directive, /existing project plan/u)
   assert.match(directive, /untrusted data/u)
@@ -57,7 +73,12 @@ test('directive is explicit prompt-only guidance with no OMO lifecycle or extern
   assert.match(directive, /does not .*resume plans/u)
   assert.match(directive, /boulder state or notepads/u)
   assert.match(directive, /Do not create a worktree/u)
+  assert.doesNotMatch(directive, /Host-returned metadata/u)
   assert.match(worktreeDirective, /explicitly requested --worktree/u)
-  assert.match(worktreeDirective, /already been created and selected as this Agent’s current working directory/u)
+  assert.match(worktreeDirective, /created and selected this retained DSH worktree as this Agent’s current working directory/u)
+  assert.match(worktreeDirective, /path="\/workspace\/\.worktrees\/plan-a"; branch="plan-a"; baseCommit="abc123"/u)
+  assert.match(worktreeDirective, /no worktree-removal service/u)
+  assert.match(worktreeDirective, /do not run git worktree remove or manually delete this checkout/u)
   assert.match(worktreeDirective, /do not commit, push, open a PR, ship, or merge automatically/u)
+  assert.throws(() => buildUlwExecuteDirective({ worktree: true }), /bounded Host worktree metadata/u)
 })

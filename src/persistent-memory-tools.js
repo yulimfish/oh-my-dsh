@@ -11,7 +11,14 @@ export const MEMORY_MAX_TAGS = 8
 export const MEMORY_MAX_TAG_BYTES = 64
 export const MEMORY_MAX_QUERY_BYTES = 256
 export const MEMORY_MAX_RESULTS = 5
-export const MEMORY_MAX_OUTPUT_CHARS = 8_192
+const MEMORY_MAX_EXCERPT_CHARS = 320
+// JSON may escape a UTF-16 code unit as six characters. Cover either a full
+// note or every bounded search row, plus fixed keys/UUIDs/timestamps/framing.
+export const MEMORY_MAX_OUTPUT_CHARS = 6 * Math.max(
+  MEMORY_MAX_CONTENT_BYTES + MEMORY_MAX_TITLE_BYTES + MEMORY_MAX_TAGS * MEMORY_MAX_TAG_BYTES,
+  MEMORY_MAX_RESULTS * (MEMORY_MAX_EXCERPT_CHARS + MEMORY_MAX_TITLE_BYTES + MEMORY_MAX_TAGS * MEMORY_MAX_TAG_BYTES),
+) + 4_096
+export const MEMORY_MAX_PENDING_OPERATIONS = 64
 
 const MEMORY_DOMAIN_READY_TIMEOUT_MS = 15_000
 const MAX_CWD_BYTES = 4_096
@@ -179,6 +186,26 @@ function normalizeNoteId(value) {
   return value
 }
 
+function normalizeMemoryRequest(args) {
+  const action = args?.action
+  if (!['search', 'read', 'write', 'delete'].includes(action)) {
+    throw new TypeError('action must be search, read, write, or delete.')
+  }
+  if (action === 'search') {
+    return Object.freeze({ action, query: assertText(args.query, 'query', MEMORY_MAX_QUERY_BYTES).trim() })
+  }
+  if (action === 'write') {
+    return Object.freeze({
+      action,
+      title: normalizeTitle(args.title),
+      content: normalizeContent(args.content),
+      tags: Object.freeze(normalizeTags(args.tags)),
+      id: args.id === undefined ? undefined : normalizeNoteId(args.id),
+    })
+  }
+  return Object.freeze({ action, id: normalizeNoteId(args.id) })
+}
+
 function assertNow(now) {
   const time = now()
   if (!Number.isSafeInteger(time) || time < 0) throw new TypeError('memory clock returned an invalid timestamp.')
@@ -221,7 +248,14 @@ function noteView(note, { content = false, query } = {}) {
   if (content) return { ...base, content: note.content }
   const match = typeof query === 'string' ? note.content.toLowerCase().indexOf(query.toLowerCase()) : -1
   const start = match > 120 ? match - 120 : 0
-  return { ...base, excerpt: note.content.slice(start, start + 320) }
+  return { ...base, excerpt: note.content.slice(start, start + MEMORY_MAX_EXCERPT_CHARS) }
+}
+
+function boundedMemoryOutput(output) {
+  if (JSON.stringify(output).length > MEMORY_MAX_OUTPUT_CHARS) {
+    throw new Error('Persistent memory output exceeded the configured response bound.')
+  }
+  return output
 }
 
 function serialize(operations, operation) {
@@ -380,16 +414,19 @@ export function createPersistentMemoryTool({ agents, sessions, domain, domainPro
   if (typeof idFactory !== 'function') throw new TypeError('persistent memory Tool requires an ID generator.')
 
   let queue = Promise.resolve()
+  let pendingOperations = 0
   let disposed = false
   let drainPromise
   async function execute(args, exec) {
     if (disposed) throw new Error('Persistent memory Tool is disposed.')
     assertNotAborted(exec?.signal)
     const key = workspaceKeyFor(exec, agents, sessions)
-    const action = args?.action
-    if (!['search', 'read', 'write', 'delete'].includes(action)) {
-      throw new TypeError('action must be search, read, write, or delete.')
+    const request = normalizeMemoryRequest(args)
+    const { action } = request
+    if (pendingOperations >= MEMORY_MAX_PENDING_OPERATIONS) {
+      throw new Error('Persistent memory is busy: pending operation capacity is full; retry after existing work settles.')
     }
+    pendingOperations += 1
     const { result, next } = serialize(queue, async () => {
       assertNotAborted(exec?.signal)
       const activeTable = await awaitWithSignal(getTable(), exec?.signal, domainReadyTimeoutMs)
@@ -398,9 +435,7 @@ export function createPersistentMemoryTool({ agents, sessions, domain, domainPro
       assertNotAborted(exec?.signal)
       const record = projectRecord(storedValue)
       if (action === 'search') {
-        const rawQuery = assertText(args.query, 'query', MEMORY_MAX_QUERY_BYTES)
-        const query = rawQuery.trim()
-        if (!query) throw new TypeError('query must not be empty.')
+        const { query } = request
         const needle = query.toLocaleLowerCase('en-US')
         const notes = record.notes
           .filter(note => note.title.toLocaleLowerCase('en-US').includes(needle)
@@ -413,16 +448,13 @@ export function createPersistentMemoryTool({ agents, sessions, domain, domainPro
       }
 
       if (action === 'read') {
-        const id = normalizeNoteId(args.id)
+        const { id } = request
         const note = record.notes.find(item => item.id === id)
         return { action, matched: note !== undefined, ...(note ? { note: noteView(note, { content: true }) } : {}) }
       }
 
       if (action === 'write') {
-        const title = normalizeTitle(args.title)
-        const content = normalizeContent(args.content)
-        const tags = normalizeTags(args.tags)
-        const id = args.id === undefined ? undefined : normalizeNoteId(args.id)
+        const { title, content, tags, id } = request
         const existingIndex = id === undefined ? -1 : record.notes.findIndex(note => note.id === id)
         if (id !== undefined && existingIndex < 0) throw new Error('Cannot update a memory note that does not exist in this project.')
         if (existingIndex < 0 && record.notes.length >= MEMORY_MAX_NOTES_PER_PROJECT) {
@@ -446,12 +478,13 @@ export function createPersistentMemoryTool({ agents, sessions, domain, domainPro
         else notes[existingIndex] = note
         const nextRecord = { version: 1, updatedAt: time, notes }
         if (!ProjectMemorySchema.safeParse(nextRecord).success) throw new TypeError('project memory failed schema validation.')
+        const output = boundedMemoryOutput({ action, saved: true, note: noteView(note, { content: true }) })
         assertNotAborted(exec?.signal)
         await writeTableValue(activeTable, key, nextRecord, onStorageError)
-        return { action, saved: true, note: noteView(note, { content: true }) }
+        return output
       }
 
-      const id = normalizeNoteId(args.id)
+      const { id } = request
       const noteIndex = record.notes.findIndex(note => note.id === id)
       if (noteIndex < 0) return { action, deleted: false }
       const notes = record.notes.filter((_, index) => index !== noteIndex)
@@ -461,11 +494,12 @@ export function createPersistentMemoryTool({ agents, sessions, domain, domainPro
       return { action, deleted: true }
     })
     queue = next
-    const output = await result
-    if (JSON.stringify(output).length > MEMORY_MAX_OUTPUT_CHARS) {
-      throw new Error('Persistent memory output exceeded the configured response bound.')
+    try {
+      return boundedMemoryOutput(await result)
+    } finally {
+      // A started mutation owns its slot until the actual KV operation settles.
+      pendingOperations -= 1
     }
-    return output
   }
 
   const tool = defineTool({
