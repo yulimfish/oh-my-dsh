@@ -225,6 +225,14 @@ test('preserves exact child identity when preparing handoff evidence', async () 
   assert.match(queued[0][1], /child-unicode-任务/u)
 })
 
+test('does not hand off a completed result as recovery work', async () => {
+  const { agent, queued, command } = fixture(failed({ status: 'completed', output: 'finished' }))
+  const response = await command.handler({ agent, rawInput: 'child-1 continue' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /failed or incomplete/u)
+  assert.equal(queued.length, 0)
+})
+
 test('sanitizes untrusted output and preserves bounded next-step text', async () => {
   const { agent, queued, command } = fixture(failed({ output: `line one\nline two\u202e`, stopReason: 'failed' }))
   const response = await command.handler({ agent, rawInput: `child-1 next\u202e` })
