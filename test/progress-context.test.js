@@ -222,6 +222,24 @@ test('does not attribute a reused todo call ID result to the newer pending plan'
   assert.match(independent.render(), /independent plan/u)
 })
 
+test('quarantines a todo call ID reused after its first result completed', () => {
+  const projection = createProgressProjection(sessionWith([
+    todoEvent(1, 'completed-reuse', [{ content: 'first completed plan', status: 'in_progress' }]),
+    resultEvent(2, 'completed-reuse'),
+    todoEvent(3, 'completed-reuse', [{ content: 'second ambiguous plan', status: 'in_progress' }]),
+    resultEvent(4, 'completed-reuse'),
+  ]))
+  assert.equal(projection.render(), '')
+  const unrelated = createProgressProjection(sessionWith([
+    todoEvent(1, 'first', [{ content: 'first plan', status: 'pending' }]),
+    resultEvent(2, 'first'),
+    todoEvent(3, 'second', [{ content: 'second current plan', status: 'in_progress' }]),
+    resultEvent(4, 'second'),
+    todoEvent(5, 'first', [{ content: 'ambiguous old plan', status: 'pending' }]),
+  ]))
+  assert.match(unrelated.render(), /second current plan/u)
+})
+
 test('keeps the newest successful plan when a later call fails before an older result succeeds', () => {
   const projection = createProgressProjection(sessionWith([
     todoEvent(1, 'old-call', [{ content: 'old successful plan', status: 'in_progress' }]),

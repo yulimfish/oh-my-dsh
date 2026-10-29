@@ -50,7 +50,10 @@ function parseTodos(argumentText) {
 }
 
 function freshProjection(session, offset = 0) {
-  return { session, offset, current: undefined, pending: new Map(), latestTodoCallSeq: -1, ambiguousCallIds: new Set() }
+  return {
+    session, offset, current: undefined, pending: new Map(), latestTodoCallSeq: -1,
+    ambiguousCallIds: new Set(), completedCallIds: new Set(), currentCallId: undefined,
+  }
 }
 
 /** Incrementally fold the latest successful native todo_write from durable session events. */
@@ -91,9 +94,13 @@ export function createProgressProjection(session) {
           if (typeof callId !== 'string' || callId.length === 0) continue
           const todos = parseTodos(event.data.arguments)
           if (state.ambiguousCallIds.has(callId)) continue
-          if (state.pending.has(callId)) {
+          if (state.pending.has(callId) || state.completedCallIds.has(callId)) {
             state.pending.delete(callId)
             state.ambiguousCallIds.add(callId)
+            if (state.currentCallId === callId) {
+              state.current = undefined
+              state.currentCallId = undefined
+            }
             while (state.ambiguousCallIds.size > MAX_PENDING_TODO_CALLS) {
               state.ambiguousCallIds.delete(state.ambiguousCallIds.keys().next().value)
             }
@@ -109,10 +116,15 @@ export function createProgressProjection(session) {
         if (typeof callId !== 'string' || state.ambiguousCallIds.has(callId) || !state.pending.has(callId)) continue
         const pendingTodo = state.pending.get(callId)
         state.pending.delete(callId)
+        state.completedCallIds.add(callId)
+        while (state.completedCallIds.size > MAX_PENDING_TODO_CALLS) {
+          state.completedCallIds.delete(state.completedCallIds.keys().next().value)
+        }
         if (event.data.error === undefined && message?.isError !== true
           && pendingTodo.seq > state.latestTodoCallSeq) {
           state.latestTodoCallSeq = pendingTodo.seq
           state.current = pendingTodo.todos
+          state.currentCallId = callId
         }
       }
       state.offset = session.seq
