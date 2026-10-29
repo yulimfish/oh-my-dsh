@@ -223,6 +223,7 @@ const baseConfig = {
   enableGoalTools: false,
   enableFocusChain: false,
   enableRepeatedCallAdvisory: false,
+  enableProgressContext: false,
   enableGoalUseReminder: false,
   enableAgentUsageReminder: false,
   enableCategorySkillReminder: false,
@@ -434,6 +435,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableFocusChain: true }).enableFocusChain, true)
   assert.equal(Config({}).enableRepeatedCallAdvisory, false)
   assert.equal(Config({ enableRepeatedCallAdvisory: true }).enableRepeatedCallAdvisory, true)
+  assert.equal(Config({}).enableProgressContext, false)
+  assert.equal(Config({ enableProgressContext: true }).enableProgressContext, true)
   assert.equal(Config({}).enableGoalUseReminder, false)
   assert.equal(Config({ enableGoalUseReminder: true }).enableGoalUseReminder, true)
   assert.equal(Config({}).enableAgentUsageReminder, false)
@@ -3476,6 +3479,47 @@ test('mounts repeated-call soft advisory only with exact Agent and event prerequ
   assert.equal(typeof fixture.events.get('agent/disposed'), 'function')
   assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /repeatedCallAdvisory=enabled/u)
   const effect = fixture.effects.find(entry => entry.label === 'dsh-omo repeated-call advisory')
+  assert.equal(typeof effect?.dispose, 'function')
+  await effect.dispose()
+})
+
+test('mounts session-log progress context only with exact service prerequisites', async () => {
+  const agents = { get: () => undefined }
+  const sessions = { get: () => undefined }
+  const systemPrompt = { context: () => () => {} }
+
+  const missingAgents = makeContext({ services: { sessions, systemPrompt } })
+  assert.throws(
+    () => apply(missingAgents.ctx, { ...baseConfig, enableProgressContext: true }),
+    /enableProgressContext requires DSH agents\.get, sessions\.get, systemPrompt\.context, Cordis ctx\.on, and ctx\.effect/u,
+  )
+  assert.equal(missingAgents.tools.size, 0)
+
+  const missingSessions = makeContext({ services: { agents, systemPrompt } })
+  assert.throws(
+    () => apply(missingSessions.ctx, { ...baseConfig, enableProgressContext: true }),
+    /enableProgressContext requires DSH sessions\.get/u,
+  )
+  assert.equal(missingSessions.tools.size, 0)
+
+  const missingEvents = makeContext({ services: { agents, sessions, systemPrompt } })
+  missingEvents.ctx.on = undefined
+  assert.throws(
+    () => apply(missingEvents.ctx, { ...baseConfig, enableProgressContext: true }),
+    /enableProgressContext requires DSH agents\.get, sessions\.get, systemPrompt\.context, Cordis ctx\.on, and ctx\.effect/u,
+  )
+  assert.equal(missingEvents.tools.size, 0)
+
+  const disabled = makeContext({ services: { agents, sessions, systemPrompt } })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('agent/created'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /progressContext=disabled/u)
+
+  const fixture = makeContext({ services: { agents, sessions, systemPrompt } })
+  apply(fixture.ctx, { ...baseConfig, enableProgressContext: true })
+  assert.equal(typeof fixture.events.get('agent/created'), 'function')
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /progressContext=enabled/u)
+  const effect = fixture.effects.find(entry => entry.label === 'dsh-omo progress context')
   assert.equal(typeof effect?.dispose, 'function')
   await effect.dispose()
 })

@@ -224,15 +224,24 @@ test('plugin disposal joins an in-flight same-ID replacement cleanup', async () 
   const { live, service } = makeService()
   const feature = createFocusChain({ get: () => activeGoal() }, service)
   const original = makeAgent('same-id')
+  let contextCalls = 0
+  original.ctx.systemPrompt.context = () => {
+    contextCalls += 1
+    return () => { contextCalls += 1; original.calls.contextDisposals += 1 }
+  }
   live.set(original.id, original)
   let releaseTracking
   const trackingReady = new Promise(resolve => { releaseTracking = resolve })
   let trackingStartedResolve
   const trackingStarted = new Promise(resolve => { trackingStartedResolve = resolve })
+  let trackingDispose
   original.ctx.effect = execute => {
-    const cleanup = execute()
-    trackingStartedResolve()
-    return async () => { await trackingReady; cleanup?.() }
+    execute()
+    trackingDispose = async () => {
+      trackingStartedResolve()
+      await trackingReady
+    }
+    return trackingDispose
   }
   await notify(feature, original)
   const replacement = makeAgent('same-id')
@@ -242,12 +251,13 @@ test('plugin disposal joins an in-flight same-ID replacement cleanup', async () 
   const pluginCleanup = feature.dispose()
   let settled = false
   void pluginCleanup.then(() => { settled = true })
-  await new Promise(resolve => setImmediate(resolve))
-  assert.equal(settled, false)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(settled, false, `cleanup settled=${settled}; contextDisposals=${original.calls.contextDisposals}`)
   assert.equal(original.calls.contextDisposals, 0)
   releaseTracking()
   await Promise.all([replacing, pluginCleanup])
   assert.equal(original.calls.contextDisposals, 1)
+  assert.equal(contextCalls, 2, 'registration and exactly one context disposal')
   assert.equal(replacement.calls.contexts.length, 0)
 })
 
@@ -255,27 +265,38 @@ test('plugin disposal joins Agent-scope cleanup and removes its prompt context',
   const { live, service } = makeService()
   const feature = createFocusChain({ get: () => activeGoal() }, service)
   const agent = makeAgent('overlapping-cleanup')
+  let contextCalls = 0
+  agent.ctx.systemPrompt.context = entry => {
+    contextCalls += 1
+    agent.calls.contexts.push(entry)
+    return () => { contextCalls += 1; agent.calls.contextDisposals += 1 }
+  }
   live.set(agent.id, agent)
   let releaseTracking
   const trackingReady = new Promise(resolve => { releaseTracking = resolve })
   let trackingStartedResolve
   const trackingStarted = new Promise(resolve => { trackingStartedResolve = resolve })
+  let trackingDispose
   agent.ctx.effect = execute => {
-    const cleanup = execute()
-    trackingStartedResolve()
-    return async () => { await trackingReady; cleanup?.() }
+    execute()
+    trackingDispose = async () => {
+      trackingStartedResolve()
+      await trackingReady
+    }
+    return trackingDispose
   }
   await notify(feature, agent)
-  const scopeCleanup = Promise.resolve().then(() => agent.disposeScope())
+  const scopeCleanup = Promise.resolve().then(() => trackingDispose())
   await trackingStarted
   const pluginCleanup = feature.dispose()
   let settled = false
   void pluginCleanup.then(() => { settled = true })
-  await new Promise(resolve => setImmediate(resolve))
+  await new Promise(resolve => setTimeout(resolve, 10))
   assert.equal(settled, false)
   releaseTracking()
   await Promise.all([scopeCleanup, pluginCleanup])
   assert.equal(agent.calls.contextDisposals, 1)
+  assert.equal(contextCalls, 2, 'registration and exactly one context disposal')
   assert.equal(agent.calls.contexts[0].text(), '')
 })
 

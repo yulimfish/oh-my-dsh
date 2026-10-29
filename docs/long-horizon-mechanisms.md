@@ -89,12 +89,13 @@ Goose has moved to `aaif-goose/goose`; the source snapshot is pinned to [`361003
 - Tests include key order, nested input, malformed/cyclic objects, caps, parallel calls, same-ID replacement, cancellation/disposal, and legitimate non-consecutive repeats.
 - Gate: focused tests, full syntax/tests/output-contract tests, reviewed diff, standalone commit.
 
-### Phase 3 — Progress-aware focus review (design before code)
+### Phase 3 — Session-log progress context
 
-- Evaluate a cadence based on accepted Tool outcomes and actual todo updates, not wall-clock polling.
-- Remind the model to compare recent evidence with the Goal, mark verified progress, choose a different strategy after unproductive exploration, and keep final verification explicit.
-- Avoid duplicating Phase 2 warnings and existing Goal-use/Team reminders; define precedence and at most one added context per outcome.
-- Proceed only if Phase 1 observation shows the persistent Goal anchor alone is insufficient.
+**Implemented in this phase:** default-off `enableProgressContext` adds `dsh-omo:progress-context` in each exact live Agent scope. It incrementally folds the DSH session log and shows only the latest successful `todo_write`, directly adapting Cline's checklist continuity and Goose's MOIM planning notes without a second task store. Pending/failed writes leave the last valid list intact; an accepted empty list clears it; malformed or skipped windows emit no stale list. Content is bounded, sanitized, and JSON-quoted. The provider replaces its projection when a compacted or restored Session has a new identity or resets its sequence cursor. Real `SessionStore` plus prompt-assembly tests verify the durable event shape and scoped cleanup.
+
+- Use accepted Tool events rather than wall-clock polling or a parallel todo database.
+- Keep current progress near the Goal, while warning that checked items are not proof of user-task completion.
+- Reuse the existing Focus Chain and repeated-call advisory independently; no additional per-outcome reminder is needed.
 
 ### Deferred / intentionally not copied
 
