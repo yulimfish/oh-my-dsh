@@ -49,6 +49,7 @@ Goose has moved to `aaif-goose/goose`; the source snapshot is pinned to [`361003
 
 - [`agents/moim.rs`](https://github.com/aaif-goose/goose/blob/361003ea3263587f4241a0f906affdcc0d5c9c1f/crates/goose/src/agents/moim.rs) constructs an agent-only turn-context message containing current time, working directory, extension context, and—after half the budget is used—a turn-budget signal. It keeps bytes stable within a turn, marks the block as turn context, and skips it for small context windows.
 - [Persistent Instructions documentation](https://github.com/aaif-goose/goose/blob/361003ea3263587f4241a0f906affdcc0d5c9c1f/documentation/docs/guides/context-engineering/using-persistent-instructions.md) says this context is refreshed each turn, includes the todo list, and is intended for concise critical reminders. It explicitly notes the recurring token cost and a 64 KiB cap.
+- [`platform_extensions/todo.rs`](https://github.com/aaif-goose/goose/blob/361003ea3263587f4241a0f906affdcc0d5c9c1f/crates/goose/src/agents/platform_extensions/todo.rs) replaces the complete planning-note content, persists it as session extension state, enforces a configurable character limit, and returns the current notes from `get_moim` for automatic context injection. Its prompt explicitly says not to redo or re-verify completed work merely because notes exist.
 
 **DSH adaptation:** a scoped `systemPrompt.context` provider can re-read the exact Agent's native Goal during each prompt assembly. It should emit nothing without an active Goal, keep the objective bounded, identify it as user task data rather than higher-priority policy, and be re-registered when compaction creates a new Agent scope. Unlike a static session-start prompt, this survives both long turns and summary loss.
 
@@ -79,6 +80,8 @@ Goose has moved to `aaif-goose/goose`; the source snapshot is pinned to [`361003
 - Gate: focused tests, full syntax/tests, reviewed diff, standalone commit.
 
 ### Phase 2 — Bounded repeated-call soft warning
+
+**Implemented in this phase:** default-off `enableRepeatedCallAdvisory` captures bounded SHA-256 signatures at pre-execution and counts accepted top-level completions in their actual completion order. It warns once at the third consecutive identical call, including accepted Tool-error outcomes (completion is not semantic success), while preserving the call and downstream result. Unsupported/over-budget arguments and missing pre/post identity reset the run instead of being truncated into collisions. Argument text is never included in the warning or persisted; pending calls and per-Agent state are process-local, bounded, cancellation-fenced, and cleared on exact Agent/plugin disposal. Unit and real ToolRuntime tests cover nested canonicalization, parallel completion, same-ID replacement, and the absence of a hard stop.
 
 - Canonicalize Tool name plus nested arguments without key-order false negatives; bound depth, nodes, string bytes, and total signature size.
 - Count only consecutive completed top-level calls for the exact live Agent. Reset on a different signature, disposal, or ambiguous identity; do not persist argument signatures or echo them into prompts.

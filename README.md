@@ -26,6 +26,7 @@ The current candidate is **0.1.14**. See [release readiness and conservative set
 - Adds a separate default-off `enableTeamStatusContext` that injects an exact live Team Agent's count-only Team snapshot into scoped prompt context; it is independent of Team Tools, read-only/advisory, bounded to 100 rows per list at the adapter, and grants no permissions.
 - Adds a default-off `enableTeamTaskUseReminder` for exact Team Agents whose IDs fit explicit code-unit bounds; every ten accepted non-task Tool results (including errors) appends a fixed advisory context, with bounded per-Agent state and no task creation or mutation.
 - Adds default-off model-facing `dsh_omo_goal_get`, `dsh_omo_goal_create`, and `dsh_omo_goal_update` tools via `enableGoalTools`; operations target only the exact calling Agent and use DSH revision-fenced Goal state; create never clears a Goal or replaces a non-complete current Goal.
+- Adds default-off `enableRepeatedCallAdvisory` for a Cline/Goose-inspired soft loop warning. It hashes bounded, recursively key-sorted Tool arguments at pre-execution, counts accepted top-level completions (including Tool errors) in completion order, and adds one advisory at the third consecutive identical call for the exact live Agent. Unsupported/cyclic/over-budget input and missing pre/post identity reset the run rather than creating truncation collisions; parallel calls, cancellation, same-ID replacement, and pending/state caps are handled. It never denies a call, echoes arguments, persists signatures, or treats repetition as proof of no progress.
 - Adds a separate default-off `enableGoalUseReminder` DSH-specific advisory when Goal Tools, `agents.get`, and `agentTeams.tryMembership` are available; it skips Team Agents, emits at most three reminders per Agent, and is not generic task CRUD or OMO reminder parity.
 - Adds default-off `enableAgentUsageReminder` as a bounded root-Agent partial: exact visible search/fetch Tool calls append up to three fixed reminders only when at least one DSH delegation Tool is visible; any exact DSH task Tool call suppresses later reminders. State is process-local and resets when DSH disposes/recreates the Agent (including compaction when it creates a new Agent scope); the feature cannot identify OMO orchestrator names or persist per-session state.
 - Adds default-off `enableSearchToolResultPruning` as a name-routed content-only partial: direct exact `grep`/`glob`/`web_fetch` calls are eligible by default, with up to 32 additional exact Tool names permitted only by explicit configuration; successful downstream content-only accept decisions and caller-visible Tool definitions without content projection/finalizer callbacks are still required. It uses the Host character-budget pruner, preserves downstream decision fields, skips structured-value outcomes, and does not prune `web.fetch` or call `pruneSession`; it cannot prove native Tool provenance or OMO token/context-budget parity.
@@ -136,6 +137,8 @@ DSH filesystem reads are plugin-level, not an approval-gated model Tool, and ide
     enableContinuableTasks: false
     enableContinuableTaskFollowups: false
     enableGoalTools: false
+    enableFocusChain: false
+    enableRepeatedCallAdvisory: false
     enableGoalUseReminder: false
     enableAgentUsageReminder: false
     enableCategorySkillReminder: false

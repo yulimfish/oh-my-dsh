@@ -222,6 +222,7 @@ const baseConfig = {
   enableContinuableTaskFollowups: false,
   enableGoalTools: false,
   enableFocusChain: false,
+  enableRepeatedCallAdvisory: false,
   enableGoalUseReminder: false,
   enableAgentUsageReminder: false,
   enableCategorySkillReminder: false,
@@ -431,6 +432,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableGoalTools: true }).enableGoalTools, true)
   assert.equal(Config({}).enableFocusChain, false)
   assert.equal(Config({ enableFocusChain: true }).enableFocusChain, true)
+  assert.equal(Config({}).enableRepeatedCallAdvisory, false)
+  assert.equal(Config({ enableRepeatedCallAdvisory: true }).enableRepeatedCallAdvisory, true)
   assert.equal(Config({}).enableGoalUseReminder, false)
   assert.equal(Config({ enableGoalUseReminder: true }).enableGoalUseReminder, true)
   assert.equal(Config({}).enableAgentUsageReminder, false)
@@ -3440,6 +3443,39 @@ test('mounts native Goal Focus Chain only with exact service prerequisites', asy
   assert.equal(typeof fixture.events.get('agent/created'), 'function')
   assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /focusChain=enabled/u)
   const effect = fixture.effects.find(entry => entry.label === 'dsh-omo Focus Chain')
+  assert.equal(typeof effect?.dispose, 'function')
+  await effect.dispose()
+})
+
+test('mounts repeated-call soft advisory only with exact Agent and event prerequisites', async () => {
+  const agents = { get: () => undefined }
+  const missingAgents = makeContext()
+  assert.throws(
+    () => apply(missingAgents.ctx, { ...baseConfig, enableRepeatedCallAdvisory: true }),
+    /enableRepeatedCallAdvisory requires DSH agents\.get, Cordis ctx\.on, and ctx\.effect/u,
+  )
+  assert.equal(missingAgents.tools.size, 0)
+
+  const missingEvents = makeContext({ services: { agents } })
+  missingEvents.ctx.on = undefined
+  assert.throws(
+    () => apply(missingEvents.ctx, { ...baseConfig, enableRepeatedCallAdvisory: true }),
+    /enableRepeatedCallAdvisory requires DSH agents\.get, Cordis ctx\.on, and ctx\.effect/u,
+  )
+  assert.equal(missingEvents.tools.size, 0)
+
+  const disabled = makeContext({ services: { agents } })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('tools/pre-execute'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /repeatedCallAdvisory=disabled/u)
+
+  const fixture = makeContext({ services: { agents } })
+  apply(fixture.ctx, { ...baseConfig, enableRepeatedCallAdvisory: true })
+  assert.equal(typeof fixture.events.get('tools/pre-execute'), 'function')
+  assert.equal(typeof fixture.events.get('tools/post-execute'), 'function')
+  assert.equal(typeof fixture.events.get('agent/disposed'), 'function')
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /repeatedCallAdvisory=enabled/u)
+  const effect = fixture.effects.find(entry => entry.label === 'dsh-omo repeated-call advisory')
   assert.equal(typeof effect?.dispose, 'function')
   await effect.dispose()
 })

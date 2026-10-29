@@ -220,12 +220,69 @@ test('scope cleanup and plugin disposal invalidate saved callbacks and prevent l
   assert.equal(agent.calls.contexts.length, 2)
 })
 
+test('plugin disposal joins an in-flight same-ID replacement cleanup', async () => {
+  const { live, service } = makeService()
+  const feature = createFocusChain({ get: () => activeGoal() }, service)
+  const original = makeAgent('same-id')
+  live.set(original.id, original)
+  let releaseTracking
+  const trackingReady = new Promise(resolve => { releaseTracking = resolve })
+  let trackingStartedResolve
+  const trackingStarted = new Promise(resolve => { trackingStartedResolve = resolve })
+  original.ctx.effect = execute => {
+    const cleanup = execute()
+    trackingStartedResolve()
+    return async () => { await trackingReady; cleanup?.() }
+  }
+  await notify(feature, original)
+  const replacement = makeAgent('same-id')
+  live.set(replacement.id, replacement)
+  const replacing = notify(feature, replacement)
+  await trackingStarted
+  const pluginCleanup = feature.dispose()
+  let settled = false
+  void pluginCleanup.then(() => { settled = true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(settled, false)
+  assert.equal(original.calls.contextDisposals, 0)
+  releaseTracking()
+  await Promise.all([replacing, pluginCleanup])
+  assert.equal(original.calls.contextDisposals, 1)
+  assert.equal(replacement.calls.contexts.length, 0)
+})
+
+test('plugin disposal joins Agent-scope cleanup and removes its prompt context', async () => {
+  const { live, service } = makeService()
+  const feature = createFocusChain({ get: () => activeGoal() }, service)
+  const agent = makeAgent('overlapping-cleanup')
+  live.set(agent.id, agent)
+  let releaseTracking
+  const trackingReady = new Promise(resolve => { releaseTracking = resolve })
+  let trackingStartedResolve
+  const trackingStarted = new Promise(resolve => { trackingStartedResolve = resolve })
+  agent.ctx.effect = execute => {
+    const cleanup = execute()
+    trackingStartedResolve()
+    return async () => { await trackingReady; cleanup?.() }
+  }
+  await notify(feature, agent)
+  const scopeCleanup = Promise.resolve().then(() => agent.disposeScope())
+  await trackingStarted
+  const pluginCleanup = feature.dispose()
+  let settled = false
+  void pluginCleanup.then(() => { settled = true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(settled, false)
+  releaseTracking()
+  await Promise.all([scopeCleanup, pluginCleanup])
+  assert.equal(agent.calls.contextDisposals, 1)
+  assert.equal(agent.calls.contexts[0].text(), '')
+})
+
 test('assembles the active Goal through real DSH prompt scopes and removes it on disposal', async () => {
   const ctx = new Context()
   const systemPromptFiber = await ctx.plugin(SystemPrompt)
   const agentRegistryFiber = await ctx.plugin(AgentRegistry)
-  const scopes = []
-  const detachers = []
   const goals = new Map()
   const goalCalls = []
   const feature = createFocusChain({
@@ -242,19 +299,19 @@ test('assembles the active Goal through real DSH prompt scopes and removes it on
   async function createAgent(id, source = 'startup') {
     const agent = { id, session: { id } }
     const scope = createScope(ctx, agent)
-    scopes.push(scope)
     let agentContext
     await scope.ctx.inject(['systemPrompt'], injected => { agentContext = injected })
     agent.ctx = agentContext
     const detach = ctx.agents.enter(agent, undefined)
-    detachers.push(detach)
     await ctx.agents.announce(agent, source)
-    return agent
+    return { agent, scope, detach }
   }
+  const owned = []
+  const track = lifecycle => { owned.push(lifecycle); return lifecycle.agent }
 
   try {
-    const anchored = await createAgent('anchored-agent')
-    const outside = await createAgent('outside-agent', 'compact')
+    const anchored = track(await createAgent('anchored-agent'))
+    const outside = track(await createAgent('outside-agent', 'compact'))
     goals.set(anchored, activeGoal('real scoped objective'))
     const assemblyFor = agent => ctx.systemPrompt.assemble({ scope: agent })
     const first = (await assemblyFor(anchored)).contexts.filter(entry => entry.name === CONTEXT_NAME)
@@ -272,12 +329,21 @@ test('assembles the active Goal through real DSH prompt scopes and removes it on
     assert.ok(goalCalls.filter(agent => agent === anchored).length >= 2)
     assert.ok(goalCalls.includes(outside), 'the outside provider checks its own absent Goal')
 
+    const previous = owned.find(entry => entry.agent === outside)
+    await previous.scope.dispose()
+    previous.detach()
+    const compacted = track(await createAgent(outside.id, 'compact'))
+    goals.set(compacted, activeGoal('objective restored after compact'))
+    assert.match((await assemblyFor(compacted)).contexts.find(entry => entry.name === CONTEXT_NAME).text, /objective restored after compact/u)
+
     await featureFiber.dispose()
     assert.deepEqual((await assemblyFor(anchored)).contexts.filter(entry => entry.name === CONTEXT_NAME), [])
   } finally {
     await featureFiber.dispose()
-    for (const scope of scopes) await scope.dispose()
-    for (const detach of detachers) detach()
+    for (const { scope, detach } of owned) {
+      await scope.dispose()
+      detach()
+    }
     await agentRegistryFiber.dispose()
     await systemPromptFiber.dispose()
   }

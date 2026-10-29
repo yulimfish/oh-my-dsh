@@ -68,18 +68,32 @@ function silenceThenable(value) {
   }
 }
 
-async function disposeRegistration(registration) {
-  if (!registration || registration.disposed) return
+function disposeRegistration(registration, fromTracking = false) {
+  if (!registration) return Promise.resolve()
+  if (registration.disposalPromise) return registration.disposalPromise
   registration.disposed = true
-  await callDisposer(registration.trackingDispose)
-  await callDisposer(registration.contextDispose)
+  registration.disposalPromise = (async () => {
+    // An Agent tracking disposer owns this cleanup; never await it from itself.
+    if (!fromTracking) await callDisposer(registration.trackingDispose)
+    await callDisposer(registration.contextDispose)
+  })()
+  return registration.disposalPromise
 }
 
 /** Register a live native-Goal anchor in every exact Agent prompt scope. */
 export function createFocusChain(goalsService, agentsService) {
   const registrations = new Map()
+  const pendingDisposals = new Set()
   let disposed = false
   let disposalPromise
+
+  const trackPromise = promise => {
+    pendingDisposals.add(promise)
+    void promise.then(() => pendingDisposals.delete(promise), () => pendingDisposals.delete(promise))
+    return promise
+  }
+
+  const trackDisposal = (registration, fromTracking = false) => trackPromise(disposeRegistration(registration, fromTracking))
 
   const listener = async payload => {
     let agentId
@@ -101,7 +115,7 @@ export function createFocusChain(goalsService, agentsService) {
       if (existing?.agent === agent && !existing.disposed) return
       if (existing) {
         registrations.delete(agentId)
-        await disposeRegistration(existing)
+        await trackDisposal(existing)
         if (disposed || signal?.aborted === true || !exactLiveAgent(agentsService, agentId, agent)) return
       }
       // Never evict a live Agent's anchor merely to admit another Agent.
@@ -135,7 +149,7 @@ export function createFocusChain(goalsService, agentsService) {
       }
 
       if (disposed || signal?.aborted === true || !exactLiveAgent(agentsService, agentId, agent)) {
-        await callDisposer(contextDispose)
+        await trackPromise(callDisposer(contextDispose))
         contextDispose = undefined
         return
       }
@@ -143,8 +157,8 @@ export function createFocusChain(goalsService, agentsService) {
       registration = { agent, contextDispose, trackingDispose: undefined, disposed: false }
       registrations.set(agentId, registration)
       const trackingDispose = effect.call(agentContext, () => () => {
-        registration.disposed = true
         if (registrations.get(agentId) === registration) registrations.delete(agentId)
+        return trackDisposal(registration, true)
       }, 'dsh-omo Focus Chain tracking')
       if (typeof trackingDispose !== 'function') {
         silenceThenable(trackingDispose)
@@ -155,14 +169,14 @@ export function createFocusChain(goalsService, agentsService) {
       if (disposed || signal?.aborted === true || !exactLiveAgent(agentsService, agentId, agent)
         || registrations.get(agentId) !== registration) {
         if (registrations.get(agentId) === registration) registrations.delete(agentId)
-        await disposeRegistration(registration)
+        await trackDisposal(registration)
       }
     } catch {
       if (registration) {
         if (registrations.get(agentId) === registration) registrations.delete(agentId)
-        await disposeRegistration(registration)
+        await trackDisposal(registration)
       } else {
-        await callDisposer(contextDispose)
+        await trackPromise(callDisposer(contextDispose))
       }
       // Agent creation is awaited, so every Focus Chain failure is intentionally fail-open.
     }
@@ -173,7 +187,8 @@ export function createFocusChain(goalsService, agentsService) {
     disposed = true
     const active = [...registrations.values()]
     registrations.clear()
-    disposalPromise = Promise.all(active.map(disposeRegistration)).then(() => undefined, () => undefined)
+    const pending = [...active.map(trackDisposal), ...pendingDisposals]
+    disposalPromise = Promise.all(pending).then(() => undefined, () => undefined)
     return disposalPromise
   }
 
