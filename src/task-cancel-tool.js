@@ -28,7 +28,7 @@ export function createTaskCancelTool({ subagents, activeRuns, activeRunOwners })
       childId: {
         type: 'string',
         required: true,
-        description: 'The childId returned by dsh_omo_task for an active one-shot child owned by this exact Agent.',
+        description: 'An active childId returned by a dsh-omo one-shot delegation Tool and owned by this exact Agent.',
       },
     },
     output: {
@@ -48,7 +48,7 @@ export function createTaskCancelTool({ subagents, activeRuns, activeRunOwners })
     execute(args, exec) {
       const parent = exec?.agent
       if (!isAgent(parent)) throw new Error('dsh_omo_task_cancel requires the exact calling Agent.')
-      if (!isChildId(args?.childId)) throw new Error('Provide one bounded childId returned by dsh_omo_task.')
+      if (!isChildId(args?.childId)) throw new Error('Provide one bounded childId returned by a dsh-omo one-shot delegation Tool.')
       const childId = args.childId
       if (!activeRuns.get(childId) || activeRunOwners.get(childId) !== parent) {
         throw new Error('No active dsh-omo one-shot child with that ID is tracked for this exact Agent.')
