@@ -95,6 +95,12 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
       } catch {
         return result('error', 'Could not queue the new-task handoff; no child was resumed or started.')
       }
+      if (args?.signal?.aborted) return result('error', 'Task handoff was cancelled after delivery; inspect the current Agent before starting a new task.')
+      if (isParentCurrent) {
+        let current = false
+        try { current = isParentCurrent(agent) === true } catch {}
+        if (!current) return result('error', 'The parent Agent changed or was disposed after delivery; inspect the current Agent before starting a new task.')
+      }
       return result('success', `Queued a NEW-task handoff for ${input.childId}; no child was resumed or started.`)
     },
   }

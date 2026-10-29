@@ -117,9 +117,31 @@ test('queues only after the exact live parent passes the post-read liveness chec
   })
   const response = await command.handler({ agent, rawInput: 'child-1' })
   assert.equal(response.kind, 'success')
-  assert.deepEqual(checks, [agent])
+  assert.deepEqual(checks, [agent, agent], 'parent identity is checked both before and after asynchronous queue delivery')
   assert.equal(queued.length, 1)
   assert.strictEqual(queued[0][0], agent)
+})
+
+test('reports parent replacement after asynchronous queue delivery without claiming a stable queue', async () => {
+  const agent = { id: 'parent-queue-race' }
+  let current = true
+  let release
+  const queued = []
+  const command = createHandoffCommand({ read: () => failed() }, {
+    async queueMessage(...args) {
+      queued.push(args)
+      await new Promise(resolve => { release = resolve })
+      current = false
+    },
+    isParentCurrent: () => current,
+  })
+  const pending = command.handler({ agent, rawInput: 'child-1' })
+  release()
+  const response = await pending
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /changed or was disposed after delivery/u)
+  assert.match(response.text, /inspect the current Agent/u)
+  assert.equal(queued.length, 1)
 })
 
 test('returns a bounded error when the handoff queue rejects delivery', async () => {
