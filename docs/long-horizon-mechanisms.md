@@ -117,6 +117,8 @@ This follows Goose's `/goal` “check before finishing” idea, but deliberately
 
 **Implemented in this phase:** default-off `/omo handoff <childId> [next step]` (`enableTaskHandoffCommand`, requiring `enableTaskResultTool`) reads only the exact parent's failed/incomplete one-shot result. It queues a bounded new-task handoff with sanitized child evidence and a next step. The command launches nothing and never reuses the child ID or claims session/workspace survival; the Agent must explicitly start and independently verify a NEW `dsh_omo_task`. This is a recovery handoff, not transparent resume.
 
+**State and evidence boundaries:** terminal result persistence is a same-session recovery aid, not a cross-Agent result bus. `clearAgent` invalidates in-flight restoration, and successor identity must not inherit the old Agent's snapshot. Goal completion review skips disarmed or round-exhausted Goals. Progress recovery accepts only successful `todo_write` results, with call order preventing stale results from replacing a newer plan; a failed newer write does not erase the last successful plan. Verification evidence pairs bash calls/results within the current session and discards reused-callId history rather than mixing commands.
+
 ### Deferred / intentionally not copied
 
 - Cline's exact `task_progress` parameter, task-file watcher, percentage UI, and five-call hard escalation.
