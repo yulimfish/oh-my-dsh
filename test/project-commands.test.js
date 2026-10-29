@@ -501,10 +501,11 @@ test('body line-ending compatibility preserves internal CR and CRLF without chan
       'First\r\nSecond $ARGUMENTS\r\n',
       '---\r\ndescription: Review\r\n---\r\nFirst\r\nSecond $ARGUMENTS\r\n',
       '---\ndescription: Review\n---\nFirst\rSecond $ARGUMENTS\r',
+      '---\rdescription: Review\r---\rFirst\rSecond $ARGUMENTS\r',
     ]) {
       const parsed = parseProjectCommandDocument('review', input, source, { preserveBodyLineEndings: true })
-      const body = input.includes('---\n') || input.startsWith('---\r\n')
-        ? 'First' + (input.includes('\r\nSecond') ? '\r\n' : '\r') + 'Second $ARGUMENTS' + (input.includes('\r\nSecond') ? '\r\n' : '\r')
+      const body = input.startsWith('---')
+        ? input.slice(input.lastIndexOf('---') + 4).replace(/^(?:\r\n|\r|\n)/u, '')
         : input
       assert.equal(parsed.body, body)
       const rendered = renderProjectCommand(parsed, ' raw request ')
@@ -513,6 +514,7 @@ test('body line-ending compatibility preserves internal CR and CRLF without chan
       assert.ok(rendered.endsWith('<user-request>\n raw request \n</user-request>'))
     }
     assert.equal(parseProjectCommandDocument('review', 'First\r\nSecond\r\n', source).body, 'First\nSecond\n')
+    assert.equal(parseProjectCommandDocument('review', '---\r\ndescription: Review\r\n---\r\n\r\nBody\r\n', source).body, 'Body\n')
   }
   assert.throws(() => parseProjectCommandDocument('review', VALID, 'opencode', { preserveBodyLineEndings: 'true' }), /boolean/u)
 })

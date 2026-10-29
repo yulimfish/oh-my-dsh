@@ -570,6 +570,23 @@ export function parseProjectCommandDocument(name, input, source = 'opencode', op
   const plainFrontmatterFallback = hasFrontmatter && !pinnedFrontmatter && options?.allowUnterminatedFrontmatter === true
   if (hasFrontmatter && closing < 0 && !plainFrontmatterFallback && !pinnedFrontmatter) throw new TypeError('Project command YAML frontmatter has no closing delimiter.')
   const parseFrontmatter = hasFrontmatter && !plainFrontmatterFallback
+  let originalBody
+  if (parseFrontmatter && !pinnedFrontmatter && closing >= 0) {
+    // Map the normalized standalone delimiter back to CR/LF/CRLF source text.
+    let offset = 0
+    for (let lineIndex = 0; lineIndex <= closing; lineIndex += 1) {
+      const newline = unprefixed.indexOf('\n', offset)
+      const carriage = unprefixed.indexOf('\r', offset)
+      const candidates = [newline, carriage].filter(index => index >= 0)
+      const breakIndex = candidates.length > 0 ? Math.min(...candidates) : -1
+      if (lineIndex === closing) {
+        originalBody = breakIndex < 0 ? '' : unprefixed.slice(breakIndex + (unprefixed[breakIndex] === '\r' && unprefixed[breakIndex + 1] === '\n' ? 2 : 1))
+        break
+      }
+      if (breakIndex < 0) break
+      offset = breakIndex + (unprefixed[breakIndex] === '\r' && unprefixed[breakIndex + 1] === '\n' ? 2 : 1)
+    }
+  }
 
   let document
   try {
@@ -629,7 +646,7 @@ export function parseProjectCommandDocument(name, input, source = 'opencode', op
   }
 
   const body = parseFrontmatter
-    ? (pinnedFrontmatter ? pinnedFrontmatter[2] : lines.slice(closing + 1).join('\n')).replace(/^\n/u, '')
+    ? (pinnedFrontmatter ? pinnedFrontmatter[2] : originalBody ?? lines.slice(closing + 1).join('\n')).replace(/^(?:\r\n|\n|\r)/u, '')
     : unprefixed
   const outputBody = options?.preserveBodyLineEndings === true ? body : body.replace(/\r\n?/gu, '\n')
   const bodyBytes = new TextEncoder().encode(outputBody).byteLength
