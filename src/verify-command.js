@@ -6,6 +6,7 @@ const MAX_SCRIPTS = 32
 const MAX_SCRIPT_CHARS = 512
 const MAX_EVENTS = 128
 const MAX_COMPLETED_CALL_IDS = 2_048
+const MAX_EVICTED_CALL_IDS = MAX_COMPLETED_CALL_IDS * 16
 const MAX_EVIDENCE_CHARS = 2_800
 const MAX_OUTPUT_CHARS = 4_000
 const CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
@@ -102,8 +103,16 @@ export function collectBashResults(events) {
   const ambiguousCallIds = new Set()
   const evictedCallIds = new Set()
   let correlationComplete = true
+  let correlationSaturated = false
   const results = []
   for (const event of events) {
+    if (evictedCallIds.size >= MAX_EVICTED_CALL_IDS) correlationSaturated = true
+    if (correlationSaturated) {
+      calls.clear()
+      results.length = 0
+      correlationComplete = false
+      continue
+    }
     if (!event || typeof event !== 'object' || !Number.isSafeInteger(event.seq)) throw new TypeError('Invalid session event metadata.')
     if (event.type === 'tool/call' && event.data?.name === 'bash') {
       const callId = event.data.callId
@@ -177,10 +186,12 @@ export function collectBashResults(events) {
         completedCallIds.delete(evicted)
         evictedCallIds.add(evicted)
         ambiguousCallIds.add(evicted)
-        if (evictedCallIds.size > MAX_COMPLETED_CALL_IDS * 16) {
-          // Keep the independent-call path open, but never re-admit an ID that
-          // exceeded the completed-result tombstone budget.
+        if (evictedCallIds.size >= MAX_EVICTED_CALL_IDS) {
+          // Once correlation tombstones reach their bound, no later result can
+          // be attributed safely; return no evidence rather than guessing.
+          results.length = 0
           correlationComplete = false
+          continue
         }
       }
       if (results.length >= 16) results.shift()

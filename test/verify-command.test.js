@@ -342,6 +342,17 @@ test('continues accepting independent new calls after correlation budget exhaust
   assert.equal(results.at(-1).text, 'latest valid result')
 })
 
+test('fails closed instead of growing evicted identity state without bound', () => {
+  const events = []
+  let seq = 1
+  for (let index = 0; index < 40_000; index += 1) {
+    const callId = `evicted-${index}`
+    events.push(call(seq++, callId, 'first'), resultEvent(seq++, callId, 'completed'), call(seq++, callId, 'second'))
+  }
+  events.push(call(seq++, 'new-after-cap', 'pnpm test -- after-cap'), resultEvent(seq++, 'new-after-cap', 'must not be admitted'))
+  assert.deepEqual(collectBashResults(events), [])
+})
+
 test('retains latest failure and non-text notices under output pressure', async () => {
   const events = []
   for (let index = 0; index < 16; index += 1) {
