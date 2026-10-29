@@ -208,6 +208,14 @@ test('preserves handoff guidance and boundary with maximum next-step and evidenc
   assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
 })
 
+test('preserves exact child identity when preparing handoff evidence', async () => {
+  const { agent, queued, calls, command } = fixture(failed({ childId: 'child-unicode-任务' }))
+  const response = await command.handler({ agent, rawInput: 'child-unicode-任务 inspect next' })
+  assert.equal(response.kind, 'success')
+  assert.deepEqual(calls, [[agent, 'child-unicode-任务']])
+  assert.match(queued[0][1], /child-unicode-任务/u)
+})
+
 test('sanitizes untrusted output and preserves bounded next-step text', async () => {
   const { agent, queued, command } = fixture(failed({ output: `line one\nline two\u202e`, stopReason: 'failed' }))
   const response = await command.handler({ agent, rawInput: `child-1 next\u202e` })
