@@ -146,8 +146,8 @@ export function createVerifyCommand(sessionQuery, fs) {
         return result('error', 'Usage: /omo verify (no arguments)')
       }
       if (!safeSignal(signal)) return result('error', 'Verification inspection was cancelled or has an invalid signal.')
-      if (!sessionQuery || typeof sessionQuery.filterEvents !== 'function') {
-        return result('error', 'The DSH session event query service is unavailable; verification evidence was not inferred.')
+      if (!sessionQuery || typeof sessionQuery.observeSession !== 'function') {
+        return result('error', 'The DSH session observation service is unavailable; verification evidence was not inferred.')
       }
       if (!fs || ['resolve', 'contains', 'lstat', 'stat', 'readBytes'].some(method => typeof fs[method] !== 'function')) {
         return result('error', 'The DSH filesystem contract is unavailable; project scripts were not read.')

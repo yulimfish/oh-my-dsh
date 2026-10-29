@@ -3574,26 +3574,20 @@ test('mounts one-shot Goal completion review only with exact service prerequisit
   await effect.dispose()
 })
 
-test('registers read-only verification evidence command only with exact query services', async () => {
+test('registers read-only verification evidence command with raw observation only', async () => {
   const missing = makeContext()
   assert.throws(
     () => apply(missing.ctx, { ...baseConfig, enableVerifyCommand: true }),
-    /enableVerifyCommand requires DSH sessionQuery\.observeSession and sessionQuery\.filterEvents/u,
+    /enableVerifyCommand requires DSH sessionQuery\.observeSession/u,
   )
   assert.equal(missing.commands.has('omo-verify'), false)
-
-  const partial = makeContext({ services: { sessionQuery: { observeSession() {} } } })
-  assert.throws(
-    () => apply(partial.ctx, { ...baseConfig, enableVerifyCommand: true }),
-    /enableVerifyCommand requires DSH sessionQuery\.observeSession and sessionQuery\.filterEvents/u,
-  )
 
   const disabled = makeContext()
   apply(disabled.ctx, baseConfig)
   assert.equal(disabled.commands.has('omo-verify'), false)
   assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /verifyCommand=disabled/u)
 
-  const fixture = makeContext({ services: { sessionQuery: { observeSession() {}, filterEvents() {} } } })
+  const fixture = makeContext({ services: { sessionQuery: { observeSession() {} } } })
   apply(fixture.ctx, { ...baseConfig, enableVerifyCommand: true })
   assert.equal(fixture.commands.has('omo-verify'), true)
   assert.equal(fixture.commands.get('omo-verify').input.hint, '(no arguments)')

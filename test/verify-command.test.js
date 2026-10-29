@@ -81,6 +81,16 @@ test('reports scripts and latest evidence without executing tests or changing st
   assert.deepEqual(calls.map(call => call[0]), ['observe'], 'raw observation is sufficient; semantic filterEvents is not used')
 })
 
+test('uses raw observation evidence without requiring semantic filterEvents', async () => {
+  const command = createVerifyCommand({
+    observeSession: async () => observation([call(1, 'test', 'pnpm test'), resultEvent(2, 'test', 'ok')]),
+    filterEvents: undefined,
+  }, fsFixture())
+  const response = await command.handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  assert.equal(response.kind, 'success')
+  assert.match(response.text, /pnpm test/u)
+})
+
 test('reports failure evidence and empty history honestly', async () => {
   const failed = createVerifyCommand({
     observeSession: async () => observation([call(1, 'lint', 'pnpm lint'), resultEvent(2, 'lint', 'exit code 2', true)]),

@@ -3710,9 +3710,8 @@ export function apply(ctx, rawConfig) {
     terminalBackendTypes = readTerminalBackendTypes(terminalsService)
   }
   const sessionQueryService = optionalService(ctx, 'sessionQuery')
-  if (config.enableVerifyCommand && (typeof sessionQueryService?.observeSession !== 'function'
-    || typeof sessionQueryService?.filterEvents !== 'function')) {
-    throw new Error('dsh-omo: enableVerifyCommand requires DSH sessionQuery.observeSession and sessionQuery.filterEvents')
+  if (config.enableVerifyCommand && typeof sessionQueryService?.observeSession !== 'function') {
+    throw new Error('dsh-omo: enableVerifyCommand requires DSH sessionQuery.observeSession')
   }
   const lspService = optionalService(ctx, 'lsp')
   const sessionsService = optionalService(ctx, 'sessions')
