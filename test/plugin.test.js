@@ -3592,6 +3592,13 @@ test('registers read-only verification evidence command with raw observation onl
   assert.equal(fixture.commands.has('omo-verify'), true)
   assert.equal(fixture.commands.get('omo-verify').input.hint, '(no arguments)')
   assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /verifyCommand=enabled/u)
+  const aliases = makeContext({ services: { sessionQuery: { observeSession() {} } } })
+  apply(aliases.ctx, { ...baseConfig, enableVerifyCommand: true })
+  assert.equal((await aliases.commands.get('omo').handler({ rawInput: 'verify' })).kind, 'error', 'the alias uses the real observation service contract')
+  const disabledAlias = makeContext({ services: { sessionQuery: { observeSession() {} } } })
+  apply(disabledAlias.ctx, { ...baseConfig, enableVerifyCommand: true, disabledOmoCommands: ['omo-verify'] })
+  assert.equal(disabledAlias.commands.has('omo-verify'), false)
+  assert.equal((await disabledAlias.commands.get('omo').handler({ rawInput: 'verify' })).kind, 'error')
 })
 
 test('registers new-task handoff only with exact-Agent result tracking enabled', async () => {
@@ -3612,6 +3619,10 @@ test('registers new-task handoff only with exact-Agent result tracking enabled',
   assert.equal(fixture.commands.has('omo-handoff'), true)
   assert.equal(fixture.commands.get('omo-handoff').input.hint, '<childId> [next step]')
   assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /taskHandoffCommand=enabled/u)
+  const disabledAlias = makeContext()
+  apply(disabledAlias.ctx, { ...baseConfig, enableTaskResultTool: true, enableTaskHandoffCommand: true, disabledOmoCommands: ['omo-handoff'] })
+  assert.equal(disabledAlias.commands.has('omo-handoff'), false)
+  assert.equal((await disabledAlias.commands.get('omo').handler({ rawInput: 'handoff child-1' })).kind, 'error')
 })
 
 test('mounts the bounded non-Team Goal-use reminder only with explicit prerequisites', async () => {

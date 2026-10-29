@@ -85,7 +85,6 @@ function contentText(message) {
 /** Collect only bash Tool results with their matching call metadata; other tools are ignored. */
 export function collectBashResults(events) {
   if (!Array.isArray(events)) throw new TypeError('Session events are not an array.')
-  if (events.length > MAX_EVENTS) throw new TypeError('Session event window exceeds the verification inspection limit.')
   const calls = new Map()
   const results = []
   for (const event of events) {
@@ -96,7 +95,9 @@ export function collectBashResults(events) {
       let args
       try { args = JSON.parse(event.data.arguments) } catch { continue }
       if (args && typeof args.command === 'string' && args.command.length <= 4_096) {
-        calls.set(callId, { command: args.command, description: clean(args.description, 160) })
+        if (calls.has(callId)) calls.delete(callId)
+        if (calls.size >= MAX_EVENTS) calls.delete(calls.keys().next().value)
+        calls.set(callId, { command: clean(args.command, 4_096), description: clean(args.description, 160) })
       }
     } else if (event.type === 'tool/result') {
       const message = event.data?.message
@@ -165,7 +166,7 @@ export function createVerifyCommand(sessionQuery, fs) {
         if (!Array.isArray(observation.events)) throw new Error('The current DSH session has no raw event history.')
         // observation.events contains raw calls/results. filterEvents returns
         // semantic-only documents without call arguments and cannot pair bash evidence.
-        const events = observation.events.filter(event => event?.type === 'tool/call' || event?.type === 'tool/result').slice(-MAX_EVENTS)
+        const events = observation.events.filter(event => event?.type === 'tool/call' || event?.type === 'tool/result')
         assertActive(signal)
         return render(scripts, collectBashResults(events), agent.id)
       } catch (error) {

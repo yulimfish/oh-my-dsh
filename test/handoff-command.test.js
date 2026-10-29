@@ -87,6 +87,16 @@ test('validates input, Agent, cancellation, and registry contracts before queuei
   assert.throws(() => createHandoffCommand({ read() {} }, {}), /parent-message queue/u)
 })
 
+test('returns a bounded error when the handoff queue rejects delivery', async () => {
+  const command = createHandoffCommand({ read: () => failed() }, {
+    async queueMessage() { throw new Error('private queue failure') },
+  })
+  const response = await command.handler({ agent: { id: 'parent-1' }, rawInput: 'child-1' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /Could not queue/u)
+  assert.equal(response.text.includes('private queue failure'), false)
+})
+
 test('sanitizes untrusted output and preserves bounded next-step text', async () => {
   const { agent, queued, command } = fixture(failed({ output: `line one\nline two\u202e`, stopReason: 'failed' }))
   const response = await command.handler({ agent, rawInput: `child-1 next\u202e` })

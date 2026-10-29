@@ -3009,6 +3009,10 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
     ? createOmoWebSearchHandler(webService, lifecycleSignal)
     : undefined
   const stopContinuationCommand = goalService ? createStopContinuationCommand(goalService) : undefined
+  const verifyCommand = config.enableVerifyCommand ? createVerifyCommand(sessionQueryService, ctx.fs) : undefined
+  const handoffCommand = config.enableTaskHandoffCommand
+    ? createHandoffCommand(taskResultRegistry, { queueMessage: queueParentMessage })
+    : undefined
   const registrations = [
     ...(projectCommandManager ? [{
       name: 'omo-project-commands-refresh',
@@ -3022,8 +3026,8 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
       },
     }] : []),
     ...(goalService ? [createGoalCommand(goalService)] : []),
-    ...(config.enableVerifyCommand ? [createVerifyCommand(sessionQueryService, ctx.fs)] : []),
-    ...(config.enableTaskHandoffCommand ? [createHandoffCommand(taskResultRegistry, { queueMessage: queueParentMessage })] : []),
+    ...(verifyCommand ? [verifyCommand] : []),
+    ...(handoffCommand ? [handoffCommand] : []),
     ...(stopContinuationCommand ? [stopContinuationCommand] : []),
     ...(llmService || config.enableModelCapabilitiesRefresh ? [createModelCapabilitiesCommand(llmService, {
       enableModelCapabilitiesRefresh: config.enableModelCapabilitiesRefresh,
@@ -3210,6 +3214,15 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
       input: { hint: `[status|status capabilities|status route role:<name>|status route category:<name>${config.enableManualContextPruning ? '|prune-context' : ''}${config.enableWebSearchCommand ? '|web-search <query>' : ''}]` },
       handler: invocation => {
         const rawInput = typeof invocation?.rawInput === 'string' ? invocation.rawInput.trim() : ''
+        if (rawInput === 'verify') {
+          if (!verifyCommand || disabledOmoCommands.has('omo-verify')) return { kind: 'error', text: 'Verification inspection is disabled; set enableVerifyCommand: true to enable /omo verify.' }
+          return verifyCommand.handler({ ...invocation, rawInput: '' })
+        }
+        const handoffPrefix = /^handoff(?:\s+|$)/u.exec(rawInput)
+        if (handoffPrefix) {
+          if (!handoffCommand || disabledOmoCommands.has('omo-handoff')) return { kind: 'error', text: 'Task handoff is disabled; set enableTaskHandoffCommand: true to enable /omo handoff.' }
+          return handoffCommand.handler({ ...invocation, rawInput: rawInput.slice(handoffPrefix[0].length) })
+        }
         if (rawInput === 'prune-context') {
           if (!manualContextPruningHandler) {
             return { kind: 'error', text: 'Manual context pruning is disabled; set enableManualContextPruning: true to enable it.' }
