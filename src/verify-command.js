@@ -191,6 +191,7 @@ function render(scripts, checks, sessionId) {
   for (const check of checks) {
     evidenceLines.push(`- #${check.seq} ${check.isError ? 'FAIL/ERROR' : 'completed without Tool error'}: ${check.command.slice(0, 256)}`)
     if (check.text) evidenceLines.push(`  Output excerpt (untrusted): ${clean(check.text, 300)}`)
+    else if (!check.hasNonText) evidenceLines.push('  (no text output; a passing exit status is not implied)')
     if (check.hasNonText) evidenceLines.push('  (non-text result blocks present; inspect the original Tool result for details)')
   }
   const disclaimer = 'Interpretation: a completed bash Tool result is not by itself a passing test. Check its exit code/output. Missing evidence means unverified, not failed. Run an explicitly chosen script through normal DSH tools/approvals, then rerun /omo verify.'
@@ -201,6 +202,7 @@ function render(scripts, checks, sessionId) {
     const records = checks.map(check => [
       `- #${check.seq} ${check.isError ? 'FAIL/ERROR' : 'completed without Tool error'}: ${check.command.slice(0, 256)}`,
       ...(check.text ? [`  Output excerpt (untrusted): ${clean(check.text, 300)}`] : []),
+      ...(!check.text && !check.hasNonText ? ['  (no text output; a passing exit status is not implied)'] : []),
       ...(check.hasNonText ? ['  (non-text result blocks present; inspect the original Tool result for details)'] : []),
     ].join('\n'))
     const retained = [records.at(-1)]

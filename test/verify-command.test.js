@@ -49,7 +49,7 @@ function resultEvent(seq, callId, text, isError = false) {
   }
 }
 
-test('collectBashResults pairs only bash calls and ignores other tools or malformed arguments', () => {
+test('collectBashResults pairs only bash calls and ignores other tools or malformed arguments', async () => {
   const events = [
     call(1, 'one', 'pnpm test'),
     resultEvent(2, 'one', 'tests 10 pass'),
@@ -122,7 +122,7 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
   }
   const completedEviction = [call(1, 'completed-target', 'pnpm test -- first'), resultEvent(2, 'completed-target', 'first result')]
   let seq = 3
-  for (let index = 0; index < 256; index += 1) {
+  for (let index = 0; index < 2_048; index += 1) {
     completedEviction.push(call(seq++, `completed-${index}`, 'other'), resultEvent(seq++, `completed-${index}`, 'other result'))
   }
   completedEviction.push(call(seq++, 'completed-target', 'pnpm test -- second'), resultEvent(seq++, 'completed-target', 'ambiguous result'))
@@ -132,9 +132,16 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
   for (let index = 0; index < 128; index += 1) pendingEviction.push(call(seq++, `pending-${index}`, 'other'))
   pendingEviction.push(call(seq++, 'pending-target', 'pnpm test -- second'), resultEvent(seq++, 'pending-target', 'ambiguous result'))
   assert.deepEqual(collectBashResults(pendingEviction).map(check => check.command).filter(command => command === 'pnpm test -- second'), [])
+  const malformedEviction = [{ seq: 1, type: 'tool/call', data: { callId: 'malformed-evicted', name: 'bash', arguments: '{bad json' } }]
+  seq = 2
+  for (let index = 0; index < 2_048; index += 1) {
+    malformedEviction.push({ seq: seq++, type: 'tool/call', data: { callId: `malformed-${index}`, name: 'bash', arguments: '{bad json' } })
+  }
+  malformedEviction.push(call(seq++, 'malformed-evicted', 'pnpm test -- second'), resultEvent(seq++, 'malformed-evicted', 'ambiguous result'))
+  assert.deepEqual(collectBashResults(malformedEviction).map(check => check.command).filter(command => command === 'pnpm test -- second'), [])
   const overflow = [call(1, 'target', 'pnpm test -- first'), call(2, 'target', 'pnpm test -- second')]
   seq = 3
-  for (let index = 0; index < 256; index += 1) {
+  for (let index = 0; index < 2_048; index += 1) {
     const id = `overflow-${index}`
     overflow.push(call(seq++, id, 'first'), call(seq++, id, 'second'))
   }
@@ -142,7 +149,7 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
   assert.deepEqual(collectBashResults(overflow), [], 'tombstone overflow cannot re-admit an ambiguous ID')
   const earlyReuse = [call(1, 'target', 'first'), call(2, 'target', 'second'), call(3, 'target', 'third')]
   seq = 4
-  for (let index = 0; index < 256; index += 1) {
+  for (let index = 0; index < 2_048; index += 1) {
     const id = `early-overflow-${index}`
     earlyReuse.push(call(seq++, id, 'first'), call(seq++, id, 'second'))
   }
@@ -162,6 +169,19 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
     resultEvent(6, 'ambiguous', 'reused result'),
   ])
   assert.deepEqual(mixed.map(check => check.command), ['pnpm test -- good'])
+  const emptyOutput = collectBashResults([
+    call(1, 'empty-output', 'pnpm test'),
+    resultEvent(2, 'empty-output', ''),
+  ])
+  assert.equal(emptyOutput[0].text, '')
+  assert.equal(emptyOutput[0].hasNonText, false)
+  const rendered = await createVerifyCommand({
+    observeSession: async () => observation([
+      call(1, 'empty-output', 'pnpm test'),
+      resultEvent(2, 'empty-output', ''),
+    ]),
+  }, fsFixture()).handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  assert.match(rendered.text, /no text output; a passing exit status is not implied/u)
 })
 
 test('reports scripts and latest evidence without executing tests or changing state', async () => {
