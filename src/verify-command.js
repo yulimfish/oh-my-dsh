@@ -56,7 +56,7 @@ async function readScripts(fs, cwd, signal) {
   assertActive(signal)
   const rootInfo = await fs.stat(root, signal)
   if (rootInfo?.type !== 'directory') throw new Error('The current session cwd is not a real directory.')
-  const manifest = await fs.lstat('package.json', { cwd, signal })
+  const manifest = await fs.lstat('package.json', { cwd }, signal)
   if (!manifest) return []
   if (manifest.type !== 'file' || (manifest.size !== undefined && manifest.size > MAX_MANIFEST_BYTES)) {
     throw new Error('package.json is not a regular bounded file; no verification commands were inferred.')
@@ -105,6 +105,7 @@ export function collectBashResults(events) {
       const call = calls.get(callId)
       if (!call) continue
       calls.delete(callId)
+      if (results.length >= 16) results.shift()
       results.push({
         seq: event.seq,
         command: call.command,
@@ -114,26 +115,31 @@ export function collectBashResults(events) {
       })
     }
   }
-  return results.slice(-16)
+  return results
 }
 
 function render(scripts, checks, sessionId) {
-  const lines = [`Read-only verification evidence for session ${sessionId}. No tests were run and no Goal or workspace state was changed.`]
-  lines.push('', 'Suggested project scripts (inspect before running):')
-  if (scripts.length === 0) lines.push('- (no bounded test/check/build/lint scripts found)')
-  for (const script of scripts) lines.push(`- ${script.name}: ${script.command}`)
-  lines.push('', `Latest bash results observed in this session (${checks.length}):`)
-  if (checks.length === 0) lines.push('- (no completed bash Tool results observed; this is not proof that checks were never run elsewhere)')
+  const evidenceLines = [`Latest bash results observed in this session (${checks.length}):`]
+  if (checks.length === 0) evidenceLines.push('- (no completed bash Tool results observed; this is not proof that checks were never run elsewhere)')
   for (const check of checks) {
-    lines.push(`- #${check.seq} ${check.isError ? 'FAIL/ERROR' : 'completed without Tool error'}: ${check.command}`)
-    if (check.text) lines.push(`  Output excerpt (untrusted): ${clean(check.text, 300)}`)
+    evidenceLines.push(`- #${check.seq} ${check.isError ? 'FAIL/ERROR' : 'completed without Tool error'}: ${check.command}`)
+    if (check.text) evidenceLines.push(`  Output excerpt (untrusted): ${clean(check.text, 300)}`)
   }
-  lines.push('', 'Interpretation: a completed bash Tool result is not by itself a passing test. Check its exit code/output. Missing evidence means unverified, not failed. Run an explicitly chosen script through normal DSH tools/approvals, then rerun /omo verify.')
-  return result('success', lines.join('\n'))
+  const disclaimer = 'Interpretation: a completed bash Tool result is not by itself a passing test. Check its exit code/output. Missing evidence means unverified, not failed. Run an explicitly chosen script through normal DSH tools/approvals, then rerun /omo verify.'
+  const header = `Read-only verification evidence for session ${sessionId}. No tests were run and no Goal or workspace state was changed.`
+  const suffix = ['', ...evidenceLines, '', disclaimer].join('\n')
+  const scriptLines = ['', 'Suggested project scripts (inspect before running):']
+  if (scripts.length === 0) scriptLines.push('- (no bounded test/check/build/lint scripts found)')
+  for (const script of scripts) scriptLines.push(`- ${script.name}: ${script.command}`)
+  const scriptText = scriptLines.join('\n')
+  const scriptBudget = Math.max(0, MAX_OUTPUT_CHARS - header.length - suffix.length - 80)
+  const scriptsOmitted = scriptText.length > scriptBudget
+  const visibleScripts = scriptsOmitted ? `${scriptText.slice(0, scriptBudget)}\n- … additional scripts omitted to preserve verification evidence …` : scriptText
+  return result('success', `${header}${visibleScripts}${suffix}`)
 }
 
 /** Register a read-only, current-session verification evidence command. */
-export function createVerifyCommand(sessionQuery, fs) {
+export function createVerifyCommand(sessionQuery, fs, workingDirectory, sessions) {
   return {
     name: 'omo-verify',
     description: 'Inspect current-project verification scripts and latest bash evidence without executing anything.',
@@ -153,16 +159,26 @@ export function createVerifyCommand(sessionQuery, fs) {
       if (!fs || ['resolve', 'contains', 'lstat', 'stat', 'readBytes'].some(method => typeof fs[method] !== 'function')) {
         return result('error', 'The DSH filesystem contract is unavailable; project scripts were not read.')
       }
+      if (typeof workingDirectory?.get !== 'function' || typeof sessions?.get !== 'function') {
+        return result('error', 'The DSH effective-working-directory contract is unavailable; project scripts were not read.')
+      }
 
       let observation
       try {
         observation = await sessionQuery.observeSession(agent.id, { signal, projectionMode: 'none' })
         assertActive(signal)
-        if (!observation?.header || observation.header.id !== agent.id || !isAbsolute(observation.header.cwd)
-          || observation.header.cwd.length > MAX_CWD_CHARS || CONTROL_OR_BIDI.test(observation.header.cwd)) {
+        if (!observation?.header || observation.header.id !== agent.id) {
+          throw new Error('The current DSH session observation has a mismatched identity.')
+        }
+        const session = sessions.get(agent.id)
+        if (!session || session.header?.id !== agent.id) {
+          throw new Error('The current DSH Session could not be verified for working-directory inspection.')
+        }
+        const cwd = workingDirectory.get(session)
+        if (typeof cwd !== 'string' || !isAbsolute(cwd) || cwd.length > MAX_CWD_CHARS || CONTROL_OR_BIDI.test(cwd)) {
           throw new Error('The current DSH session has no safe absolute working directory.')
         }
-        const scripts = await readScripts(fs, observation.header.cwd, signal)
+        const scripts = await readScripts(fs, cwd, signal)
         if (!Array.isArray(observation.events)) throw new Error('The current DSH session has no raw event history.')
         // observation.events contains raw calls/results. filterEvents returns
         // semantic-only documents without call arguments and cannot pair bash evidence.

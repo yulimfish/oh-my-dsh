@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { collectBashResults, createVerifyCommand } from '../src/verify-command.js'
+import { collectBashResults, createVerifyCommand as createVerifyCommandWithServices } from '../src/verify-command.js'
+
+function createVerifyCommand(sessionQuery, fs, currentCwd = cwd) {
+  return createVerifyCommandWithServices(sessionQuery, fs, { get: () => currentCwd }, {
+    get: id => ({ header: { id } }),
+  })
+}
 
 const cwd = '/workspace/project'
 const manifest = JSON.stringify({
@@ -107,6 +113,18 @@ test('pairs before truncating and sanitizes untrusted command text', async () =>
   assert.equal(forged.command, 'pnpm test - #999 FAIL/ERROR: forged')
 })
 
+test('retains only the latest sixteen completed evidence records across a long history', () => {
+  const events = []
+  for (let index = 0; index < 2_000; index += 1) {
+    const id = `stress-${index}`
+    events.push(call(index * 2, id, `pnpm test -- ${index}`), resultEvent(index * 2 + 1, id, 'ok'))
+  }
+  const checks = collectBashResults(events)
+  assert.equal(checks.length, 16)
+  assert.equal(checks[0].command, 'pnpm test -- 1984')
+  assert.equal(checks.at(-1).command, 'pnpm test -- 1999')
+})
+
 test('retains valid bash evidence beyond a long session without rejecting history', async () => {
   const events = [call(1, 'test', 'pnpm test'), resultEvent(2, 'test', 'ok')]
   for (let index = 0; index < 129; index += 1) {
@@ -114,9 +132,58 @@ test('retains valid bash evidence beyond a long session without rejecting histor
   }
   const command = createVerifyCommand({ observeSession: async () => observation(events) }, fsFixture())
   const response = await command.handler({ agent: { id: 'agent-1' }, rawInput: '' })
-  assert.equal(response.kind, 'success')
   assert.equal(response.kind, 'success', response.text)
   assert.match(response.text, /pnpm test/u)
+})
+
+test('uses effective workingDirectory instead of the original session header cwd', async () => {
+  const effectiveCwd = '/workspace/other-project'
+  let inspectedCwd
+  const command = createVerifyCommandWithServices({
+    observeSession: async () => observation([call(1, 'test', 'pnpm test'), resultEvent(2, 'test', 'ok')]),
+  }, {
+    ...fsFixture(),
+    resolve: async (value, options) => {
+      inspectedCwd = options.cwd
+      return { targetKey: value === '.' ? options.cwd : `${options.cwd}/package.json` }
+    },
+    contains: () => true,
+    lstat: async () => ({ type: 'file', size: manifest.length }),
+    stat: async target => target.targetKey === effectiveCwd
+      ? { type: 'directory', version: 'dir-v1' }
+      : { type: 'file', size: manifest.length, version: 'v1' },
+  }, { get: () => effectiveCwd }, { get: id => ({ header: { id } }) })
+  const response = await command.handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  assert.equal(response.kind, 'success')
+  assert.equal(inspectedCwd, effectiveCwd)
+})
+
+test('prioritizes bash evidence and disclaimer when scripts exceed the display budget', async () => {
+  const largeManifest = JSON.stringify({ scripts: Object.fromEntries(Array.from({ length: 8 }, (_v, i) => [`test:script-${i}`, 'x'.repeat(500)])) })
+  const command = createVerifyCommand({
+    observeSession: async () => observation([call(1, 'test', 'pnpm test'), resultEvent(2, 'test', 'evidence')]),
+  }, { ...fsFixture(), readBytes: async () => new TextEncoder().encode(largeManifest) })
+  const response = await command.handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  assert.equal(response.kind, 'success')
+  assert.match(response.text, /Latest bash results/u)
+  assert.match(response.text, /evidence/u)
+  assert.match(response.text, /Missing evidence means unverified, not failed/u)
+  assert.match(response.text, /omitted/u)
+})
+
+test('passes cancellation as the third lstat argument', async () => {
+  const controller = new AbortController()
+  let received
+  const command = createVerifyCommand({ observeSession: async () => observation() }, {
+    ...fsFixture(),
+    lstat: async (_path, options, signal) => {
+      received = { options, signal }
+      return { type: 'file', size: manifest.length }
+    },
+  })
+  await command.handler({ agent: { id: 'agent-1' }, rawInput: '', signal: controller.signal })
+  assert.strictEqual(received.signal, controller.signal)
+  assert.deepEqual(received.options, { cwd })
 })
 
 test('reports failure evidence and empty history honestly', async () => {
@@ -147,9 +214,9 @@ test('rejects arguments, unavailable services, unsafe sessions, and invalid mani
   assert.match((await command.handler({ agent: { id: 'a' }, rawInput: '', signal: cancelled.signal })).text, /cancelled/u)
 
   const badCwd = createVerifyCommand({
-    observeSession: async () => ({ header: { id: 'a', cwd: 'relative/path' }, [Symbol.dispose]: async () => {} }),
+    observeSession: async () => ({ header: { id: 'a', cwd: 'relative/path' }, events: [], [Symbol.dispose]: async () => {} }),
     filterEvents: async () => { throw new Error('must not be called') },
-  }, fsFixture())
+  }, fsFixture(), 'relative/path')
   assert.match((await badCwd.handler({ agent: { id: 'a' }, rawInput: '' })).text, /no safe absolute working directory/u)
 
   const badManifest = createVerifyCommand({

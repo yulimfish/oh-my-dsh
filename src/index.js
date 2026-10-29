@@ -2983,7 +2983,7 @@ async function renderRouteCapabilityStatus(llmService, roleRoutes, categoryRoute
   return describe('accepted as a DSH-compatible call configuration.')
 }
 
-function registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName, webService, worktreeService, manualContextPruningHandler, projectCommandManager, lifecycleSignal, roleRoutes, categoryRoutes, routePreflight, sessionQueryService, taskResultRegistry) {
+function registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName, webService, worktreeService, manualContextPruningHandler, projectCommandManager, lifecycleSignal, roleRoutes, categoryRoutes, routePreflight, sessionQueryService, taskResultRegistry, workingDirectoryService, sessionsService) {
   let availableCommandNames = ''
   let taskCommandHelp = ''
   let skillRefreshHelp = ''
@@ -3009,7 +3009,9 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
     ? createOmoWebSearchHandler(webService, lifecycleSignal)
     : undefined
   const stopContinuationCommand = goalService ? createStopContinuationCommand(goalService) : undefined
-  const verifyCommand = config.enableVerifyCommand ? createVerifyCommand(sessionQueryService, ctx.fs) : undefined
+  const verifyCommand = config.enableVerifyCommand
+    ? createVerifyCommand(sessionQueryService, ctx.fs, workingDirectoryService, sessionsService)
+    : undefined
   const handoffCommand = config.enableTaskHandoffCommand
     ? createHandoffCommand(taskResultRegistry, { queueMessage: queueParentMessage })
     : undefined
@@ -3723,11 +3725,16 @@ export function apply(ctx, rawConfig) {
     terminalBackendTypes = readTerminalBackendTypes(terminalsService)
   }
   const sessionQueryService = optionalService(ctx, 'sessionQuery')
-  if (config.enableVerifyCommand && typeof sessionQueryService?.observeSession !== 'function') {
-    throw new Error('dsh-omo: enableVerifyCommand requires DSH sessionQuery.observeSession')
+  const workingDirectoryService = optionalService(ctx, 'workingDirectory')
+  if (config.enableVerifyCommand && (typeof sessionQueryService?.observeSession !== 'function'
+    || typeof workingDirectoryService?.get !== 'function')) {
+    throw new Error('dsh-omo: enableVerifyCommand requires DSH sessionQuery.observeSession and workingDirectory.get')
   }
   const lspService = optionalService(ctx, 'lsp')
   const sessionsService = optionalService(ctx, 'sessions')
+  if (config.enableVerifyCommand && typeof sessionsService?.get !== 'function') {
+    throw new Error('dsh-omo: enableVerifyCommand requires DSH sessions.get')
+  }
   if (config.enableProgressContext && typeof sessionsService?.get !== 'function') {
     throw new Error('dsh-omo: enableProgressContext requires DSH sessions.get')
   }
@@ -4529,7 +4536,7 @@ export function apply(ctx, rawConfig) {
     interpolate: false,
     text: buildUltraworkGuidance(disabledOmoCommands, activeRoleNames, config.enableWriteExistingFileGuard, config.enableProjectAgentFiles),
   })
-  registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName, webService, worktreeService, manualContextPruningHandler, projectCommandManager, lifecycle.controller.signal, roleRoutes, categoryRoutes, routePreflight, sessionQueryService, taskResultRegistry)
+  registerCommands(ctx, config, projectSkills, goalService, llmService, jobController, statusSnapshot, disabledOmoCommands, activeRoleNames, activeBundledSkills, providerName, webService, worktreeService, manualContextPruningHandler, projectCommandManager, lifecycle.controller.signal, roleRoutes, categoryRoutes, routePreflight, sessionQueryService, taskResultRegistry, workingDirectoryService, sessionsService)
   if (config.enableSessionSearch) {
     const disposeSessionSearch = registerSessionSearchTool(ctx, sessionQueryService)
     ctx.effect(() => disposeSessionSearch, 'dsh-omo session search tool')

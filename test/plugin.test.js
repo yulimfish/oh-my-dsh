@@ -3578,7 +3578,7 @@ test('registers read-only verification evidence command with raw observation onl
   const missing = makeContext()
   assert.throws(
     () => apply(missing.ctx, { ...baseConfig, enableVerifyCommand: true }),
-    /enableVerifyCommand requires DSH sessionQuery\.observeSession/u,
+    /enableVerifyCommand requires DSH sessionQuery\.observeSession and workingDirectory\.get/u,
   )
   assert.equal(missing.commands.has('omo-verify'), false)
 
@@ -3587,15 +3587,15 @@ test('registers read-only verification evidence command with raw observation onl
   assert.equal(disabled.commands.has('omo-verify'), false)
   assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /verifyCommand=disabled/u)
 
-  const fixture = makeContext({ services: { sessionQuery: { observeSession() {} } } })
+  const fixture = makeContext({ services: { sessionQuery: { observeSession() {} }, workingDirectory: { get: () => '/workspace' }, sessions: { get: () => undefined } } })
   apply(fixture.ctx, { ...baseConfig, enableVerifyCommand: true })
   assert.equal(fixture.commands.has('omo-verify'), true)
   assert.equal(fixture.commands.get('omo-verify').input.hint, '(no arguments)')
   assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /verifyCommand=enabled/u)
-  const aliases = makeContext({ services: { sessionQuery: { observeSession() {} } } })
+  const aliases = makeContext({ services: { sessionQuery: { observeSession() {} }, workingDirectory: { get: () => '/workspace' }, sessions: { get: () => undefined } } })
   apply(aliases.ctx, { ...baseConfig, enableVerifyCommand: true })
   assert.equal((await aliases.commands.get('omo').handler({ rawInput: 'verify' })).kind, 'error', 'the alias uses the real observation service contract')
-  const disabledAlias = makeContext({ services: { sessionQuery: { observeSession() {} } } })
+  const disabledAlias = makeContext({ services: { sessionQuery: { observeSession() {} }, workingDirectory: { get: () => '/workspace' }, sessions: { get: () => undefined } } })
   apply(disabledAlias.ctx, { ...baseConfig, enableVerifyCommand: true, disabledOmoCommands: ['omo-verify'] })
   assert.equal(disabledAlias.commands.has('omo-verify'), false)
   assert.equal((await disabledAlias.commands.get('omo').handler({ rawInput: 'verify' })).kind, 'error')

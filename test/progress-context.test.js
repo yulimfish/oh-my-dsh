@@ -160,6 +160,14 @@ test('skipping an event window never presents an older list as current', () => {
   assert.match(projection.render(), /new list/u)
 })
 
+test('recovers a recent successful todo inside the initial bounded window', () => {
+  const events = []
+  for (let seq = 1; seq <= 600; seq += 1) events.push({ seq, type: 'step/end', data: {} })
+  events.push(todoEvent(601, 'recent', [{ content: 'recent restored task', status: 'in_progress' }]), resultEvent(602, 'recent'))
+  const projection = createProgressProjection(sessionWith(events))
+  assert.match(projection.render(), /recent restored task/u)
+})
+
 test('malformed session data and snapshot failures fail open', () => {
   const malformed = createProgressProjection({
     seq: 3,

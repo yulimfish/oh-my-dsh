@@ -72,7 +72,7 @@ export function createProgressProjection(session) {
         // Never show an older list as current after skipping an event window.
         state = freshProjection(session, Math.max(0, session.seq - MAX_EVENTS_PER_RENDER))
       }
-      const events = session.snapshotEvents(start, session.seq)
+      const events = session.snapshotEvents(state.offset, session.seq)
       if (!Array.isArray(events)) {
         state = freshProjection(session, session.seq)
         return ''
