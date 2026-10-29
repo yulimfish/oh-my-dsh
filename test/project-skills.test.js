@@ -2781,7 +2781,7 @@ test('format compatibility excludes hidden root entries and rejects their stale 
   })
 })
 
-test('format compatibility derives flat and directory names only for absent metadata through the native registry', async t => {
+test('format compatibility derives flat and directory names for absent or falsy metadata through the native registry', async t => {
   const cwd = await makeWorkspace(t)
   const documents = [
     ['flat-guide.md', 'Plain Markdown body.', 'flat-guide'],
@@ -2793,6 +2793,9 @@ test('format compatibility derives flat and directory names only for absent meta
     ['explicit-name.md', '---\nname: selected-name\n---\nNamed body.', 'selected-name'],
     ['Bad Filename.md', '---\nname: safe-explicit-name\n---\nExplicit metadata body.', 'safe-explicit-name'],
     ['description-only.md', '---\ndescription: Explicit description\n---\nDescription body.', 'description-only'],
+    ['falsy-name.md', '---\nname: null\ndescription: null\n---\nFalsy body.', 'falsy-name'],
+    ['falsy-values.md', '---\nname: false\ndescription: 0\n---\nFalsy body.', 'falsy-values'],
+    ['empty-name.md', '---\nname: ""\ndescription: ""\n---\nFalsy body.', 'empty-name'],
   ]
   for (const [relative, source] of documents) await writeCompatibilityDocument(cwd, relative, source)
   const { fs } = makeFileSystem()
@@ -2891,11 +2894,11 @@ test('format compatibility is opt-in and validates its option without weakening 
 test('format compatibility rejects explicit invalid metadata, malformed YAML, controls, and invalid derived names', async t => {
   const cwd = await makeWorkspace(t)
   const invalid = [
-    ['blank-name.md', '---\nname: ""\n---\nPrivate body.'],
-    ['null-name.md', '---\nname: null\n---\nPrivate body.'],
+    ['blank-name.md', '---\nname: "   "\n---\nPrivate body.'],
+    ['null-name.md', '---\nname: 1\n---\nPrivate body.'],
     ['bad-name.md', '---\nname: invalid/name\n---\nPrivate body.'],
-    ['blank-description.md', '---\ndescription: ""\n---\nPrivate body.'],
-    ['null-description.md', '---\ndescription: null\n---\nPrivate body.'],
+    ['blank-description.md', '---\ndescription: "   "\n---\nPrivate body.'],
+    ['null-description.md', '---\ndescription: true\n---\nPrivate body.'],
     ['malformed.md', '---\nname: [invalid\n---\nPrivate body.'],
     ['duplicate.md', '---\nname: first\nname: second\n---\nPrivate body.'],
     ['control.md', '---\nname: "bad\\u202evalue"\n---\nPrivate body.'],
@@ -2913,7 +2916,7 @@ test('format compatibility gives canonical SKILL.md priority over named files in
   await writeCompatibilityDocument(cwd, 'valid/valid.md', 'Named lower priority body.')
   await writeCompatibilityDocument(cwd, 'valid/SKILL.md', 'Canonical winner body.')
   await writeCompatibilityDocument(cwd, 'invalid/invalid.md', 'Must not fallback body.')
-  await writeCompatibilityDocument(cwd, 'invalid/SKILL.md', '---\nname: ""\n---\nInvalid primary body.')
+  await writeCompatibilityDocument(cwd, 'invalid/SKILL.md', '---\nname: "   "\n---\nInvalid primary body.')
   await writeCompatibilityDocument(cwd, 'linked/linked.md', 'Must not follow body.')
   const external = await makeWorkspace(t)
   const target = path.join(external, 'outside.md')

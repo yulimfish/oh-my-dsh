@@ -272,8 +272,8 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
     throw new SkillFormatError('skill YAML frontmatter must be a mapping')
   }
 
-  const name = formatCompatibility && !Object.hasOwn(frontmatter, 'name') ? defaultName : frontmatter.name
-  const description = formatCompatibility && !Object.hasOwn(frontmatter, 'description') ? `Project skill ${name}` : frontmatter.description
+  const name = formatCompatibility && !frontmatter.name ? defaultName : frontmatter.name
+  const description = formatCompatibility && !frontmatter.description ? `Project skill ${name}` : frontmatter.description
   const whenToUse = frontmatter.whenToUse
   if (typeof name !== 'string' || !isSkillName(name)) throw new SkillFormatError('skill frontmatter name must be a valid kebab-case name')
   if (typeof description !== 'string' || description.trim().length === 0 || description.length > 2_000) {
