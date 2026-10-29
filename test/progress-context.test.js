@@ -280,6 +280,17 @@ test('does not re-admit a completed call ID or accept a duplicate result after e
   assert.equal(createProgressProjection(sessionWith(duplicateEvents)).render(), '')
 })
 
+test('retains the current plan when only its completed tombstone is evicted', () => {
+  const events = [todoEvent(1, 'current-plan', [{ content: 'still current plan', status: 'in_progress' }]), resultEvent(2, 'current-plan')]
+  for (let index = 0; index < 40; index += 1) {
+    events.push(todoEvent(index * 2 + 3, `completed-${index}`, [{ content: `other plan ${index}`, status: 'pending' }]))
+    events.push(resultEvent(index * 2 + 4, `completed-${index}`))
+  }
+  const text = createProgressProjection(sessionWith(events)).render()
+  assert.match(text, /other plan 39/u)
+  assert.doesNotMatch(text, /still current plan/u)
+})
+
 test('keeps the newest successful plan when a later call fails before an older result succeeds', () => {
   const projection = createProgressProjection(sessionWith([
     todoEvent(1, 'old-call', [{ content: 'old successful plan', status: 'in_progress' }]),
