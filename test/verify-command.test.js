@@ -353,6 +353,21 @@ test('fails closed instead of growing evicted identity state without bound', () 
   assert.deepEqual(collectBashResults(events), [])
 })
 
+test('discards evidence when each identity-eviction path saturates on the final event', () => {
+  for (const path of ['pending', 'malformed', 'ambiguous-call']) {
+    const events = [call(1, 'known-good', 'pnpm test -- known-good'), resultEvent(2, 'known-good', 'known good result')]
+    let seq = 3
+    const count = path === 'pending' ? 32_896 : 34_816
+    for (let index = 0; index < count; index += 1) {
+      const id = `final-${path}-${index}`
+      if (path === 'pending') events.push(call(seq++, id, 'pending'))
+      else if (path === 'malformed') events.push({ seq: seq++, type: 'tool/call', data: { callId: id, name: 'bash', arguments: '{bad json' } })
+      else events.push(call(seq++, id, 'first'), call(seq++, id, 'second'))
+    }
+    assert.deepEqual(collectBashResults(events), [], path)
+  }
+})
+
 test('retains latest failure and non-text notices under output pressure', async () => {
   const events = []
   for (let index = 0; index < 16; index += 1) {

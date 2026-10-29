@@ -206,7 +206,7 @@ export function collectBashResults(events) {
       })
     }
   }
-  return results
+  return evictedCallIds.size >= MAX_EVICTED_CALL_IDS ? [] : results
 }
 
 function render(scripts, checks, sessionId) {
