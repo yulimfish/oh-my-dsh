@@ -62,7 +62,15 @@ export function canonicalCallSignature(name, args) {
         return output + append(']')
       }
 
-      const keys = Object.keys(value).sort()
+      // Bound own-key collection before sorting; otherwise a wide object can
+      // allocate and sort arbitrarily many keys before visitation rejects it.
+      const keys = []
+      const remaining = MAX_NODES - state.nodes + 1
+      for (const key in value) {
+        keys.push(key)
+        if (keys.length >= remaining) break
+      }
+      keys.sort()
       let output = append('{')
       for (let index = 0; index < keys.length; index += 1) {
         const key = keys[index]
@@ -247,11 +255,21 @@ export function createRepeatedCallAdvisory(agentsService) {
     return { ...decision, additionalContexts: [...previousContexts, reminder] }
   }
 
+  // Terminal results may bypass post-execute after a pipeline failure. Clean up
+  // only the token/listener here; accepted-completion accounting stays in listener.
+  const onResult = exec => {
+    try {
+      if (typeof exec?.token === 'symbol') clearPending(exec.token)
+    } catch {
+      // Result observation must not affect the Tool outcome.
+    }
+  }
+
   function dispose() {
     disposed = true
     states.clear()
     for (const token of [...pending.keys()]) clearPending(token)
   }
 
-  return { preExecute, listener, clearAgent, dispose }
+  return { preExecute, listener, onResult, clearAgent, dispose }
 }

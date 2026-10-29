@@ -4668,6 +4668,7 @@ export function apply(ctx, rawConfig) {
     const advisory = createRepeatedCallAdvisory(agentsService)
     ctx.on('tools/pre-execute', advisory.preExecute)
     ctx.on('tools/post-execute', advisory.listener)
+    ctx.on('tools/result', advisory.onResult)
     ctx.on('agent/disposed', payload => advisory.clearAgent(payload?.agent))
     ctx.effect(() => advisory.dispose, 'dsh-omo repeated-call advisory')
   }

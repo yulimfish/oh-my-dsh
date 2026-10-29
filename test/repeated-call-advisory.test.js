@@ -86,6 +86,20 @@ test('canonicalization skips ambiguous, hostile, or over-budget arguments withou
   assert.equal(canonicalCallSignature('bad\u202ename', {}), undefined)
   assert.equal(canonicalCallSignature('', {}), undefined)
   assert.equal(canonicalCallSignature('x'.repeat(257), {}), undefined)
+
+  let descriptorReads = 0
+  const wide = new Proxy({}, {
+    ownKeys() {
+      descriptorReads += 1
+      return Array.from({ length: 1_000 }, (_value, index) => `key-${index}`)
+    },
+    getOwnPropertyDescriptor() {
+      descriptorReads += 1
+      return { enumerable: true, configurable: true }
+    },
+  })
+  assert.equal(canonicalCallSignature('read', wide), undefined)
+  assert.ok(descriptorReads < 300, `wide input must stop near the node budget, observed ${descriptorReads} descriptor reads`)
 })
 
 test('warns once at the third consecutive identical completed call and preserves downstream decisions', async () => {
@@ -272,6 +286,7 @@ test('real ToolRuntime carries pre/post identity and adds only the third-call ad
   const featureFiber = await ctx.plugin(pluginCtx => {
     pluginCtx.on('tools/pre-execute', feature.preExecute)
     pluginCtx.on('tools/post-execute', feature.listener)
+    pluginCtx.on('tools/result', feature.onResult)
     pluginCtx.effect(() => feature.dispose, 'test repeated-call advisory')
   })
   const bodies = []
@@ -311,4 +326,51 @@ test('real ToolRuntime carries pre/post identity and adds only the third-call ad
   assert.equal(bodies.length, 3, 'the warning never denies or rewrites a Tool call')
   const fourth = await execute()
   assert.equal(fourth.additionalContexts, undefined)
+})
+
+test('real tools/result removes pending listeners after a post-bypassing pipeline failure', async t => {
+  const ctx = new Context()
+  const promptFiber = await ctx.plugin(SystemPrompt)
+  const toolsFiber = await ctx.plugin(ToolRuntime)
+  const agent = { id: 'pipeline-failure-agent', session: { id: 'pipeline-failure-agent', append() {} } }
+  const feature = createRepeatedCallAdvisory({ get: () => agent })
+  const featureFiber = await ctx.plugin(pluginCtx => {
+    pluginCtx.on('tools/pre-execute', feature.preExecute)
+    pluginCtx.on('tools/post-execute', feature.listener)
+    pluginCtx.on('tools/result', feature.onResult)
+    pluginCtx.effect(() => feature.dispose, 'test repeated-call cleanup')
+  })
+  let posts = 0
+  const failureFiber = await ctx.plugin(pluginCtx => {
+    pluginCtx.on('tools/execute', () => { throw new Error('deliberate pipeline failure') })
+    pluginCtx.on('tools/post-execute', async (_exec, _result, next) => {
+      posts += 1
+      return next()
+    })
+  })
+  const controller = new AbortController()
+  const originalAdd = controller.signal.addEventListener.bind(controller.signal)
+  const originalRemove = controller.signal.removeEventListener.bind(controller.signal)
+  let adds = 0
+  let removes = 0
+  controller.signal.addEventListener = (...args) => { adds += 1; return originalAdd(...args) }
+  controller.signal.removeEventListener = (...args) => { removes += 1; return originalRemove(...args) }
+  t.after(async () => {
+    await failureFiber.dispose()
+    await featureFiber.dispose()
+    await toolsFiber.dispose()
+    await promptFiber.dispose()
+  })
+
+  const result = await ctx.tools.execute({
+    callId: 'pipeline-failure-call',
+    name: 'read',
+    arguments: { path: 'src/a.js' },
+    agent,
+    signal: controller.signal,
+  })
+  assert.equal(result.isError, true)
+  assert.equal(posts, 0, 'the deliberate execute failure bypasses post-execute')
+  assert.equal(adds, 1, 'pre-execute installs one abort listener')
+  assert.equal(removes, 1, 'tools/result removes that listener without post-execute')
 })
