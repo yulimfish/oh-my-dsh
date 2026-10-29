@@ -268,7 +268,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
     if (document.errors.length > 0) throw new SkillFormatError('skill YAML frontmatter is invalid')
     try {
       frontmatter = document.toJS({ maxAliasCount: 0 })
-      if (formatCompatibility && document.contents === null) frontmatter = {}
+      if (formatCompatibility && (document.contents === null || frontmatter === null || typeof frontmatter !== 'object' || Array.isArray(frontmatter))) frontmatter = {}
     } catch {
       throw new SkillFormatError('skill YAML frontmatter cannot be represented safely')
     }

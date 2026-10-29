@@ -2807,6 +2807,8 @@ test('format compatibility derives flat and directory names for absent or falsy 
     ['indented-guide.md', '\uFEFF    body.\r\n\tindented line\r\n', 'indented-guide'],
     ['empty-yaml.md', '---\n---\nEmpty metadata body.', 'empty-yaml'],
     ['comment-yaml.md', '---\n# metadata intentionally absent\n---\nComment metadata body.', 'comment-yaml'],
+    ['scalar-yaml.md', '---\nplain scalar\n---\nScalar frontmatter body.', 'scalar-yaml'],
+    ['sequence-yaml.md', '---\n- one\n- two\n---\nSequence frontmatter body.', 'sequence-yaml'],
     ['directory-guide/SKILL.md', 'Canonical plain body.', 'directory-guide'],
     ['named-guide/named-guide.md', 'Named fallback body.', 'named-guide'],
     ['explicit-name.md', '---\nname: selected-name\n---\nNamed body.', 'selected-name'],
@@ -2850,6 +2852,11 @@ test('format compatibility derives flat and directory names for absent or falsy 
     const skill = await registry.get(name, { cwd })
     assert.equal(skill.description, '(opencode-project - Skill) Demo')
     assert.equal(skill.content, expected)
+  }
+  const strict = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills'] })
+  for (const name of ['scalar-yaml', 'sequence-yaml']) {
+    assert.equal(await strict.registry.get(name, { cwd }), undefined)
   }
 })
 
