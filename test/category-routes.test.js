@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { normalizeCategoryRoutes, resolveCategoryRoute } from '../src/category-routes.js'
+import { normalizeCategoryRoutes, normalizeExplicitFallbackModels, resolveCategoryRoute } from '../src/category-routes.js'
+import { normalizeRoleCategoryRouteAliases } from '../src/role-category-route-aliases.js'
 
 const routes = () => normalizeCategoryRoutes([
   { name: 'build', provider: 'provider-build', model: 'model-build', reasoningEffort: 'medium', maxTokens: 2048 },
@@ -32,6 +33,10 @@ test('normalizes immutable category primary routes and rejects invalid entries',
   }
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', fallback: ['p2/m2'] }]), /unsupported field.*fallback/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', chains: [] }]), /unsupported field.*chains/u)
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', skills: 'debugging' }]), /skills must be an array/u)
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', skills: ['bad name'] }]), /valid kebab-case skill name/u)
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', skills: ['debugging', 'debugging'] }]), /duplicate names/u)
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', skills: ['debugging', 'git-master', 'review-work', 'visual-qa', 'security-research'] }]), /at most 4/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', disable: 'true' }]), /disable must be a boolean/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', disable: true }]), /requires both provider and model/u)
   assert.throws(() => resolveCategoryRoute(routes(), 'build', { maxTokens: 1.5 }), /role route maxTokens must be a positive safe integer/u)
@@ -83,7 +88,7 @@ test('normalizes bounded explicit category fallback model chains immutably', () 
   }
 })
 
-test('requires a paired role pin before resolving role fallback chains', () => {
+test('resolves fallback-only role chains without categories and preserves pinned precedence', () => {
   const categoryRoutes = normalizeCategoryRoutes([{
     name: 'chain', provider: 'category-primary', model: 'category-model',
     fallbackModels: [{ provider: 'category-backup', model: 'category-backup-model' }],
@@ -92,8 +97,15 @@ test('requires a paired role pin before resolving role fallback chains', () => {
     role: 'explore',
     fallbackModels: [{ provider: 'role-backup', model: 'role-backup-model' }],
   }
-  assert.throws(() => resolveCategoryRoute(categoryRoutes, undefined, unpinnedRole), /fallbackModels require an explicit provider\/model pin/u)
-  assert.throws(() => resolveCategoryRoute(categoryRoutes, 'chain', unpinnedRole), /fallbackModels require an explicit provider\/model pin/u)
+  const fallbackOnly = resolveCategoryRoute(categoryRoutes, undefined, unpinnedRole)
+  assert.deepEqual(fallbackOnly.fallbackModels, unpinnedRole.fallbackModels)
+  assert.equal(Object.hasOwn(fallbackOnly, 'provider'), false)
+  assert.equal(Object.hasOwn(fallbackOnly, 'model'), false)
+  assert.equal(Object.isFrozen(fallbackOnly), true)
+  assert.equal(Object.isFrozen(fallbackOnly.fallbackModels[0]), true)
+  assert.deepEqual(resolveCategoryRoute(categoryRoutes, undefined, { ...unpinnedRole, category: undefined }).fallbackModels, unpinnedRole.fallbackModels)
+  assert.throws(() => resolveCategoryRoute(categoryRoutes, 'chain', unpinnedRole), /cannot be combined/u)
+  assert.throws(() => resolveCategoryRoute(categoryRoutes, undefined, { ...unpinnedRole, category: 'chain' }), /cannot be combined/u)
 
   const pinnedRole = {
     role: 'explore', provider: 'role-primary', model: 'role-primary-model',
@@ -108,6 +120,37 @@ test('requires a paired role pin before resolving role fallback chains', () => {
   const pinnedRoute = resolveCategoryRoute(categoryRoutes, 'chain', pinnedRoleWithoutFallback)
   assert.equal(Object.hasOwn(pinnedRoute, 'fallbackModels'), false,
     'a paired role pin without its own chain must not inherit the category fallback chain')
+})
+
+test('validates fallback-only candidates and retains normalized alias metadata', () => {
+  const aliases = normalizeRoleCategoryRouteAliases(true, [
+    { from: { provider: 'alias', model: 'm' }, to: { provider: 'actual', model: 'model' }, reasoningEffort: 'high' },
+  ])
+  const chain = normalizeExplicitFallbackModels([{ provider: 'alias', model: 'm', maxTokens: 200 }], 'fallbackModels', undefined, aliases)
+  assert.equal(chain[0].provider, 'actual')
+  assert.equal(chain[0].model, 'model')
+  assert.equal(chain[0].routeAlias.reasoningEffort, 'high')
+  const resolved = resolveCategoryRoute(routes(), undefined, { role: 'explore', fallbackModels: chain })
+  assert.strictEqual(resolved.fallbackModels, chain)
+  assert.throws(() => normalizeExplicitFallbackModels([
+    { provider: 'alias', model: 'm' }, { provider: 'actual', model: 'model' },
+  ], 'fallbackModels', undefined, aliases), /duplicate/u)
+
+  for (const fallbackModels of [[], null, 'p/m', [null], [{ provider: 'p' }],
+    [{ provider: 'p', model: 'm', extra: true }],
+    [{ provider: 'p\u202e', model: 'm' }],
+    [{ provider: 'p', model: 'm', maxTokens: 0 }],
+    [{ provider: 'p', model: 'm' }, { provider: 'p', model: 'm' }],
+    Array.from({ length: 4 }, (_, index) => ({ provider: 'p', model: `m${index}` })),
+  ]) {
+    assert.throws(() => resolveCategoryRoute(routes(), undefined, { role: 'explore', fallbackModels }), /fallback/u)
+  }
+  for (const pin of [{ provider: 'p' }, { model: 'm' }]) {
+    assert.throws(() => resolveCategoryRoute(routes(), undefined, {
+      role: 'explore', ...pin, fallbackModels: [{ provider: 'p2', model: 'm2' }],
+    }), /must be set together/u)
+  }
+  assert.equal(resolveCategoryRoute(routes(), undefined, undefined), undefined)
 })
 
 test('resolves explicit category before the role default category', () => {
@@ -126,6 +169,22 @@ test('resolves explicit category before the role default category', () => {
   assert.equal(defaulted.provider, 'provider-build')
   assert.equal(defaulted.model, 'model-build')
   assert.equal(defaulted.maxTokens, 2048)
+})
+
+test('resolves bounded category skill defaults from the selected category', () => {
+  const categoryRoutes = normalizeCategoryRoutes([
+    { name: 'build', provider: 'provider-build', model: 'model-build', skills: ['debugging', 'git-master'] },
+    { name: 'review', provider: 'provider-review', model: 'model-review', skills: ['visual-qa'] },
+    { name: 'empty', provider: 'provider-empty', model: 'model-empty', skills: [] },
+  ])
+  const roleRoute = Object.freeze({ category: 'build' })
+
+  const defaulted = resolveCategoryRoute(categoryRoutes, undefined, roleRoute)
+  assert.deepEqual(defaulted.categorySkills, ['debugging', 'git-master'])
+  assert.equal(Object.isFrozen(defaulted.categorySkills), true)
+  assert.deepEqual(resolveCategoryRoute(categoryRoutes, 'review', roleRoute).categorySkills, ['visual-qa'])
+  assert.deepEqual(resolveCategoryRoute(categoryRoutes, 'empty', roleRoute).categorySkills, [])
+  assert.equal(Object.hasOwn(resolveCategoryRoute(routes(), 'build', undefined), 'categorySkills'), false)
 })
 
 test('explicit per-role provider/model and reasoning settings override a category route', () => {
@@ -349,4 +408,63 @@ test('normalizer registry, category routes, and resolved routes are immutable', 
   assert.equal(Object.isFrozen(resolved), true)
   assert.throws(() => { categoryRoute.provider = 'mutated' }, TypeError)
   assert.throws(() => { resolved.provider = 'mutated' }, TypeError)
+})
+
+test('applies role/category route aliases before route selection and fallback validation', () => {
+  const aliases = normalizeRoleCategoryRouteAliases(true, [
+    {
+      from: { provider: 'legacy', model: 'primary-v1' },
+      to: { provider: 'current', model: 'primary-v2' },
+      reasoningEffort: 'high',
+    },
+    {
+      from: { provider: 'legacy-backup', model: 'backup-v1' },
+      to: { provider: 'current-backup', model: 'backup-v2' },
+      reasoningEffort: 'low',
+    },
+  ])
+  const categoryRoutes = normalizeCategoryRoutes([{
+    name: 'review',
+    provider: 'legacy',
+    model: 'primary-v1',
+    fallbackModels: [{ provider: 'legacy-backup', model: 'backup-v1', reasoningEffort: 'high' }],
+  }], aliases)
+  const categoryRoute = categoryRoutes.get('review')
+  assert.deepEqual([categoryRoute.provider, categoryRoute.model], ['current', 'primary-v2'])
+  assert.deepEqual(categoryRoute.routeAlias, {
+    from: { provider: 'legacy', model: 'primary-v1' },
+    to: { provider: 'current', model: 'primary-v2' },
+    reasoningEffort: 'high',
+  })
+  assert.deepEqual(categoryRoute.reasoningEffort, undefined, 'an alias default stays separate from use-site controls')
+  assert.deepEqual(categoryRoute.fallbackModels, [{
+    provider: 'current-backup',
+    model: 'backup-v2',
+    routeAlias: {
+      from: { provider: 'legacy-backup', model: 'backup-v1' },
+      to: { provider: 'current-backup', model: 'backup-v2' },
+      reasoningEffort: 'low',
+    },
+    reasoningEffort: 'high',
+  }])
+  assert.deepEqual(resolveCategoryRoute(categoryRoutes, 'review').routeAlias, categoryRoute.routeAlias)
+
+  const roleAlias = {
+    from: { provider: 'role-legacy', model: 'role-v1' },
+    to: { provider: 'role-current', model: 'role-v2' },
+    reasoningEffort: 'max',
+  }
+  const rolePinned = resolveCategoryRoute(categoryRoutes, 'review', {
+    provider: 'role-current', model: 'role-v2', routeAlias: roleAlias,
+  })
+  assert.deepEqual([rolePinned.provider, rolePinned.model], ['role-current', 'role-v2'])
+  assert.deepEqual(rolePinned.routeAlias, roleAlias, 'an explicit role pin keeps its own alias provenance')
+  assert.equal(rolePinned.reasoningEffort, undefined, 'a role alias default remains separate until the selected route is materialized')
+
+  assert.throws(() => normalizeCategoryRoutes([{
+    name: 'duplicate-after-alias',
+    provider: 'legacy',
+    model: 'primary-v1',
+    fallbackModels: [{ provider: 'current', model: 'primary-v2' }],
+  }], aliases), /duplicate provider\/model candidates/u)
 })

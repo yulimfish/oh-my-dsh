@@ -117,6 +117,73 @@ test('returns promptly on caller cancellation even if a model adapter does not s
   assert.equal(receivedSignal.aborted, true)
 })
 
+test('catalog-stage cancellation settles listing and exact lookup without waiting for late data', async () => {
+  for (const rawInput of ['', 'deepseek/model']) {
+    let finishCatalog
+    let resolves = 0
+    const command = createModelCapabilitiesCommand({
+      listProviders: () => new Promise(resolve => { finishCatalog = resolve }),
+      resolveModelInfo: () => { resolves += 1; return {} },
+    })
+    const controller = new AbortController()
+    const pending = command.handler({ rawInput, signal: controller.signal })
+    await new Promise(resolve => setImmediate(resolve))
+    controller.abort()
+    const observed = await Promise.race([
+      pending,
+      new Promise(resolve => setImmediate(() => resolve({ kind: 'still-pending', text: '' }))),
+    ])
+    finishCatalog([])
+    await pending
+    assert.equal(observed.kind, 'error')
+    assert.match(observed.text, /canceled/u)
+    assert.equal(resolves, 0)
+  }
+})
+
+test('pre-cancelled model diagnostics never invoke the provider catalog', async () => {
+  let calls = 0
+  const command = createModelCapabilitiesCommand({
+    listProviders: () => { calls += 1; return [] },
+    resolveModelInfo: () => ({}),
+  })
+  const controller = new AbortController()
+  controller.abort()
+  for (const rawInput of ['', 'deepseek/model']) {
+    const observed = await command.handler({ rawInput, signal: controller.signal })
+    assert.equal(observed.kind, 'error')
+    assert.match(observed.text, /canceled/u)
+  }
+  assert.equal(calls, 0)
+})
+
+test('provider catalog waits obey lifecycle cancellation and the lookup deadline', async () => {
+  for (const rawInput of ['', 'deepseek/model']) {
+    const lifecycle = new AbortController()
+    const llm = {
+      listProviders: () => new Promise(() => {}),
+      resolveModelInfo: () => { throw new Error('must not resolve after catalog timeout') },
+    }
+    const command = createModelCapabilitiesCommand(llm, { lifecycleSignal: lifecycle.signal })
+    const pending = command.handler({ rawInput })
+    lifecycle.abort()
+    assert.match((await pending).text, /canceled/u)
+
+    const bounded = createModelCapabilitiesCommand(llm, { lookupTimeoutMs: 10 })
+    let timer
+    try {
+      const observed = await Promise.race([
+        bounded.handler({ rawInput }),
+        new Promise(resolve => { timer = setTimeout(() => resolve({ kind: 'overdue', text: '' }), 500) }),
+      ])
+      assert.equal(observed.kind, 'error')
+      assert.match(observed.text, /timed out/u)
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+})
+
 test('rejects unknown providers and malformed model selectors before provider calls', async () => {
   const { llm, calls } = makeLlm()
   const command = createModelCapabilitiesCommand(llm)
@@ -315,6 +382,38 @@ test('failed refresh preserves the last known in-memory snapshot', async () => {
   assert.equal(summary.kind, 'success')
   assert.match(summary.text, /Model IDs: 1/u)
   assert.match(summary.text, /in-memory/u)
+})
+
+test('cancelled refresh reserves backend capacity until the ignored fetch settles', async t => {
+  for (const rejectBackend of [false, true]) {
+    await t.test(rejectBackend ? 'late rejection' : 'late success', async () => {
+      let resolveBackend
+      let rejectPending
+      const backend = new Promise((resolve, reject) => { resolveBackend = resolve; rejectPending = reject })
+      let calls = 0
+      const command = createModelCapabilitiesCommand(undefined, {
+        enableModelCapabilitiesRefresh: true,
+        web: { fetch() { calls += 1; return calls === 1 ? backend : Promise.resolve(modelsDevResponse()) } },
+      })
+      const controller = new AbortController()
+      const first = command.handler({ rawInput: 'refresh', signal: controller.signal })
+      controller.abort()
+      assert.equal((await first).kind, 'error')
+      const retry = await Promise.race([
+        command.handler({ rawInput: 'refresh' }),
+        new Promise(resolve => setImmediate(() => resolve({ kind: 'still-waiting', text: '' }))),
+      ])
+      assert.equal(retry.kind, 'error')
+      assert.match(retry.text, /in progress|pending/u)
+      assert.equal(calls, 1)
+      if (rejectBackend) rejectPending(new Error('late backend failure'))
+      else resolveBackend(modelsDevResponse())
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal((await command.handler({ rawInput: 'snapshot' })).kind, 'error', 'late data is not published')
+      assert.equal((await command.handler({ rawInput: 'refresh' })).kind, 'success')
+      assert.equal(calls, 2)
+    })
+  }
 })
 
 test('caller and plugin cancellation plus deadline promptly settle ignored web requests', async () => {

@@ -31,12 +31,20 @@ function policy(overrides = {}) {
   }
 }
 
+const testAgents = new Map()
+
+function agentFor(value = 'agent-1') {
+  if (value !== null && typeof value === 'object') return value
+  if (!testAgents.has(value)) testAgents.set(value, { id: value })
+  return testAgents.get(value)
+}
+
 function requestPayload(id = 'agent-1', turn = 1, step = 1, signal = new AbortController().signal) {
-  return { agent: { id }, turn, step, signal }
+  return { agent: agentFor(id), turn, step, signal }
 }
 
 function errorPayload(options = {}) {
-  const id = options.id ?? 'agent-1'
+  const agent = agentFor(options.agent ?? options.id ?? 'agent-1')
   const turn = options.turn ?? 1
   const step = options.step ?? 1
   const provider = options.provider ?? 'provider-primary'
@@ -44,7 +52,7 @@ function errorPayload(options = {}) {
   const signal = options.signal ?? new AbortController().signal
   const failure = { code: options.code ?? (status === undefined ? 'UNKNOWN' : `HTTP_${status}`), message: 'redacted test failure' }
   if (status !== undefined) failure.status = status
-  return { agent: { id }, turn, step, provider, failure, retryPolicy: options.retryPolicy, signal }
+  return { agent, turn, step, provider, failure, retryPolicy: options.retryPolicy, signal }
 }
 
 async function request(controller, id = 'agent-1', turn = 1, step = 1, config = PRIMARY, signal = new AbortController().signal) {
@@ -59,6 +67,7 @@ test('normalizes default-off bounded fallback policy into immutable routes', () 
   const defaults = normalizeRuntimeFallback()
   assert.deepEqual(defaults, {
     enabled: false,
+    cooldownSeconds: 60,
     retryOnStatuses: [429, 500, 502, 503, 504],
     chains: [],
   })
@@ -67,6 +76,8 @@ test('normalizes default-off bounded fallback policy into immutable routes', () 
 
   const normalized = normalizeRuntimeFallback(policy())
   assert.equal(normalized.enabled, true)
+  assert.equal(normalized.cooldownSeconds, 60)
+  assert.equal(normalizeRuntimeFallback(policy({ cooldownSeconds: 0 })).cooldownSeconds, 0)
   assert.equal(normalized.chains.length, 1)
   assert.equal(Object.isFrozen(normalized.chains[0].fallbacks[0]), true)
   assert.deepEqual(normalized.chains[0].fallbacks[1], {
@@ -77,6 +88,9 @@ test('normalizes default-off bounded fallback policy into immutable routes', () 
 test('rejects malformed, duplicate, unbounded, and unsupported fallback settings', () => {
   assert.throws(() => normalizeRuntimeFallback(null), /plain object/u)
   assert.throws(() => normalizeRuntimeFallback({ enabled: 'true' }), /enabled must be a boolean/u)
+  assert.throws(() => normalizeRuntimeFallback({ cooldownSeconds: -1 }), /cooldownSeconds must be an integer/u)
+  assert.throws(() => normalizeRuntimeFallback({ cooldownSeconds: 1.5 }), /cooldownSeconds must be an integer/u)
+  assert.throws(() => normalizeRuntimeFallback({ cooldownSeconds: 86_401 }), /cooldownSeconds must be an integer/u)
   assert.throws(() => normalizeRuntimeFallback({ enabled: true }), /at least one chain/u)
   assert.throws(() => normalizeRuntimeFallback({ enabled: true, chains: [{ provider: 'p', model: 'm', fallbacks: [] }] }), /between 1 and 3 routes/u)
   assert.throws(() => normalizeRuntimeFallback({ unsupported: true }), /unsupported field/u)
@@ -140,6 +154,57 @@ test('switches only after delegated same-route retries are exhausted, then advan
   assert.equal(await fail(controller, errorPayload({ provider: 'provider-last', status: 503 })), undefined)
   assert.strictEqual(await request(controller), PRIMARY, 'an exhausted chain cannot restart within the same turn/step')
   assert.equal(await fail(controller, errorPayload({ status: 429 })), undefined)
+  controller.dispose()
+})
+
+test('cooldown skips recently failed fallback routes per Agent and expires/clears them safely', async () => {
+  let time = 0
+  const controller = createRuntimeFallbackController(policy({ cooldownSeconds: 60 }), { now: () => time })
+
+  await request(controller, 'cooldown-agent', 1, 1)
+  assert.deepEqual(await fail(controller, errorPayload({ id: 'cooldown-agent', turn: 1 })), { kind: 'retry' })
+  assert.equal((await request(controller, 'cooldown-agent', 1, 1)).model, 'model-backup')
+  assert.deepEqual(await fail(controller, errorPayload({ id: 'cooldown-agent', turn: 1, provider: 'provider-backup' })), { kind: 'retry' })
+  assert.equal((await request(controller, 'cooldown-agent', 1, 1)).model, 'model-last')
+
+  await request(controller, 'cooldown-agent', 2, 1)
+  assert.deepEqual(await fail(controller, errorPayload({ id: 'cooldown-agent', turn: 2 })), { kind: 'retry' })
+  assert.equal((await request(controller, 'cooldown-agent', 2, 1)).model, 'model-last', 'the recently failed first fallback is skipped on the next turn')
+
+  await request(controller, 'isolated-agent', 1, 1)
+  assert.deepEqual(await fail(controller, errorPayload({ id: 'isolated-agent', turn: 1 })), { kind: 'retry' })
+  assert.equal((await request(controller, 'isolated-agent', 1, 1)).model, 'model-backup', 'cooldown state is not shared across Agents')
+
+  time = 60_000
+  await request(controller, 'cooldown-agent', 3, 1)
+  assert.deepEqual(await fail(controller, errorPayload({ id: 'cooldown-agent', turn: 3 })), { kind: 'retry' })
+  assert.equal((await request(controller, 'cooldown-agent', 3, 1)).model, 'model-backup', 'a route becomes available when its cooldown expires')
+  assert.deepEqual(await fail(controller, errorPayload({ id: 'cooldown-agent', turn: 3, provider: 'provider-backup' })), { kind: 'retry' })
+  assert.equal((await request(controller, 'cooldown-agent', 3, 1)).model, 'model-last')
+
+  time = 61_000
+  await request(controller, 'cooldown-agent', 4, 1)
+  assert.deepEqual(await fail(controller, errorPayload({ id: 'cooldown-agent', turn: 4 })), { kind: 'retry' })
+  assert.equal((await request(controller, 'cooldown-agent', 4, 1)).model, 'model-last', 'a newly failed route is cooldown-protected again')
+
+  controller.onAgentDisposed({ agent: agentFor('cooldown-agent') })
+  const replacement = { id: 'cooldown-agent' }
+  await request(controller, replacement, 5, 1)
+  assert.deepEqual(await fail(controller, errorPayload({ agent: replacement, turn: 5 })), { kind: 'retry' })
+  assert.equal((await request(controller, replacement, 5, 1)).model, 'model-backup', 'Agent disposal clears cooldown before same-ID replacement')
+  controller.dispose()
+})
+
+test('zero cooldown keeps selecting fallback candidates in configured order', async () => {
+  const controller = createRuntimeFallbackController(policy({ cooldownSeconds: 0 }))
+  await request(controller, 'no-cooldown', 1, 1)
+  assert.deepEqual(await fail(controller, errorPayload({ id: 'no-cooldown', turn: 1 })), { kind: 'retry' })
+  assert.equal((await request(controller, 'no-cooldown', 1, 1)).model, 'model-backup')
+  assert.deepEqual(await fail(controller, errorPayload({ id: 'no-cooldown', turn: 1, provider: 'provider-backup' })), { kind: 'retry' })
+
+  await request(controller, 'no-cooldown', 2, 1)
+  assert.deepEqual(await fail(controller, errorPayload({ id: 'no-cooldown', turn: 2 })), { kind: 'retry' })
+  assert.equal((await request(controller, 'no-cooldown', 2, 1)).model, 'model-backup')
   controller.dispose()
 })
 
@@ -285,8 +350,56 @@ test('isolates fallback state by Agent and clears disposed Agents', async () => 
   assert.deepEqual(await fail(controller, errorPayload({ id: 'agent-a', turn: 2 })), { kind: 'retry' })
   assert.equal((await request(controller, 'agent-a', 2, 1)).provider, 'provider-backup')
 
-  controller.onAgentDisposed({ agent: { id: 'agent-a' } })
-  assert.strictEqual(await request(controller, 'agent-a', 2, 1), PRIMARY, 'disposal clears per-Agent retry state')
+  controller.onAgentDisposed({ agent: agentFor('agent-a') })
+  const replacement = { id: 'agent-a' }
+  assert.strictEqual(await request(controller, replacement, 2, 1), PRIMARY, 'disposal clears per-Agent retry state before same-ID replacement')
+  assert.deepEqual(await fail(controller, errorPayload({ agent: replacement, turn: 2 })), { kind: 'retry' })
+  assert.equal((await request(controller, replacement, 2, 1)).provider, 'provider-backup')
+  controller.dispose()
+})
+
+test('same-ID Agent replacement isolates retry state and ignores late old-Agent events', async () => {
+  const liveAgents = new Map()
+  const agents = { get: id => liveAgents.get(id) }
+  const controller = createRuntimeFallbackController(policy(), { agents })
+  const id = 'reused-agent'
+  const oldAgent = { id }
+  liveAgents.set(id, oldAgent)
+
+  await request(controller, oldAgent, 1, 1)
+  assert.deepEqual(await fail(controller, errorPayload({ agent: oldAgent })), { kind: 'retry' })
+  assert.equal((await request(controller, oldAgent, 1, 1)).provider, 'provider-backup')
+
+  const replacement = { id }
+  liveAgents.set(id, replacement)
+  assert.strictEqual(await request(controller, replacement, 1, 1), PRIMARY, 'a live same-ID replacement starts from its primary route')
+  assert.deepEqual(await fail(controller, errorPayload({ agent: replacement })), { kind: 'retry' })
+  assert.equal((await request(controller, replacement, 1, 1)).provider, 'provider-backup', 'the replacement gets a fresh cooldown budget')
+
+  assert.strictEqual(await request(controller, oldAgent, 1, 1), PRIMARY, 'a stale request from the old Agent cannot rewrite the replacement state')
+  assert.equal(await fail(controller, errorPayload({ agent: oldAgent })), undefined, 'a stale request error is ignored')
+  controller.onAgentDisposed({ agent: oldAgent })
+  assert.equal((await request(controller, replacement, 1, 1)).provider, 'provider-backup', 'late old disposal cannot clear the replacement state')
+
+  controller.dispose()
+})
+
+test('without agents.get, conflicting same-ID state waits for exact disposal', async () => {
+  const controller = createRuntimeFallbackController(policy())
+  const id = 'unverified-replacement'
+  const oldAgent = { id }
+  const replacement = { id }
+
+  await request(controller, oldAgent, 1, 1)
+  assert.deepEqual(await fail(controller, errorPayload({ agent: oldAgent })), { kind: 'retry' })
+  assert.equal((await request(controller, oldAgent, 1, 1)).provider, 'provider-backup')
+
+  assert.strictEqual(await request(controller, replacement, 1, 1), PRIMARY, 'without a registry, a conflicting identity cannot claim the current state')
+  assert.equal((await request(controller, oldAgent, 1, 1)).provider, 'provider-backup', 'the verified existing owner remains isolated')
+  controller.onAgentDisposed({ agent: oldAgent })
+  assert.strictEqual(await request(controller, replacement, 1, 1), PRIMARY, 'exact disposal releases the ID for a later Agent')
+  assert.deepEqual(await fail(controller, errorPayload({ agent: replacement })), { kind: 'retry' })
+  assert.equal((await request(controller, replacement, 1, 1)).provider, 'provider-backup')
   controller.dispose()
 })
 

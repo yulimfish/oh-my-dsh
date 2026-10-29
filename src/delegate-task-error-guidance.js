@@ -10,7 +10,7 @@ const ERROR_MESSAGE_ENCODER = new TextEncoder()
 const EMPTY_TASK_ERROR = 'Task must not be empty.'
 const TASK_TOO_LONG_ERROR = /^Task is (\d+) characters; dsh-omo limit is (\d+)\.$/
 const ROLE_UNAVAILABLE_SUFFIX = '" is not available in dsh-omo.'
-const TASK_TOOL_NAMES = new Set(['dsh_omo_task', 'dsh_omo_task_continuable'])
+const TASK_TOOL_NAMES = new Set(['dsh_omo_call_agent', 'dsh_omo_task', 'dsh_omo_task_continuable'])
 
 export const DELEGATE_TASK_ERROR_GUIDANCE = `[DSH task input error — correct the arguments before retrying]
 

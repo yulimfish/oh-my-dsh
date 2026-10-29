@@ -97,68 +97,58 @@ function displayModelInfo(provider, model, info) {
   ].join('\n'))
 }
 
-async function listProviders(llm) {
+async function listProviders(llm, signal, lifecycleSignal, timeoutMs) {
   if (!serviceHas(llm, 'listProviders')) return result('error', 'The DSH LLM provider catalog is unavailable in this profile.')
+  let lookupSignal
   try {
-    const rows = await llm.listProviders()
+    lookupSignal = boundedLookupSignal(signal, lifecycleSignal, timeoutMs)
+    const rows = await awaitWithSignal(() => llm.listProviders(), lookupSignal)
+    if (lookupSignal.aborted) throw ABORTED
     if (!Array.isArray(rows)) return result('error', 'DSH returned an invalid provider catalog.')
     return formatRows('Registered DSH LLM providers:', rows, row => {
       if (!isRecord(row)) return '- (invalid provider row)'
       return `- ${markdownCodeSpan(clean(row.id))} — ${markdownCodeSpan(clean(row.name))}`
     })
   } catch (error) {
+    if (signal?.aborted || lifecycleSignal?.aborted) return result('error', 'Provider catalog lookup was canceled.')
+    if (lookupSignal?.aborted) return result('error', 'Provider catalog lookup timed out.')
     return result('error', `Could not list DSH LLM providers (${safeErrorName(error)}).`)
   }
 }
 
-async function findProvider(llm, id) {
+async function findProvider(llm, id, signal) {
   if (!serviceHas(llm, 'listProviders')) return undefined
-  const rows = await llm.listProviders()
+  const rows = await awaitWithSignal(() => llm.listProviders(), signal)
+  if (signal.aborted) throw ABORTED
   if (!Array.isArray(rows)) throw new TypeError('invalid provider catalog')
   const provider = rows.slice(0, MAX_PROVIDER_LOOKUP_SCAN).find(row => isRecord(row) && row.id === id)
   if (provider) return provider
   return rows.length > MAX_PROVIDER_LOOKUP_SCAN ? PROVIDER_LOOKUP_INDETERMINATE : undefined
 }
 
-function boundedLookupSignal(signal) {
-  const timeout = AbortSignal.timeout(MODEL_LOOKUP_TIMEOUT_MS)
-  return signal ? AbortSignal.any([signal, timeout]) : timeout
+function boundedLookupSignal(signal, lifecycleSignal, timeoutMs) {
+  const parents = [signal, lifecycleSignal].filter(value => value !== undefined && value !== null)
+  if (parents.some(value => !validSignal(value))) throw new TypeError('Invalid model lookup cancellation signal.')
+  return AbortSignal.any([...parents, AbortSignal.timeout(timeoutMs)])
 }
 
-async function resolveModel(llm, provider, model, signal) {
+async function resolveModel(llm, provider, model, signal, lifecycleSignal, timeoutMs) {
   if (!serviceHas(llm, 'resolveModelInfo')) return result('error', 'Exact DSH model capability lookup is unavailable in this profile.')
-  if (signal?.aborted) return result('error', 'Model capability lookup was canceled.')
   let lookupSignal
-  let removeAbortListener
   try {
-    const providerRow = await findProvider(llm, provider)
+    lookupSignal = boundedLookupSignal(signal, lifecycleSignal, timeoutMs)
+    const providerRow = await findProvider(llm, provider, lookupSignal)
     if (providerRow === PROVIDER_LOOKUP_INDETERMINATE) {
       return result('error', `Provider presence is indeterminate: the DSH catalog exceeds the ${MAX_PROVIDER_LOOKUP_SCAN}-entry exact lookup limit.`)
     }
     if (!providerRow) return result('error', `Provider ${markdownCodeSpan(clean(provider))} is not registered with DSH LLM.`)
-    lookupSignal = boundedLookupSignal(signal)
-    if (lookupSignal.aborted) {
-      return result('error', signal?.aborted ? 'Model capability lookup was canceled.' : 'Model capability lookup timed out.')
-    }
-    const aborted = new Promise((_, reject) => {
-      const rejectOnAbort = () => reject(lookupSignal.reason ?? new Error('model capability lookup aborted'))
-      if (lookupSignal.aborted) rejectOnAbort()
-      else {
-        lookupSignal.addEventListener('abort', rejectOnAbort, { once: true })
-        removeAbortListener = () => lookupSignal.removeEventListener('abort', rejectOnAbort)
-      }
-    })
-    const info = await Promise.race([
-      Promise.resolve().then(() => llm.resolveModelInfo(provider, model, lookupSignal)),
-      aborted,
-    ])
+    const info = await awaitWithSignal(() => llm.resolveModelInfo(provider, model, lookupSignal), lookupSignal)
+    if (lookupSignal.aborted) throw ABORTED
     return displayModelInfo(providerRow.id, model, info)
   } catch (error) {
-    if (signal?.aborted) return result('error', 'Model capability lookup was canceled.')
+    if (signal?.aborted || lifecycleSignal?.aborted) return result('error', 'Model capability lookup was canceled.')
     if (lookupSignal?.aborted) return result('error', 'Model capability lookup timed out.')
     return result('error', `Could not resolve ${markdownCodeSpan(clean(provider))}/${markdownCodeSpan(clean(model))} metadata (${safeErrorName(error)}).`)
-  } finally {
-    removeAbortListener?.()
   }
 }
 
@@ -270,7 +260,7 @@ function displayModelsDevEntry(snapshot, rawModelId) {
   ].join('\n'))
 }
 
-async function fetchModelsDevSnapshot(web, callerSignal, lifecycleSignal, timeoutMs) {
+async function fetchModelsDevSnapshot(web, callerSignal, lifecycleSignal, timeoutMs, trackFetch) {
   if (!serviceHas(web, 'fetch')) throw new ModelsDevRefreshError('DSH Web fetch is unavailable in this profile.')
   const { signal, deadline } = createRefreshSignal(callerSignal, lifecycleSignal, timeoutMs)
   const abortMessage = () => callerSignal?.aborted || lifecycleSignal?.aborted
@@ -280,7 +270,11 @@ async function fetchModelsDevSnapshot(web, callerSignal, lifecycleSignal, timeou
 
   let response
   try {
-    response = await awaitWithSignal(() => web.fetch({ url: MODELS_DEV_SOURCE_URL }, signal), signal)
+    response = await awaitWithSignal(() => {
+      const pending = Promise.resolve(web.fetch({ url: MODELS_DEV_SOURCE_URL }, signal))
+      trackFetch(pending)
+      return pending
+    }, signal)
   } catch (error) {
     if (signal.aborted) throw new ModelsDevRefreshError(abortMessage())
     throw new ModelsDevRefreshError(`Could not retrieve the fixed models.dev source (${webFailureMessage(error)}).`)
@@ -315,11 +309,23 @@ export function createModelCapabilitiesCommand(llm, options = {}) {
   const refreshEnabled = options.enableModelCapabilitiesRefresh === true
   const web = options.web
   const lifecycleSignal = options.lifecycleSignal
+  const lookupTimeoutMs = Number.isSafeInteger(options.lookupTimeoutMs)
+    && options.lookupTimeoutMs > 0 && options.lookupTimeoutMs <= MODEL_LOOKUP_TIMEOUT_MS
+    ? options.lookupTimeoutMs
+    : MODEL_LOOKUP_TIMEOUT_MS
   const refreshTimeoutMs = Number.isSafeInteger(options.refreshTimeoutMs)
     && options.refreshTimeoutMs > 0 && options.refreshTimeoutMs <= MODELS_DEV_REFRESH_TIMEOUT_MS
     ? options.refreshTimeoutMs
     : MODELS_DEV_REFRESH_TIMEOUT_MS
-  const snapshotState = { current: undefined, refreshing: false }
+  const snapshotState = { current: undefined, refreshing: false, pendingFetch: undefined }
+  const trackFetch = pending => {
+    snapshotState.pendingFetch = pending
+    const release = () => {
+      if (snapshotState.pendingFetch === pending) snapshotState.pendingFetch = undefined
+    }
+    // Caller cancellation ends only the local wait, not backend ownership.
+    pending.then(release, release)
+  }
   const hint = refreshEnabled ? '[provider/model|refresh|snapshot [model-id]]' : '[provider/model]'
   return {
     name: 'omo-models',
@@ -335,10 +341,10 @@ export function createModelCapabilitiesCommand(llm, options = {}) {
       const input = rawInput.trim()
       if (input === 'refresh') {
         if (!refreshEnabled) return result('error', 'models.dev refresh is disabled; set enableModelCapabilitiesRefresh to true.')
-        if (snapshotState.refreshing) return result('error', 'A models.dev refresh is already in progress.')
+        if (snapshotState.refreshing || snapshotState.pendingFetch) return result('error', 'A models.dev refresh is already in progress; its backend request may still be pending after cancellation.')
         snapshotState.refreshing = true
         try {
-          const snapshot = await fetchModelsDevSnapshot(web, args?.signal, lifecycleSignal, refreshTimeoutMs)
+          const snapshot = await fetchModelsDevSnapshot(web, args?.signal, lifecycleSignal, refreshTimeoutMs, trackFetch)
           snapshotState.current = snapshot
           return result('success', [
             `Refreshed the in-memory models.dev snapshot (${snapshot.modelCount} model IDs).`,
@@ -366,7 +372,7 @@ export function createModelCapabilitiesCommand(llm, options = {}) {
         }
         return displayModelsDevEntry(snapshot, modelId)
       }
-      if (!input) return listProviders(llm)
+      if (!input) return listProviders(llm, args?.signal, lifecycleSignal, lookupTimeoutMs)
 
       const separator = input.indexOf('/')
       if (separator < 1 || separator === input.length - 1) {
@@ -375,7 +381,7 @@ export function createModelCapabilitiesCommand(llm, options = {}) {
       const provider = input.slice(0, separator).trim()
       const model = input.slice(separator + 1).trim()
       if (!provider || !model) return result('error', 'Provider and model names must not be empty.')
-      return resolveModel(llm, provider, model, args?.signal)
+      return resolveModel(llm, provider, model, args?.signal, lifecycleSignal, lookupTimeoutMs)
     },
   }
 }

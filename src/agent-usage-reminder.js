@@ -21,12 +21,14 @@ export const AGENT_USAGE_TARGET_TOOLS = Object.freeze([
 ])
 
 export const AGENT_USAGE_TASK_TOOLS = Object.freeze([
+  'dsh_omo_call_agent',
   'dsh_omo_task',
   'dsh_omo_task_continuable',
   'dsh_omo_task_followup',
 ])
 
 export const AGENT_USAGE_DELEGATION_TOOLS = Object.freeze([
+  'dsh_omo_call_agent',
   'dsh_omo_task',
   'dsh_omo_task_continuable',
   'dsh_omo_task_followup',

@@ -1,5 +1,9 @@
+import { isSkillName } from '@deepseek-ai/dsh-skill'
 import { normalizeCategoryPromptAppend } from './roles.js'
+import { resolveRoleCategoryRouteAlias } from './role-category-route-aliases.js'
+import { resolveModelCatalogReference } from './model-catalog.js'
 
+export const MAX_CATEGORY_SKILL_NAMES = 4
 const MAX_CATEGORY_ROUTES = 32
 const MAX_CATEGORY_NAME_CHARS = 64
 const MAX_CATEGORY_DESCRIPTION_BYTES = 512
@@ -9,11 +13,12 @@ const MAX_PROVIDER_CHARS = 128
 const MAX_MODEL_CHARS = 256
 const MAX_REASONING_EFFORT_CHARS = 64
 const MAX_EXPLICIT_FALLBACK_MODELS = 3
-const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'fallbackModels', 'disable', 'promptAppend', 'description', 'tools'])
+const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'fallbackModels', 'disable', 'promptAppend', 'description', 'tools', 'skills'])
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
 const CATEGORY_TOOL_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
 const DESCRIPTION_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
 const CATEGORY_ROUTE_DATA = new WeakMap()
+const NORMALIZED_FALLBACK_MODELS = new WeakSet()
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -87,7 +92,27 @@ function normalizeCategoryTools(value, categoryName) {
   })
 }
 
-export function normalizeExplicitFallbackModels(value, label, primary) {
+function normalizeCategorySkills(value, categoryName) {
+  if (value === undefined) return undefined
+  const label = `category route "${categoryName}" skills`
+  if (!Array.isArray(value) || value.length > MAX_CATEGORY_SKILL_NAMES) {
+    throw new TypeError(`${label} must be an array with at most ${MAX_CATEGORY_SKILL_NAMES} skill names`)
+  }
+  const skills = []
+  const seen = new Set()
+  for (let index = 0; index < value.length; index += 1) {
+    const skillName = value[index]
+    if (typeof skillName !== 'string' || !isSkillName(skillName)) {
+      throw new TypeError(`${label}[${index}] must be a valid kebab-case skill name`)
+    }
+    if (seen.has(skillName)) throw new TypeError(`${label} must not contain duplicate names`)
+    seen.add(skillName)
+    skills.push(skillName)
+  }
+  return Object.freeze(skills)
+}
+
+export function normalizeExplicitFallbackModels(value, label, primary, roleCategoryRouteAliases, modelCatalog) {
   if (value === undefined) return undefined
   if (!Array.isArray(value)) {
     throw new TypeError(`${label} must be an array with at most ${MAX_EXPLICIT_FALLBACK_MODELS} explicit provider/model candidates`)
@@ -97,23 +122,27 @@ export function normalizeExplicitFallbackModels(value, label, primary) {
   }
   if (value.length === 0) return undefined
 
-  const seen = new Set([JSON.stringify([primary.provider, primary.model])])
+  const seen = new Set(primary === undefined ? [] : [JSON.stringify([primary.provider, primary.model])])
   const candidates = []
   for (let index = 0; index < value.length; index += 1) {
-    const entry = value[index]
-    if (!isRecord(entry)) throw new TypeError(`${label}[${index}] must be an object`)
-    for (const key of Reflect.ownKeys(entry)) {
+    const rawEntry = value[index]
+    if (!isRecord(rawEntry)) throw new TypeError(`${label}[${index}] must be an object`)
+    for (const key of Reflect.ownKeys(rawEntry)) {
       if (typeof key !== 'string' || !['provider', 'model', 'reasoningEffort', 'maxTokens'].includes(key)) {
         throw new TypeError(`${label}[${index}] contains unsupported field "${String(key)}"`)
       }
     }
+    const entry = resolveModelCatalogReference(modelCatalog, rawEntry, `${label}[${index}]`)
     const hasProvider = Object.hasOwn(entry, 'provider') && entry.provider !== undefined
     const hasModel = Object.hasOwn(entry, 'model') && entry.model !== undefined
     if (!hasProvider || !hasModel) {
       throw new TypeError(`${label}[${index}] must set both provider and model`)
     }
-    const provider = normalizeString(entry.provider, `${label}[${index}] provider`, MAX_PROVIDER_CHARS)
-    const model = normalizeString(entry.model, `${label}[${index}] model`, MAX_MODEL_CHARS)
+    const sourceProvider = normalizeString(entry.provider, `${label}[${index}] provider`, MAX_PROVIDER_CHARS)
+    const sourceModel = normalizeString(entry.model, `${label}[${index}] model`, MAX_MODEL_CHARS)
+    const routeAlias = resolveRoleCategoryRouteAlias(roleCategoryRouteAliases, sourceProvider, sourceModel)
+    const provider = routeAlias?.to.provider ?? sourceProvider
+    const model = routeAlias?.to.model ?? sourceModel
     const rawReasoningEffort = Object.hasOwn(entry, 'reasoningEffort') ? entry.reasoningEffort : undefined
     const reasoningEffort = rawReasoningEffort === undefined
       ? undefined
@@ -128,11 +157,14 @@ export function normalizeExplicitFallbackModels(value, label, primary) {
     candidates.push(Object.freeze({
       provider,
       model,
+      ...(routeAlias !== undefined ? { routeAlias } : {}),
       ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
     }))
   }
-  return Object.freeze(candidates)
+  const normalized = Object.freeze(candidates)
+  NORMALIZED_FALLBACK_MODELS.add(normalized)
+  return normalized
 }
 
 function normalizeMaxTokens(value, label) {
@@ -174,26 +206,26 @@ function createReadonlyRegistry(routes) {
 /**
  * Validate one required primary provider/model route per category plus optional
  * bounded explicit fallback candidates, reasoning, token ceiling, task-disable
- * flag, prompt guidance, chooser description, and inherited-tool allow/deny
- * filters. Fallback resolution is a DSH-native spawn-time capability preflight,
+ * flag, prompt guidance, chooser description, skill defaults, and inherited-tool
+ * allow/deny filters. Fallback resolution is a DSH-native spawn-time capability preflight,
  * not the upstream model-resolution pipeline or a runtime retry policy.
  */
-export function normalizeCategoryRoutes(entries) {
+export function normalizeCategoryRoutes(entries, roleCategoryRouteAliases, modelCatalog) {
   if (!Array.isArray(entries) || entries.length > MAX_CATEGORY_ROUTES) {
     throw new TypeError(`categoryRoutes must be an array with at most ${MAX_CATEGORY_ROUTES} entries`)
   }
 
   const routes = new Map()
   for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index]
-    if (!isRecord(entry)) throw new TypeError(`categoryRoutes[${index}] must be an object`)
-
-    for (const key of Reflect.ownKeys(entry)) {
+    const rawEntry = entries[index]
+    if (!isRecord(rawEntry)) throw new TypeError(`categoryRoutes[${index}] must be an object`)
+    for (const key of Reflect.ownKeys(rawEntry)) {
       if (typeof key !== 'string' || !ALLOWED_CATEGORY_FIELDS.has(key)) {
         throw new TypeError(`categoryRoutes[${index}] contains unsupported field "${String(key)}"`)
       }
     }
 
+    const entry = resolveModelCatalogReference(modelCatalog, rawEntry, `categoryRoutes[${index}]`)
     if (!Object.hasOwn(entry, 'name')) throw new TypeError(`categoryRoutes[${index}].name is required`)
     const name = normalizeCategoryName(entry.name, `categoryRoutes[${index}].name`)
     if (routes.has(name)) throw new TypeError(`duplicate category route "${name}"`)
@@ -207,8 +239,11 @@ export function normalizeCategoryRoutes(entries) {
       throw new TypeError(`category route "${name}" requires both provider and model`)
     }
 
-    const provider = normalizeString(entry.provider, `category route "${name}" provider`, MAX_PROVIDER_CHARS)
-    const model = normalizeString(entry.model, `category route "${name}" model`, MAX_MODEL_CHARS)
+    const sourceProvider = normalizeString(entry.provider, `category route "${name}" provider`, MAX_PROVIDER_CHARS)
+    const sourceModel = normalizeString(entry.model, `category route "${name}" model`, MAX_MODEL_CHARS)
+    const routeAlias = resolveRoleCategoryRouteAlias(roleCategoryRouteAliases, sourceProvider, sourceModel)
+    const provider = routeAlias?.to.provider ?? sourceProvider
+    const model = routeAlias?.to.model ?? sourceModel
     const rawReasoningEffort = Object.hasOwn(entry, 'reasoningEffort') ? entry.reasoningEffort : undefined
     const reasoningEffort = rawReasoningEffort === undefined
       ? undefined
@@ -220,16 +255,25 @@ export function normalizeCategoryRoutes(entries) {
     }
     const promptAppend = normalizeCategoryPromptAppend(entry.promptAppend, name)
     const description = normalizeCategoryDescription(entry.description, name)
+    const skills = normalizeCategorySkills(entry.skills, name)
     const categoryToolFilters = normalizeCategoryTools(entry.tools, name)
-    const fallbackModels = normalizeExplicitFallbackModels(entry.fallbackModels, `category route "${name}" fallbackModels`, { provider, model })
+    const fallbackModels = normalizeExplicitFallbackModels(
+      entry.fallbackModels,
+      `category route "${name}" fallbackModels`,
+      { provider, model },
+      roleCategoryRouteAliases,
+      modelCatalog,
+    )
 
     routes.set(name, Object.freeze({
       name,
       provider,
       model,
+      ...(routeAlias !== undefined ? { routeAlias } : {}),
       ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
       disable,
+      ...(skills !== undefined ? { skills } : {}),
       ...(fallbackModels !== undefined ? { fallbackModels } : {}),
       ...(promptAppend !== undefined ? { promptAppend } : {}),
       ...(description !== undefined ? { description } : {}),
@@ -258,15 +302,26 @@ function normalizeRolePin(roleRoute) {
  * Resolve explicit category over the role's default category. A role's explicit
  * provider/model pin, reasoning effort, maxTokens, and fallback chain override
  * the category; paired pins bypass category fallback preflight unless the role
- * defines its own explicit fallback chain. Category promptAppend is carried
- * separately from role promptAppend and filters.
+ * defines its own explicit fallback chain. Category promptAppend and skill
+ * defaults are carried separately from role promptAppend and filters. A role
+ * with only a nonempty explicit fallback chain may resolve without a category;
+ * combining that form with any explicit/default category fails closed.
  */
 export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute) {
   if (roleRoute !== undefined && !isRecord(roleRoute)) {
     throw new TypeError('roleRoute must be an object when provided')
   }
   if (roleRoute?.fallbackModels !== undefined && !normalizeRolePin(roleRoute)) {
-    throw new TypeError('role route fallbackModels require an explicit provider/model pin')
+    if (explicitCategory !== undefined || roleRoute.category !== undefined) {
+      throw new TypeError('fallback-only role routes cannot be combined with an explicit or default category')
+    }
+    const fallbackModels = NORMALIZED_FALLBACK_MODELS.has(roleRoute.fallbackModels)
+      ? roleRoute.fallbackModels
+      : normalizeExplicitFallbackModels(roleRoute.fallbackModels, 'role route fallbackModels', undefined)
+    if (!fallbackModels?.length) {
+      throw new TypeError('fallback-only role routes require a nonempty fallbackModels chain')
+    }
+    return Object.freeze({ ...roleRoute, fallbackModels })
   }
 
   const hasExplicitCategory = explicitCategory !== undefined
@@ -314,6 +369,9 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
     provider: rolePin?.provider ?? categoryRoute.provider,
     model: rolePin?.model ?? categoryRoute.model,
   }
+  const routeAlias = rolePin !== undefined ? roleRoute?.routeAlias : categoryRoute.routeAlias
+  if (routeAlias === undefined) delete resolved.routeAlias
+  else resolved.routeAlias = routeAlias
   const reasoningEffort = roleReasoningEffort ?? categoryRoute.reasoningEffort
   if (reasoningEffort === undefined) delete resolved.reasoningEffort
   else resolved.reasoningEffort = reasoningEffort
@@ -327,6 +385,8 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
   else resolved.fallbackModels = fallbackModels
   if (categoryRoute.promptAppend === undefined) delete resolved.categoryPromptAppend
   else resolved.categoryPromptAppend = categoryRoute.promptAppend
+  if (categoryRoute.skills === undefined) delete resolved.categorySkills
+  else resolved.categorySkills = categoryRoute.skills
   if (categoryRoute.categoryAllowTools === undefined) delete resolved.categoryAllowTools
   else resolved.categoryAllowTools = categoryRoute.categoryAllowTools
   if (categoryRoute.categoryDenyTools === undefined) delete resolved.categoryDenyTools

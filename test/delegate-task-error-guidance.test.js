@@ -20,9 +20,9 @@ function makeFailure(message) {
   return { isError: true, error: { message }, content: [{ type: 'text', text: message }] }
 }
 
-test('adds fixed advice for two bounded task-text errors on exact one-shot and continuable Tools', async () => {
+test('adds fixed advice for bounded task-text errors on one-shot, call-agent, and continuable Tools', async () => {
   const listener = createDelegateTaskErrorGuidanceListener(12000)
-  const toolNames = ['dsh_omo_task', 'dsh_omo_task_continuable']
+  const toolNames = ['dsh_omo_task', 'dsh_omo_task_continuable', 'dsh_omo_call_agent']
   const messages = [
     ['Task must not be empty.', ' \t '],
     ['Task is 12001 characters; dsh-omo limit is 12000.', 'x'.repeat(12001)],
@@ -77,7 +77,7 @@ test('adds fixed guidance for exact unavailable roles and explicit category erro
     },
   ]
 
-  for (const name of ['dsh_omo_task', 'dsh_omo_task_continuable']) {
+  for (const name of ['dsh_omo_task', 'dsh_omo_task_continuable', 'dsh_omo_call_agent']) {
     for (const item of cases) {
       const previous = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'prior context' }] }
       const value = { unchanged: true }

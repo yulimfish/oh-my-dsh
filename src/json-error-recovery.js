@@ -28,6 +28,7 @@ export const JSON_ERROR_TOOL_EXCLUDE_LIST = Object.freeze([
   'todo_write',
   'todo_read',
   'dsh_omo_project_agents',
+  'dsh_omo_call_agent',
   'dsh_omo_task',
   'dsh_omo_task_continuable',
   'dsh_omo_job_list',
