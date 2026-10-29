@@ -183,6 +183,25 @@ test('preserves the latest result and disclaimer when command evidence is oversi
   assert.match(response.text, /result-15/u)
   assert.match(response.text, /#31 completed without Tool error/u)
   assert.match(response.text, /Missing evidence means unverified, not failed/u)
+  const latest = response.text.match(/- #31 completed without Tool error: ([^\n]+)/u)
+  assert.equal(latest[1].length, 256)
+  assert.match(response.text, /#31 completed without Tool error[^\n]*\n  Output excerpt \(untrusted\): result-15/u)
+})
+
+test('retains a chronological contiguous suffix of complete evidence records with mixed output sizes', async () => {
+  const events = []
+  for (let index = 0; index < 16; index += 1) {
+    events.push(call(index * 2, `mixed-${index}`, `pnpm test -- ${index}-${'c'.repeat(220)}`), resultEvent(index * 2 + 1, `mixed-${index}`, `result-${index}-${'o'.repeat(index % 2 === 0 ? 280 : 10)}`))
+  }
+  const response = await createVerifyCommand({ observeSession: async () => observation(events) }, fsFixture()).handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  const evidence = response.text.slice(response.text.indexOf('older evidence omitted'), response.text.indexOf('Interpretation:'))
+  assert.ok(evidence.length <= 2_800)
+  assert.doesNotMatch(evidence, /#13 completed/u)
+  const records = [...evidence.matchAll(/- #(\d+) completed without Tool error[^\n]*\n  Output excerpt \(untrusted\): result-(\d+)/gu)]
+  assert.ok(records.length > 0)
+  assert.ok(records.every(match => Number(match[1]) === Number(match[2]) * 2 + 1))
+  assert.deepEqual(records.map(match => Number(match[2])), records.map(match => Number(match[2])).sort((a, b) => a - b))
+  assert.equal(Number(records.at(-1)[2]), 15)
 })
 
 test('passes cancellation as the third lstat argument', async () => {

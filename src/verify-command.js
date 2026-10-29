@@ -131,22 +131,18 @@ function render(scripts, checks, sessionId) {
   let evidenceText = evidenceLines.join('\n')
   if (evidenceText.length > MAX_EVIDENCE_CHARS) {
     const marker = '- … older evidence omitted to retain the latest result and interpretation …'
-    const retained = [evidenceLines[0]]
-    let used = retained[0].length + marker.length + 1
-    let omitted = false
-    for (let index = evidenceLines.length - 1; index >= 1; index -= 1) {
-      const line = evidenceLines[index]
-      if (used + line.length + 1 > MAX_EVIDENCE_CHARS) {
-        omitted = true
-        continue
-      }
-      retained.push(line)
-      used += line.length + 1
+    const records = checks.map(check => [
+      `- #${check.seq} ${check.isError ? 'FAIL/ERROR' : 'completed without Tool error'}: ${check.command.slice(0, 256)}`,
+      ...(check.text ? [`  Output excerpt (untrusted): ${clean(check.text, 300)}`] : []),
+    ].join('\n'))
+    const retained = [records.at(-1)]
+    let used = marker.length + 1 + retained[0].length
+    for (let index = records.length - 2; index >= 0; index -= 1) {
+      if (used + records[index].length + 1 > MAX_EVIDENCE_CHARS) break
+      retained.unshift(records[index])
+      used += records[index].length + 1
     }
-    // Always retain the newest record even when its own excerpt is too large.
-    const newest = evidenceLines.at(-1)
-    if (!retained.includes(newest)) retained.push(newest)
-    evidenceText = [omitted ? marker : undefined, ...retained].filter(Boolean).join('\n')
+    evidenceText = [marker, ...retained].join('\n')
   }
   const suffix = ['', evidenceText, '', disclaimer].join('\n')
   const scriptLines = ['', 'Suggested project scripts (inspect before running):']
