@@ -62,13 +62,20 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
     resultEvent(9, 'missing', 'missing call'),
   ]
   assert.deepEqual(collectBashResults(events), [
-    { seq: 2, command: 'pnpm test', description: 'Run project checks', isError: false, text: 'tests 10 pass' },
-    { seq: 8, command: 'pnpm lint', description: 'Run project checks', isError: true, text: 'exit code 1' },
+    { seq: 2, callId: 'one', command: 'pnpm test', description: 'Run project checks', isError: false, text: 'tests 10 pass' },
+    { seq: 8, callId: 'failed', command: 'pnpm lint', description: 'Run project checks', isError: true, text: 'exit code 1' },
   ])
   assert.throws(() => collectBashResults({}), /not an array/u)
   assert.deepEqual(collectBashResults(Array.from({ length: 129 }, (_value, seq) => ({
     seq, type: 'step/end', data: { turn: 1, step: seq },
   }))), [])
+  const reused = collectBashResults([
+    call(1, 'same-id', 'pnpm test -- first'),
+    resultEvent(2, 'same-id', 'first result'),
+    call(3, 'same-id', 'pnpm test -- second'),
+    resultEvent(4, 'same-id', 'second result'),
+  ])
+  assert.deepEqual(reused.map(check => check.command), ['pnpm test -- second'])
 })
 
 test('reports scripts and latest evidence without executing tests or changing state', async () => {

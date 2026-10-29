@@ -5,6 +5,7 @@ const MAX_MANIFEST_BYTES = 64 * 1024
 const MAX_SCRIPTS = 32
 const MAX_SCRIPT_CHARS = 512
 const MAX_EVENTS = 128
+const MAX_COMPLETED_CALL_IDS = 256
 const MAX_EVIDENCE_CHARS = 2_800
 const MAX_OUTPUT_CHARS = 4_000
 const CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
@@ -91,6 +92,7 @@ function contentText(message) {
 export function collectBashResults(events) {
   if (!Array.isArray(events)) throw new TypeError('Session events are not an array.')
   const calls = new Map()
+  const completedCallIds = new Set()
   const results = []
   for (const event of events) {
     if (!event || typeof event !== 'object' || !Number.isSafeInteger(event.seq)) throw new TypeError('Invalid session event metadata.')
@@ -100,6 +102,12 @@ export function collectBashResults(events) {
       let args
       try { args = JSON.parse(event.data.arguments) } catch { continue }
       if (args && typeof args.command === 'string' && args.command.length <= 4_096) {
+        if (completedCallIds.has(callId)) {
+          calls.delete(callId)
+          for (let index = results.length - 1; index >= 0; index -= 1) {
+            if (results[index].callId === callId) results.splice(index, 1)
+          }
+        }
         if (calls.has(callId)) calls.delete(callId)
         if (calls.size >= MAX_EVENTS) calls.delete(calls.keys().next().value)
         calls.set(callId, { command: clean(args.command, 4_096), description: clean(args.description, 160) })
@@ -110,9 +118,13 @@ export function collectBashResults(events) {
       const call = calls.get(callId)
       if (!call) continue
       calls.delete(callId)
+      completedCallIds.delete(callId)
+      completedCallIds.add(callId)
+      if (completedCallIds.size > MAX_COMPLETED_CALL_IDS) completedCallIds.delete(completedCallIds.keys().next().value)
       if (results.length >= 16) results.shift()
       results.push({
         seq: event.seq,
+        callId,
         command: call.command,
         description: call.description,
         isError: message?.isError === true || event.data?.error !== undefined,
