@@ -185,6 +185,17 @@ test('prevents child evidence from forging the handoff boundary', async () => {
   assert.ok(truncated.queued[0][1].length <= 6_000)
 })
 
+test('preserves handoff guidance and boundary with maximum next-step and evidence', async () => {
+  const { agent, queued, command } = fixture(failed({ output: 'x'.repeat(8_192) }))
+  const response = await command.handler({ agent, rawInput: `child-1 ${'n'.repeat(1_000)}` })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.ok(prompt.length <= 6_000)
+  assert.match(prompt, /additional evidence omitted for prompt budget/u)
+  assert.match(prompt, /Start a NEW bounded dsh_omo_task/u)
+  assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
+})
+
 test('sanitizes untrusted output and preserves bounded next-step text', async () => {
   const { agent, queued, command } = fixture(failed({ output: `line one\nline two\u202e`, stopReason: 'failed' }))
   const response = await command.handler({ agent, rawInput: `child-1 next\u202e` })
