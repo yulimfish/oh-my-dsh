@@ -89,13 +89,12 @@ export function createFocusChain(goalsService, agentsService) {
     return promise
   }
 
-  const trackDisposal = registration => {
-    const promise = disposeRegistration(registration)
-    const cleanup = (async () => {
-      await callDisposer(registration.trackingDispose)
-    })()
-    return Promise.all([promise, cleanup]).then(() => undefined)
-  }
+  const trackDisposal = registration => trackPromise((async () => {
+    // The tracking callback itself is part of this outer operation; its shared
+    // context-only Promise cannot include this wait, so it never self-awaits.
+    await callDisposer(registration.trackingDispose)
+    await disposeRegistration(registration)
+  })())
 
   const listener = async payload => {
     let agentId

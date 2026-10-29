@@ -205,6 +205,7 @@ test('scope cleanup and plugin disposal invalidate saved callbacks and prevent l
   await notify(feature, agent)
   const firstText = agent.calls.contexts[0].text
   agent.disposeScope()
+  await new Promise(resolve => setImmediate(resolve))
   assert.equal(firstText(), '')
   await notify(feature, agent, 'compact')
   assert.equal(agent.calls.contexts.length, 2)
@@ -248,15 +249,17 @@ test('plugin disposal joins an in-flight same-ID replacement cleanup', async () 
   live.set(replacement.id, replacement)
   const replacing = notify(feature, replacement)
   await trackingStarted
-  releaseTracking()
-  await replacing
-  assert.equal(original.calls.contextDisposals, 1)
   const pluginCleanup = feature.dispose()
-  await pluginCleanup
+  let settled = false
+  void pluginCleanup.then(() => { settled = true })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(settled, false)
+  assert.equal(original.calls.contextDisposals, 0)
+  releaseTracking()
   await Promise.all([replacing, pluginCleanup])
   assert.equal(original.calls.contextDisposals, 1)
   assert.equal(contextCalls, 2, 'registration and exactly one context disposal')
-  assert.equal(replacement.calls.contexts.length, 1)
+  assert.equal(replacement.calls.contexts.length, 0)
 })
 
 test('plugin disposal joins Agent-scope cleanup and removes its prompt context', async () => {
