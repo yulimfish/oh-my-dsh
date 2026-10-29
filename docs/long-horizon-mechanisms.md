@@ -109,6 +109,10 @@ Goose has moved to `aaif-goose/goose`; the source snapshot is pinned to [`361003
 
 This follows Goose's `/goal` “check before finishing” idea, but deliberately omits `/grind`: an automatic nudge must not become an unbounded continuation mechanism. DSH's native Goal continuation remains authoritative for long-running goals.
 
+### Phase 5 — Deterministic verification evidence
+
+**Implemented in this phase:** default-off `/omo verify` (`enableVerifyCommand`) reads bounded `package.json` scripts and the current session's bash call/result events. It reports suggested checks and observed success/error outcomes without running any command or changing Goal/workspace state. Missing evidence is explicitly unverified, not failure; a bash Tool completion is not automatically a passing test, and other sessions/CI are outside the evidence scope. This adapts Goose's deterministic success-check idea without executing model-authored shell checks.
+
 ### Deferred / intentionally not copied
 
 - Cline's exact `task_progress` parameter, task-file watcher, percentage UI, and five-call hard escalation.
@@ -119,7 +123,7 @@ This follows Goose's `/goal` “check before finishing” idea, but deliberately
 
 1. **Structured compaction checkpoint (native reuse confirmed):** the installed `@deepseek-ai/dsh-compaction-basic` instruction already requires `Primary Request and Intent`, `Files and Code`, `Errors and Fixes`, `Pending Jobs`, `Current Work`, `Next Step`, and `Critical Context`. This substantially matches Goose's checkpoint fields, so no second summarizer is needed; the Goal and recovered todo remain independent anchors.
 2. **Resumable failed specialists:** Goose permits resume only for failed/cancelled children. Our current Host exposes one-shot activation, not `startContinuable`, so this needs either a verified Host continuation API or an explicitly bounded new-task handoff containing child ID, objective, evidence, and next step. Do not claim transparent resume.
-3. **Deterministic phase checks:** recipe-style success commands could verify a phase before commit, but arbitrary model-authored shell checks are not a safe default. Prefer the repository's existing test commands and explicit configuration if this is later implemented.
+3. **Deterministic phase checks (implemented as read-only evidence):** `/omo verify` now surfaces project scripts and observed bash outcomes. Automatic execution remains deliberately excluded; arbitrary model-authored shell checks are not a safe default. Any future execution must use an explicit human-selected command and normal DSH approvals.
 
 ## Research limitations
 

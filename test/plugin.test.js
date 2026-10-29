@@ -225,6 +225,7 @@ const baseConfig = {
   enableRepeatedCallAdvisory: false,
   enableProgressContext: false,
   enableGoalCompletionReview: false,
+  enableVerifyCommand: false,
   enableGoalUseReminder: false,
   enableAgentUsageReminder: false,
   enableCategorySkillReminder: false,
@@ -440,6 +441,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableProgressContext: true }).enableProgressContext, true)
   assert.equal(Config({}).enableGoalCompletionReview, false)
   assert.equal(Config({ enableGoalCompletionReview: true }).enableGoalCompletionReview, true)
+  assert.equal(Config({}).enableVerifyCommand, false)
+  assert.equal(Config({ enableVerifyCommand: true }).enableVerifyCommand, true)
   assert.equal(Config({}).enableGoalUseReminder, false)
   assert.equal(Config({ enableGoalUseReminder: true }).enableGoalUseReminder, true)
   assert.equal(Config({}).enableAgentUsageReminder, false)
@@ -3566,6 +3569,32 @@ test('mounts one-shot Goal completion review only with exact service prerequisit
   const effect = fixture.effects.find(entry => entry.label === 'dsh-omo Goal completion review')
   assert.equal(typeof effect?.dispose, 'function')
   await effect.dispose()
+})
+
+test('registers read-only verification evidence command only with exact query services', async () => {
+  const missing = makeContext()
+  assert.throws(
+    () => apply(missing.ctx, { ...baseConfig, enableVerifyCommand: true }),
+    /enableVerifyCommand requires DSH sessionQuery\.observeSession and sessionQuery\.filterEvents/u,
+  )
+  assert.equal(missing.commands.has('omo-verify'), false)
+
+  const partial = makeContext({ services: { sessionQuery: { observeSession() {} } } })
+  assert.throws(
+    () => apply(partial.ctx, { ...baseConfig, enableVerifyCommand: true }),
+    /enableVerifyCommand requires DSH sessionQuery\.observeSession and sessionQuery\.filterEvents/u,
+  )
+
+  const disabled = makeContext()
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.commands.has('omo-verify'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /verifyCommand=disabled/u)
+
+  const fixture = makeContext({ services: { sessionQuery: { observeSession() {}, filterEvents() {} } } })
+  apply(fixture.ctx, { ...baseConfig, enableVerifyCommand: true })
+  assert.equal(fixture.commands.has('omo-verify'), true)
+  assert.equal(fixture.commands.get('omo-verify').input.hint, '(no arguments)')
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /verifyCommand=enabled/u)
 })
 
 test('mounts the bounded non-Team Goal-use reminder only with explicit prerequisites', async () => {
