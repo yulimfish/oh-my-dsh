@@ -208,6 +208,15 @@ test('preserves handoff guidance and boundary with maximum next-step and evidenc
   assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
 })
 
+test('labels failed handoff with no retained output and stop reason', async () => {
+  const { agent, queued, command } = fixture(failed({ output: '', stopReason: 'timeout' }))
+  const response = await command.handler({ agent, rawInput: 'child-1 investigate timeout' })
+  assert.equal(response.kind, 'success')
+  assert.match(queued[0][1], /status: failed; stop reason: timeout/u)
+  assert.match(queued[0][1], /no retained child output/u)
+  assert.doesNotMatch(queued[0][1], /Investigation stopped at a failing test/u)
+})
+
 test('preserves exact child identity when preparing handoff evidence', async () => {
   const { agent, queued, calls, command } = fixture(failed({ childId: 'child-unicode-任务' }))
   const response = await command.handler({ agent, rawInput: 'child-unicode-任务 inspect next' })
