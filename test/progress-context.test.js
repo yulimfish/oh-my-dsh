@@ -240,6 +240,15 @@ test('quarantines a todo call ID reused after its first result completed', () =>
   assert.match(unrelated.render(), /second current plan/u)
 })
 
+test('quarantines duplicate results for one todo call ID', () => {
+  const projection = createProgressProjection(sessionWith([
+    todoEvent(1, 'duplicate-result', [{ content: 'ambiguous completed plan', status: 'in_progress' }]),
+    resultEvent(2, 'duplicate-result'),
+    resultEvent(3, 'duplicate-result'),
+  ]))
+  assert.equal(projection.render(), '')
+})
+
 test('keeps the newest successful plan when a later call fails before an older result succeeds', () => {
   const projection = createProgressProjection(sessionWith([
     todoEvent(1, 'old-call', [{ content: 'old successful plan', status: 'in_progress' }]),

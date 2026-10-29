@@ -56,6 +56,18 @@ function freshProjection(session, offset = 0) {
   }
 }
 
+function quarantineCallId(state, callId) {
+  state.pending.delete(callId)
+  state.ambiguousCallIds.add(callId)
+  if (state.currentCallId === callId) {
+    state.current = undefined
+    state.currentCallId = undefined
+  }
+  while (state.ambiguousCallIds.size > MAX_PENDING_TODO_CALLS) {
+    state.ambiguousCallIds.delete(state.ambiguousCallIds.keys().next().value)
+  }
+}
+
 /** Incrementally fold the latest successful native todo_write from durable session events. */
 export function createProgressProjection(session) {
   let state = freshProjection(session)
@@ -95,15 +107,7 @@ export function createProgressProjection(session) {
           const todos = parseTodos(event.data.arguments)
           if (state.ambiguousCallIds.has(callId)) continue
           if (state.pending.has(callId) || state.completedCallIds.has(callId)) {
-            state.pending.delete(callId)
-            state.ambiguousCallIds.add(callId)
-            if (state.currentCallId === callId) {
-              state.current = undefined
-              state.currentCallId = undefined
-            }
-            while (state.ambiguousCallIds.size > MAX_PENDING_TODO_CALLS) {
-              state.ambiguousCallIds.delete(state.ambiguousCallIds.keys().next().value)
-            }
+            quarantineCallId(state, callId)
             continue
           }
           state.pending.set(callId, { seq: event.seq, todos })
@@ -113,7 +117,12 @@ export function createProgressProjection(session) {
         if (event.type !== 'tool/result') continue
         const message = event.data.message
         const callId = message?.toolCallId ?? message?.source?.toolCallId
-        if (typeof callId !== 'string' || state.ambiguousCallIds.has(callId) || !state.pending.has(callId)) continue
+        if (typeof callId !== 'string' || state.ambiguousCallIds.has(callId)) continue
+        if (state.completedCallIds.has(callId) && !state.pending.has(callId)) {
+          quarantineCallId(state, callId)
+          continue
+        }
+        if (!state.pending.has(callId)) continue
         const pendingTodo = state.pending.get(callId)
         state.pending.delete(callId)
         state.completedCallIds.add(callId)
