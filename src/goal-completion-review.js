@@ -106,10 +106,10 @@ export function createGoalCompletionReview(goals, agents) {
     const key = `${goal.id}:${goal.revision}`
     const state = stateFor(position.agent, position.id)
     if (!state || state.reviewed === key) return
-    // Retain only the latest key: the native Goal has one current revision.
-    state.reviewed = key
     if (disposed || position.signal.aborted || disposedAgents.has(position.agent)
       || !exactLiveAgent(agents, position.id, position.agent)) return
+    // Retain only the latest key: the native Goal has one current revision.
+    state.reviewed = key
     try {
       position.agent.steer(reviewMessage(goal))
     } catch {

@@ -153,6 +153,29 @@ test('does not consume a Goal review when steer is unavailable', async () => {
   review.dispose()
 })
 
+test('does not consume a review when Agent identity changes before steering', async () => {
+  const { live, goal, review } = harness()
+  const messages = []
+  const agent = { id: 'agent-race', steer: message => messages.push(message) }
+  live.set(agent.id, agent)
+  let replaced = false
+  const goals = {
+    get() {
+      if (!replaced) {
+        replaced = true
+        live.set(agent.id, { id: agent.id, steer() {} })
+      }
+      return goal
+    },
+  }
+  const racingReview = createGoalCompletionReview(goals, { get: id => live.get(id) })
+  await racingReview.listener(payload(agent))
+  live.set(agent.id, agent)
+  await racingReview.listener(payload(agent, 2))
+  assert.equal(messages.length, 1, 'a stale pre-steer identity check must not consume the review')
+  racingReview.dispose()
+})
+
 test('contains steer and Goal service failures and stops future work after disposal', async () => {
   const { live, goal, review } = harness()
   const agent = { id: 'agent-failures', steer() { throw new Error('private driver failure') } }
