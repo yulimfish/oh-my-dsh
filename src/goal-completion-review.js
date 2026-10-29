@@ -102,7 +102,9 @@ export function createGoalCompletionReview(goals, agents) {
     const goal = activeGoal(goals, position.agent)
     if (!goal || disposed || position.signal.aborted) return
 
-    if (typeof position.agent.steer !== 'function') return
+    let steer
+    try { steer = position.agent.steer } catch { return }
+    if (typeof steer !== 'function') return
     const key = `${goal.id}:${goal.revision}`
     const state = stateFor(position.agent, position.id)
     if (!state || state.reviewed === key) return
@@ -111,7 +113,7 @@ export function createGoalCompletionReview(goals, agents) {
     // Retain only the latest key: the native Goal has one current revision.
     state.reviewed = key
     try {
-      position.agent.steer(reviewMessage(goal))
+      steer.call(position.agent, reviewMessage(goal))
     } catch {
       // A failed/disposed driver closes normally; this advisory never forces a retry loop.
     }

@@ -176,6 +176,25 @@ test('does not consume a review when Agent identity changes before steering', as
   racingReview.dispose()
 })
 
+test('does not throw or consume review when steer accessor fails', async () => {
+  const { live, review } = harness()
+  let reads = 0
+  const agent = {
+    id: 'agent-accessor',
+    get steer() {
+      reads += 1
+      throw new Error('private accessor failure')
+    },
+  }
+  live.set(agent.id, agent)
+  await assert.doesNotReject(review.listener(payload(agent)))
+  const messages = []
+  Object.defineProperty(agent, 'steer', { value: message => messages.push(message), configurable: true })
+  await review.listener(payload(agent, 2))
+  assert.equal(messages.length, 1)
+  review.dispose()
+})
+
 test('contains steer and Goal service failures and stops future work after disposal', async () => {
   const { live, goal, review } = harness()
   const agent = { id: 'agent-failures', steer() { throw new Error('private driver failure') } }
