@@ -154,6 +154,15 @@ test('returns a bounded error when the handoff queue rejects delivery', async ()
   assert.equal(response.text.includes('private queue failure'), false)
 })
 
+test('bounds the complete handoff prompt and marks additional evidence truncation', async () => {
+  const { agent, queued, command } = fixture(failed({ output: 'x'.repeat(8_192) }))
+  const response = await command.handler({ agent, rawInput: 'child-1' })
+  assert.equal(response.kind, 'success')
+  assert.ok(queued[0][1].length <= 6_000)
+  assert.match(queued[0][1], /additional evidence omitted for prompt budget/u)
+  assert.match(queued[0][1], /Start a NEW bounded dsh_omo_task/u)
+})
+
 test('sanitizes untrusted output and preserves bounded next-step text', async () => {
   const { agent, queued, command } = fixture(failed({ output: `line one\nline two\u202e`, stopReason: 'failed' }))
   const response = await command.handler({ agent, rawInput: `child-1 next\u202e` })

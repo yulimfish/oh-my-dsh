@@ -2,6 +2,7 @@ const MAX_CHILD_ID_CHARS = 256
 const MAX_INPUT_CHARS = 2_048
 const MAX_OUTPUT_CHARS = 4_096
 const MAX_EVIDENCE_CHARS = 8_192
+const MAX_PROMPT_EVIDENCE_CHARS = 4_096
 const CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
 const CONTROL_OR_BIDI_GLOBAL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu
 
@@ -20,6 +21,13 @@ function parseInput(rawInput) {
   const match = input.match(/^(\S+)(?:\s+([\s\S]+))?$/u)
   if (!match || match[1].length > MAX_CHILD_ID_CHARS) return undefined
   return { childId: match[1], nextStep: clean(match[2] ?? '', 1_000) }
+}
+
+function evidenceForPrompt(output) {
+  if (output.length <= MAX_PROMPT_EVIDENCE_CHARS) return output
+  const marker = '\n[… additional evidence omitted for prompt budget …]\n'
+  const half = Math.floor((MAX_PROMPT_EVIDENCE_CHARS - marker.length) / 2)
+  return `${output.slice(0, half)}${marker}${output.slice(-half)}`
 }
 
 function validResult(value, childId) {
@@ -75,7 +83,7 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
       }
 
       const evidence = snapshot.output
-        ? snapshot.output.replace(CONTROL_OR_BIDI_GLOBAL, ' ').replace(/[ \t]+/gu, ' ').trim()
+        ? evidenceForPrompt(snapshot.output.replace(CONTROL_OR_BIDI_GLOBAL, ' ').replace(/[ \t]+/gu, ' ').trim())
         : '(no retained child output)'
       const nextStep = input.nextStep || 'Inspect the evidence, identify the unfinished work, and continue with the smallest useful next action.'
       try {
