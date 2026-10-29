@@ -75,7 +75,20 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
     call(3, 'same-id', 'pnpm test -- second'),
     resultEvent(4, 'same-id', 'second result'),
   ])
-  assert.deepEqual(reused.map(check => check.command), ['pnpm test -- second'])
+  assert.deepEqual(reused, [], 'a reused ID has no generation-specific correlation, so both generations are quarantined')
+  assert.deepEqual(collectBashResults([
+    call(1, 'pending-reuse', 'pnpm test -- first'),
+    call(2, 'pending-reuse', 'pnpm test -- second'),
+    resultEvent(3, 'pending-reuse', 'first result'),
+    resultEvent(4, 'pending-reuse', 'second result'),
+  ]), [], 'ambiguous reused IDs cannot attribute either result safely')
+  assert.deepEqual(collectBashResults([
+    call(1, 'stale-duplicate', 'pnpm test -- first'),
+    resultEvent(2, 'stale-duplicate', 'first result'),
+    call(3, 'stale-duplicate', 'pnpm test -- second'),
+    resultEvent(4, 'stale-duplicate', 'stale duplicate first result'),
+    resultEvent(5, 'stale-duplicate', 'second result'),
+  ]), [], 'a stale duplicate result makes the reused generation ambiguous and is discarded')
   const nonText = collectBashResults([
     call(1, 'image', 'pnpm test'),
     { seq: 2, type: 'tool/result', data: { message: { toolCallId: 'image', isError: false, content: [{ type: 'image', data: 'binary' }] } } },

@@ -108,26 +108,29 @@ export function collectBashResults(events) {
       let args
       try { args = JSON.parse(event.data.arguments) } catch { continue }
       if (args && typeof args.command === 'string' && args.command.length <= 4_096) {
-        if (completedCallIds.has(callId)) {
-          calls.delete(callId)
-          for (let index = results.length - 1; index >= 0; index -= 1) {
-            if (results[index].callId === callId) results.splice(index, 1)
-          }
-        }
-        if (calls.has(callId)) {
+        if (completedCallIds.has(callId) || calls.has(callId)) {
           calls.delete(callId)
           ambiguousCallIds.delete(callId)
           ambiguousCallIds.add(callId)
           if (ambiguousCallIds.size > MAX_COMPLETED_CALL_IDS) ambiguousCallIds.delete(ambiguousCallIds.keys().next().value)
+          for (let index = results.length - 1; index >= 0; index -= 1) {
+            if (results[index].callId === callId) results.splice(index, 1)
+          }
           continue
         }
-        ambiguousCallIds.delete(callId)
         if (calls.size >= MAX_EVENTS) calls.delete(calls.keys().next().value)
         calls.set(callId, { command: clean(args.command, 4_096), description: clean(args.description, 160) })
       }
     } else if (event.type === 'tool/result') {
       const message = event.data?.message
       const callId = message?.toolCallId ?? message?.source?.toolCallId
+      if (ambiguousCallIds.has(callId)) {
+        calls.delete(callId)
+        for (let index = results.length - 1; index >= 0; index -= 1) {
+          if (results[index].callId === callId) results.splice(index, 1)
+        }
+        continue
+      }
       const call = calls.get(callId)
       if (!call) continue
       calls.delete(callId)
