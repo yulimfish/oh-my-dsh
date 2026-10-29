@@ -105,13 +105,17 @@ Goose has moved to `aaif-goose/goose`; the source snapshot is pinned to [`361003
 
 ### Phase 4 — One-shot Goal completion review
 
-**Implemented in this phase:** default-off `enableGoalCompletionReview` uses Host's awaited `agent/turn-stopping` boundary and `agent.steer()` rather than a polling loop. It re-reads the exact live Agent's active Goal, then asks once per Goal ID/revision for an evidence-based finish/continue decision. The message is bounded and source-attributed, and it never changes Goal phase. Same-ID replacements get independent state without consuming two capacity slots. Failures in Goal lookup or steering fail open and do not create a retry cycle.
+**Implemented in this phase:** default-off `enableGoalCompletionReview` uses Host's awaited `agent/turn-stopping` boundary and `agent.steer()` rather than a polling loop. It re-reads the exact live Agent's active Goal, requires `activation: 'armed'` and remaining round capacity, then asks once per Goal ID/revision for an evidence-based finish/continue decision. Disarmed or exhausted Goals are not steered. Only the latest reviewed key is retained per Agent. The message is bounded and source-attributed, and it never changes Goal phase. Same-ID replacements get independent state without consuming two capacity slots. Failures in Goal lookup or steering fail open and do not create a retry cycle.
 
 This follows Goose's `/goal` “check before finishing” idea, but deliberately omits `/grind`: an automatic nudge must not become an unbounded continuation mechanism. DSH's native Goal continuation remains authoritative for long-running goals.
 
 ### Phase 5 — Deterministic verification evidence
 
 **Implemented in this phase:** default-off `/omo verify` (`enableVerifyCommand`) reads bounded `package.json` scripts and the current session's bash call/result events. It reports suggested checks and observed success/error outcomes without running any command or changing Goal/workspace state. Missing evidence is explicitly unverified, not failure; a bash Tool completion is not automatically a passing test, and other sessions/CI are outside the evidence scope. This adapts Goose's deterministic success-check idea without executing model-authored shell checks.
+
+### Phase 6 — Explicit failed-task handoff
+
+**Implemented in this phase:** default-off `/omo handoff <childId> [next step]` (`enableTaskHandoffCommand`, requiring `enableTaskResultTool`) reads only the exact parent's failed/incomplete one-shot result. It queues a bounded new-task handoff with sanitized child evidence and a next step. The command launches nothing and never reuses the child ID or claims session/workspace survival; the Agent must explicitly start and independently verify a NEW `dsh_omo_task`. This is a recovery handoff, not transparent resume.
 
 ### Deferred / intentionally not copied
 
@@ -122,7 +126,7 @@ This follows Goose's `/goal` “check before finishing” idea, but deliberately
 ### Follow-up candidates, gated by a demonstrated local gap
 
 1. **Structured compaction checkpoint (native reuse confirmed):** the installed `@deepseek-ai/dsh-compaction-basic` instruction already requires `Primary Request and Intent`, `Files and Code`, `Errors and Fixes`, `Pending Jobs`, `Current Work`, `Next Step`, and `Critical Context`. This substantially matches Goose's checkpoint fields, so no second summarizer is needed; the Goal and recovered todo remain independent anchors.
-2. **Resumable failed specialists:** Goose permits resume only for failed/cancelled children. Our current Host exposes one-shot activation, not `startContinuable`, so this needs either a verified Host continuation API or an explicitly bounded new-task handoff containing child ID, objective, evidence, and next step. Do not claim transparent resume.
+2. **Resumable failed specialists (implemented as explicit handoff):** `/omo handoff` now carries child ID, retained evidence, and next step into a NEW task prompt. Transparent session resume remains unavailable on the current Host, which exposes one-shot activation rather than `startContinuable`; the command never claims otherwise.
 3. **Deterministic phase checks (implemented as read-only evidence):** `/omo verify` now surfaces project scripts and observed bash outcomes. Automatic execution remains deliberately excluded; arbitrary model-authored shell checks are not a safe default. Any future execution must use an explicit human-selected command and normal DSH approvals.
 
 ## Research limitations

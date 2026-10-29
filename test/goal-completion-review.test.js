@@ -4,7 +4,7 @@ import { createGoalCompletionReview, registerGoalCompletionReview } from '../src
 
 function harness() {
   const live = new Map()
-  const goal = { id: 'goal-1', revision: 1, phase: 'active', objective: 'Implement and verify the requested feature' }
+  const goal = { id: 'goal-1', revision: 1, phase: 'active', activation: 'armed', roundsStarted: 0, maxGoalRounds: 4, objective: 'Implement and verify the requested feature' }
   const calls = []
   const agents = { get: id => live.get(id) }
   const goals = { get: agent => { calls.push(agent); return goal } }
@@ -41,6 +41,27 @@ test('steers once per exact Goal revision and includes bounded actionable guidan
   assert.equal(messages.length, 2, 'an edited Goal receives one fresh review')
   await review.listener(payload(agent, 2))
   assert.equal(messages.length, 2)
+  review.dispose()
+})
+
+test('never steers a disarmed or round-exhausted Goal', async () => {
+  const { live, goal, review } = harness()
+  const messages = []
+  const agent = { id: 'agent-authority', steer: message => messages.push(message) }
+  live.set(agent.id, agent)
+  goal.activation = 'disarmed'
+  await review.listener(payload(agent))
+  assert.equal(messages.length, 0)
+  goal.activation = 'armed'
+  goal.roundsStarted = goal.maxGoalRounds
+  await review.listener(payload(agent))
+  assert.equal(messages.length, 0)
+  goal.roundsStarted = goal.maxGoalRounds + 1
+  await review.listener(payload(agent))
+  assert.equal(messages.length, 0)
+  goal.roundsStarted = goal.maxGoalRounds - 1
+  await review.listener(payload(agent))
+  assert.equal(messages.length, 1)
   review.dispose()
 })
 

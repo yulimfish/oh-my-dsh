@@ -40,8 +40,11 @@ function livePosition(payload, agents) {
 function activeGoal(goals, agent) {
   try {
     const goal = goals?.get(agent)
-    if (!isObject(goal) || goal.phase !== 'active' || typeof goal.id !== 'string'
-      || goal.id.length === 0 || goal.id.length > MAX_GOAL_ID_CHARS
+    if (!isObject(goal) || goal.phase !== 'active' || goal.activation !== 'armed'
+      || !Number.isSafeInteger(goal.roundsStarted) || goal.roundsStarted < 0
+      || !Number.isSafeInteger(goal.maxGoalRounds) || goal.maxGoalRounds < 1
+      || goal.roundsStarted >= goal.maxGoalRounds
+      || typeof goal.id !== 'string' || goal.id.length === 0 || goal.id.length > MAX_GOAL_ID_CHARS
       || !Number.isSafeInteger(goal.revision) || goal.revision < 1
       || typeof goal.objective !== 'string' || !goal.objective.trim()) return undefined
     const objective = goal.objective.slice(0, MAX_OBJECTIVE_CHARS + 1)
@@ -87,7 +90,7 @@ export function createGoalCompletionReview(goals, agents) {
     // consume a second slot or retain the previous Agent's review history.
     if (existing) states.delete(id)
     if (states.size >= MAX_AGENT_STATES) return undefined
-    const state = { agent, reviewed: new Set() }
+    const state = { agent, reviewed: undefined }
     states.set(id, state)
     return state
   }
@@ -101,9 +104,9 @@ export function createGoalCompletionReview(goals, agents) {
 
     const key = `${goal.id}:${goal.revision}`
     const state = stateFor(position.agent, position.id)
-    if (!state || state.reviewed.has(key)) return
-    // Dedupe before steer: Host re-reads the inbox after every steering listener.
-    state.reviewed.add(key)
+    if (!state || state.reviewed === key) return
+    // Retain only the latest key: the native Goal has one current revision.
+    state.reviewed = key
     if (disposed || position.signal.aborted || disposedAgents.has(position.agent)
       || !exactLiveAgent(agents, position.id, position.agent)) return
     try {

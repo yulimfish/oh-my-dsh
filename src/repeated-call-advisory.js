@@ -47,11 +47,11 @@ export function canonicalCallSignature(name, args) {
     if (type !== 'object') throw invalid()
     if (ancestors.has(value)) throw invalid()
 
-    // Own enumerable values determine the signature; inherited properties and
-    // custom prototype identity are irrelevant. Built-in non-JSON objects are not.
+    // Plain JSON-like records are identified without Symbol.toStringTag or
+    // Object.prototype.toString, which can be controlled by the input.
     if (!Array.isArray(value)) {
-      const tag = Object.prototype.toString.call(value)
-      if (tag !== '[object Object]') throw invalid()
+      const prototype = Object.getPrototypeOf(value)
+      if (prototype !== Object.prototype && prototype !== null) throw invalid()
     }
     ancestors.add(value)
     try {

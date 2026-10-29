@@ -69,10 +69,15 @@ test('canonical signatures are deterministic for nested key order and sensitive 
   Object.prototype.inheritedProbe = 7
   try {
     assert.notEqual(canonicalCallSignature('read', {}), canonicalCallSignature('read', { inheritedProbe: 7 }))
-    assert.equal(canonicalCallSignature('read', Object.create({ inherited: 3 })), canonicalCallSignature('read', {}))
+    assert.equal(canonicalCallSignature('read', Object.create({ inherited: 3 })), undefined)
   } finally {
     delete Object.prototype.inheritedProbe
   }
+  assert.equal(canonicalCallSignature('read', Object.create({ [Symbol.toStringTag]: 'Date' })), undefined)
+  const taggedDate = new Date(0)
+  taggedDate[Symbol.toStringTag] = 'Object'
+  assert.equal(canonicalCallSignature('read', taggedDate), undefined)
+  assert.notEqual(canonicalCallSignature('read', taggedDate), canonicalCallSignature('read', {}))
 })
 
 test('canonicalization skips ambiguous, hostile, or over-budget arguments without truncation collisions', () => {
