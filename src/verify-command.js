@@ -131,10 +131,22 @@ function render(scripts, checks, sessionId) {
   let evidenceText = evidenceLines.join('\n')
   if (evidenceText.length > MAX_EVIDENCE_CHARS) {
     const marker = '- … older evidence omitted to retain the latest result and interpretation …'
-    const budget = MAX_EVIDENCE_CHARS - marker.length - 1
-    let end = evidenceText.lastIndexOf('\n- #', evidenceText.length - budget)
-    if (end < 0) end = evidenceText.length - budget
-    evidenceText = `${marker}${evidenceText.slice(end)}`
+    const retained = [evidenceLines[0]]
+    let used = retained[0].length + marker.length + 1
+    let omitted = false
+    for (let index = evidenceLines.length - 1; index >= 1; index -= 1) {
+      const line = evidenceLines[index]
+      if (used + line.length + 1 > MAX_EVIDENCE_CHARS) {
+        omitted = true
+        continue
+      }
+      retained.push(line)
+      used += line.length + 1
+    }
+    // Always retain the newest record even when its own excerpt is too large.
+    const newest = evidenceLines.at(-1)
+    if (!retained.includes(newest)) retained.push(newest)
+    evidenceText = [omitted ? marker : undefined, ...retained].filter(Boolean).join('\n')
   }
   const suffix = ['', evidenceText, '', disclaimer].join('\n')
   const scriptLines = ['', 'Suggested project scripts (inspect before running):']
