@@ -168,6 +168,24 @@ test('recovers a recent successful todo inside the initial bounded window', () =
   assert.match(projection.render(), /recent restored task/u)
 })
 
+test('recovers immediately when a restored session resets seq to a smaller in-window value', () => {
+  const events = [todoEvent(1, 'restored', [{ content: 'restored current task', status: 'in_progress' }]), resultEvent(2, 'restored')]
+  for (let seq = 3; seq <= 20; seq += 1) events.push({ seq, type: 'step/end', data: {} })
+  const base = sessionWith(events)
+  const session = { seq: base.seq, snapshotEvents: (...args) => base.snapshotEvents(...args) }
+  const projection = createProgressProjection(session)
+  assert.match(projection.render(), /restored current task/u)
+
+  // Simulate restore/compaction exposing a shorter log at the same Session object.
+  session.seq = 3
+  assert.match(projection.render(), /restored current task/u)
+  events.push(todoEvent(3, 'next', [{ content: 'next task after restore', status: 'pending' }]), resultEvent(4, 'next'))
+  session.seq = 5
+  const next = projection.render()
+  assert.match(next, /next task after restore/u)
+  assert.doesNotMatch(next, /restored current task/u)
+})
+
 test('malformed session data and snapshot failures fail open', () => {
   const malformed = createProgressProjection({
     seq: 3,

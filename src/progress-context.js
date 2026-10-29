@@ -66,6 +66,9 @@ export function createProgressProjection(session) {
         state = freshProjection(session)
         if (!session || typeof session.snapshotEvents !== 'function' || !Number.isSafeInteger(session.seq)
           || session.seq < 0) return ''
+        // A restored Session can reset seq without changing identity. Rebuild
+        // from its current events immediately instead of staying empty forever.
+        state.offset = 0
       }
       const start = state.offset
       if (session.seq - start > MAX_EVENTS_PER_RENDER) {
