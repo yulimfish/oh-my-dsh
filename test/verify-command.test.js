@@ -261,6 +261,37 @@ test('rejects arguments, unavailable services, unsafe sessions, and invalid mani
   assert.match((await badManifest.handler({ agent: { id: 'agent-1' }, rawInput: '' })).text, /not valid UTF-8 JSON/u)
 })
 
+test('rejects package.json when its identity changes during reading even without a version field', async () => {
+  let fileStats = 0
+  const command = createVerifyCommand({ observeSession: async () => observation() }, {
+    ...fsFixture(),
+    stat: async target => {
+      if (target.targetKey === cwd) return { type: 'directory' }
+      fileStats += 1
+      return { type: 'file', size: manifest.length, version: fileStats === 1 ? 'before' : 'after' }
+    },
+  })
+  const response = await command.handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /changed during verification inspection/u)
+})
+
+test('rejects a missing scripts object distinctly from an empty scripts object', async () => {
+  const missing = createVerifyCommand({ observeSession: async () => observation() }, {
+    ...fsFixture(), readBytes: async () => new TextEncoder().encode('{}'),
+  })
+  const missingResponse = await missing.handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  assert.equal(missingResponse.kind, 'success')
+  assert.match(missingResponse.text, /no bounded test\/check\/build\/lint scripts found/u)
+
+  const invalid = createVerifyCommand({ observeSession: async () => observation() }, {
+    ...fsFixture(), readBytes: async () => new TextEncoder().encode('{"scripts":null}'),
+  })
+  const invalidResponse = await invalid.handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  assert.equal(invalidResponse.kind, 'error')
+  assert.match(invalidResponse.text, /no valid scripts object/u)
+})
+
 test('releases session observation on success and query failure', async () => {
   let disposals = 0
   const service = {

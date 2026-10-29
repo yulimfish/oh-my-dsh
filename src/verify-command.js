@@ -37,8 +37,11 @@ function parseManifest(bytes) {
   try { manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) } catch {
     throw new Error('package.json is not valid UTF-8 JSON; no verification commands were inferred.')
   }
-  if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)
-    || manifest.scripts === null || typeof manifest.scripts !== 'object' || Array.isArray(manifest.scripts)) {
+  if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error('package.json is not a JSON object; no verification commands were inferred.')
+  }
+  if (manifest.scripts === undefined) return []
+  if (manifest.scripts === null || typeof manifest.scripts !== 'object' || Array.isArray(manifest.scripts)) {
     throw new Error('package.json has no valid scripts object; no verification commands were inferred.')
   }
   const scripts = []
@@ -71,7 +74,8 @@ async function readScripts(fs, cwd, signal) {
   const bytes = await fs.readBytes(target, signal, MAX_MANIFEST_BYTES)
   assertActive(signal)
   const after = await fs.stat(target, signal)
-  if (info.version !== undefined && after?.version !== info.version) {
+  if (after?.type !== 'file' || (info.version !== undefined && after?.version !== info.version)
+    || (info.size !== undefined && after?.size !== info.size)) {
     throw new Error('package.json changed during verification inspection; retry the command.')
   }
   return parseManifest(bytes)
