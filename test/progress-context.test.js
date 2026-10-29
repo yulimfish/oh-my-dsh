@@ -205,6 +205,23 @@ test('does not let an older todo result overwrite a newer plan when results arri
   assert.match(withFailure.render(), /new plan/u)
 })
 
+test('does not attribute a reused todo call ID result to the newer pending plan', () => {
+  const projection = createProgressProjection(sessionWith([
+    todoEvent(1, 'reused-todo', [{ content: 'first plan', status: 'in_progress' }]),
+    todoEvent(2, 'reused-todo', [{ content: 'second plan', status: 'in_progress' }]),
+    resultEvent(3, 'reused-todo'),
+  ]))
+  assert.equal(projection.render(), '', 'reused call IDs have ambiguous result correlation')
+  const independent = createProgressProjection(sessionWith([
+    todoEvent(1, 'reused-todo', [{ content: 'first plan', status: 'in_progress' }]),
+    todoEvent(2, 'reused-todo', [{ content: 'second plan', status: 'in_progress' }]),
+    resultEvent(3, 'reused-todo'),
+    todoEvent(4, 'independent-todo', [{ content: 'independent plan', status: 'pending' }]),
+    resultEvent(5, 'independent-todo'),
+  ]))
+  assert.match(independent.render(), /independent plan/u)
+})
+
 test('keeps the newest successful plan when a later call fails before an older result succeeds', () => {
   const projection = createProgressProjection(sessionWith([
     todoEvent(1, 'old-call', [{ content: 'old successful plan', status: 'in_progress' }]),

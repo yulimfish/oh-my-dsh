@@ -50,7 +50,7 @@ function parseTodos(argumentText) {
 }
 
 function freshProjection(session, offset = 0) {
-  return { session, offset, current: undefined, pending: new Map(), latestTodoCallSeq: -1 }
+  return { session, offset, current: undefined, pending: new Map(), latestTodoCallSeq: -1, ambiguousCallIds: new Set() }
 }
 
 /** Incrementally fold the latest successful native todo_write from durable session events. */
@@ -90,7 +90,15 @@ export function createProgressProjection(session) {
           const callId = event.data.callId
           if (typeof callId !== 'string' || callId.length === 0) continue
           const todos = parseTodos(event.data.arguments)
-          state.pending.delete(callId)
+          if (state.ambiguousCallIds.has(callId)) continue
+          if (state.pending.has(callId)) {
+            state.pending.delete(callId)
+            state.ambiguousCallIds.add(callId)
+            while (state.ambiguousCallIds.size > MAX_PENDING_TODO_CALLS) {
+              state.ambiguousCallIds.delete(state.ambiguousCallIds.keys().next().value)
+            }
+            continue
+          }
           state.pending.set(callId, { seq: event.seq, todos })
           while (state.pending.size > MAX_PENDING_TODO_CALLS) state.pending.delete(state.pending.keys().next().value)
           continue
@@ -98,7 +106,7 @@ export function createProgressProjection(session) {
         if (event.type !== 'tool/result') continue
         const message = event.data.message
         const callId = message?.toolCallId ?? message?.source?.toolCallId
-        if (typeof callId !== 'string' || !state.pending.has(callId)) continue
+        if (typeof callId !== 'string' || state.ambiguousCallIds.has(callId) || !state.pending.has(callId)) continue
         const pendingTodo = state.pending.get(callId)
         state.pending.delete(callId)
         if (event.data.error === undefined && message?.isError !== true
