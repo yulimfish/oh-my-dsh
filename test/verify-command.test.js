@@ -110,11 +110,28 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
   }
   overflow.push(call(seq++, 'target', 'pnpm test -- later'), resultEvent(seq++, 'target', 'ambiguous stale result'))
   assert.deepEqual(collectBashResults(overflow), [], 'tombstone overflow cannot re-admit an ambiguous ID')
+  const earlyReuse = [call(1, 'target', 'first'), call(2, 'target', 'second'), call(3, 'target', 'third')]
+  seq = 4
+  for (let index = 0; index < 256; index += 1) {
+    const id = `early-overflow-${index}`
+    earlyReuse.push(call(seq++, id, 'first'), call(seq++, id, 'second'))
+  }
+  earlyReuse.push(resultEvent(seq++, 'target', 'ambiguous stale result'))
+  assert.deepEqual(collectBashResults(earlyReuse), [], 'a call created before overflow cannot survive tombstone eviction')
   assert.deepEqual(collectBashResults([
     call(1, 'duplicate-result', 'pnpm test'),
     resultEvent(2, 'duplicate-result', 'first result'),
     resultEvent(3, 'duplicate-result', 'duplicate result'),
   ]), [], 'a duplicate result without a second call is also ambiguous')
+  const mixed = collectBashResults([
+    call(1, 'good', 'pnpm test -- good'),
+    resultEvent(2, 'good', 'good result'),
+    call(3, 'ambiguous', 'pnpm test -- first'),
+    resultEvent(4, 'ambiguous', 'first result'),
+    call(5, 'ambiguous', 'pnpm test -- reused'),
+    resultEvent(6, 'ambiguous', 'reused result'),
+  ])
+  assert.deepEqual(mixed.map(check => check.command), ['pnpm test -- good'])
 })
 
 test('reports scripts and latest evidence without executing tests or changing state', async () => {
