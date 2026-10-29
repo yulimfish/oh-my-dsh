@@ -226,6 +226,7 @@ const baseConfig = {
   enableProgressContext: false,
   enableGoalCompletionReview: false,
   enableVerifyCommand: false,
+  enableTaskHandoffCommand: false,
   enableGoalUseReminder: false,
   enableAgentUsageReminder: false,
   enableCategorySkillReminder: false,
@@ -443,6 +444,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableGoalCompletionReview: true }).enableGoalCompletionReview, true)
   assert.equal(Config({}).enableVerifyCommand, false)
   assert.equal(Config({ enableVerifyCommand: true }).enableVerifyCommand, true)
+  assert.equal(Config({}).enableTaskHandoffCommand, false)
+  assert.equal(Config({ enableTaskHandoffCommand: true }).enableTaskHandoffCommand, true)
   assert.equal(Config({}).enableGoalUseReminder, false)
   assert.equal(Config({ enableGoalUseReminder: true }).enableGoalUseReminder, true)
   assert.equal(Config({}).enableAgentUsageReminder, false)
@@ -3595,6 +3598,26 @@ test('registers read-only verification evidence command only with exact query se
   assert.equal(fixture.commands.has('omo-verify'), true)
   assert.equal(fixture.commands.get('omo-verify').input.hint, '(no arguments)')
   assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /verifyCommand=enabled/u)
+})
+
+test('registers new-task handoff only with exact-Agent result tracking enabled', async () => {
+  const missing = makeContext()
+  assert.throws(
+    () => apply(missing.ctx, { ...baseConfig, enableTaskHandoffCommand: true }),
+    /enableTaskHandoffCommand requires enableTaskResultTool/u,
+  )
+  assert.equal(missing.commands.has('omo-handoff'), false)
+
+  const disabled = makeContext()
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.commands.has('omo-handoff'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /taskHandoffCommand=disabled/u)
+
+  const fixture = makeContext()
+  apply(fixture.ctx, { ...baseConfig, enableTaskResultTool: true, enableTaskHandoffCommand: true })
+  assert.equal(fixture.commands.has('omo-handoff'), true)
+  assert.equal(fixture.commands.get('omo-handoff').input.hint, '<childId> [next step]')
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /taskHandoffCommand=enabled/u)
 })
 
 test('mounts the bounded non-Team Goal-use reminder only with explicit prerequisites', async () => {

@@ -1,0 +1,98 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { createHandoffCommand } from '../src/handoff-command.js'
+
+function fixture(snapshot, { asyncRead = false } = {}) {
+  const agent = { id: 'parent-1' }
+  const queued = []
+  const calls = []
+  const registry = asyncRead
+    ? { async readAsync(...args) { calls.push(args); return snapshot } }
+    : { read(...args) { calls.push(args); return snapshot } }
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  return { agent, queued, calls, command }
+}
+
+function failed(overrides = {}) {
+  return { childId: 'child-1', status: 'failed', output: 'Investigation stopped at a failing test.', truncated: false, omittedNonText: false, stopReason: 'failed', ...overrides }
+}
+
+test('queues a bounded explicitly new-task handoff for an exact-Agent failed result', async () => {
+  const { agent, queued, calls, command } = fixture(failed(), { asyncRead: true })
+  const response = await command.handler({ agent, rawInput: ' child-1  Fix the failing parser test  ' })
+  assert.equal(response.kind, 'success')
+  assert.match(response.text, /NEW-task handoff/u)
+  assert.match(response.text, /no child was resumed or started/u)
+  assert.deepEqual(calls, [[agent, 'child-1']])
+  assert.equal(queued.length, 1)
+  assert.strictEqual(queued[0][0], agent)
+  const prompt = queued[0][1]
+  assert.match(prompt, /not a child-session resume/u)
+  assert.match(prompt, /BEGIN CHILD EVIDENCE/u)
+  assert.match(prompt, /Investigation stopped at a failing test/u)
+  assert.match(prompt, /Fix the failing parser test/u)
+  assert.match(prompt, /Start a NEW bounded dsh_omo_task only if it is useful/u)
+  assert.match(prompt, /do not reuse the old child ID/u)
+  assert.match(prompt, /This handoff itself started no worker and changed no Goal state/u)
+})
+
+test('accepts incomplete results and preserves truncation and omitted-block caveats', async () => {
+  const { agent, queued, command } = fixture(failed({ status: 'incomplete', output: '', truncated: true, omittedNonText: true, stopReason: 'max-tokens' }))
+  const response = await command.handler({ agent, rawInput: 'child-1' })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.match(prompt, /status: incomplete; stop reason: max-tokens/u)
+  assert.match(prompt, /output was truncated/u)
+  assert.match(prompt, /Non-text result blocks were omitted/u)
+  assert.match(prompt, /no retained child output/u)
+  assert.match(prompt, /Inspect the evidence, identify the unfinished work/u)
+})
+
+test('rejects running, completed, unknown, cross-session, malformed, and service-failure results without queueing', async () => {
+  for (const snapshot of [
+    failed({ status: 'running' }),
+    failed({ status: 'completed' }),
+    undefined,
+    failed({ childId: 'another-child' }),
+    failed({ output: 42 }),
+    failed({ truncated: 'yes' }),
+    failed({ stopReason: 'x'.repeat(81) }),
+  ]) {
+    const { agent, queued, command } = fixture(snapshot)
+    const response = await command.handler({ agent, rawInput: 'child-1' })
+    assert.equal(response.kind, 'error')
+    assert.match(response.text, /failed or incomplete/u)
+    assert.equal(queued.length, 0)
+  }
+
+  const failing = createHandoffCommand({ read() { throw new Error('private registry failure') } }, { queueMessage() { throw new Error('must not queue') } })
+  const response = await failing.handler({ agent: { id: 'parent' }, rawInput: 'child-1' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /Could not read/u)
+  assert.equal(response.text.includes('private registry failure'), false)
+})
+
+test('validates input, Agent, cancellation, and registry contracts before queueing', async () => {
+  const { agent, queued, command } = fixture(failed())
+  for (const rawInput of ['', '   ', 'child-1\nchild-2', 'child-1\u202e', `${'x'.repeat(2_049)}`]) {
+    const response = await command.handler({ agent, rawInput })
+    assert.equal(response.kind, 'error')
+  }
+  assert.equal((await command.handler({ agent: null, rawInput: 'child-1' })).kind, 'error')
+  const controller = new AbortController()
+  controller.abort()
+  assert.equal((await command.handler({ agent, rawInput: 'child-1', signal: controller.signal })).kind, 'error')
+  assert.equal(queued.length, 0)
+  assert.throws(() => createHandoffCommand({}, { queueMessage() {} }), /result registry/u)
+  assert.throws(() => createHandoffCommand({ read() {} }, {}), /parent-message queue/u)
+})
+
+test('sanitizes untrusted output and preserves bounded next-step text', async () => {
+  const { agent, queued, command } = fixture(failed({ output: `line one\nline two\u202e`, stopReason: 'failed' }))
+  const response = await command.handler({ agent, rawInput: `child-1 next\u202e` })
+  assert.equal(response.kind, 'error')
+  const responseValid = await command.handler({ agent, rawInput: 'child-1 next step' })
+  assert.equal(responseValid.kind, 'success')
+  assert.match(queued[0][1], /line one line two/u)
+  assert.equal(queued[0][1].includes('\u202e'), false)
+})
