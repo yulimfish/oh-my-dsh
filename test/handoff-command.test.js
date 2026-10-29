@@ -144,6 +144,18 @@ test('reports parent replacement after asynchronous queue delivery without claim
   assert.equal(queued.length, 1)
 })
 
+test('fails closed when parent liveness check throws before queueing', async () => {
+  const { agent, queued, command } = fixture(failed(), { asyncRead: true })
+  const checked = createHandoffCommand({ read: () => failed() }, {
+    queueMessage: (...args) => queued.push(args),
+    isParentCurrent() { throw new Error('private liveness failure') },
+  })
+  const response = await checked.handler({ agent, rawInput: 'child-1' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /parent Agent changed or was disposed/u)
+  assert.equal(queued.length, 0)
+})
+
 test('returns a bounded error when the handoff queue rejects delivery', async () => {
   const command = createHandoffCommand({ read: () => failed() }, {
     async queueMessage() { throw new Error('private queue failure') },
