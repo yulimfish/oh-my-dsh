@@ -66,6 +66,13 @@ test('canonical signatures are deterministic for nested key order and sensitive 
   assert.equal(canonicalCallSignature('read', Object.assign(Object.create(null), { b: 2, a: 1 })), canonicalCallSignature('read', { a: 1, b: 2 }))
   const shared = { value: 1 }
   assert.equal(canonicalCallSignature('read', { a: shared, b: shared }), canonicalCallSignature('read', { a: { value: 1 }, b: { value: 1 } }))
+  Object.prototype.inheritedProbe = 7
+  try {
+    assert.notEqual(canonicalCallSignature('read', {}), canonicalCallSignature('read', { inheritedProbe: 7 }))
+    assert.equal(canonicalCallSignature('read', Object.create({ inherited: 3 })), canonicalCallSignature('read', {}))
+  } finally {
+    delete Object.prototype.inheritedProbe
+  }
 })
 
 test('canonicalization skips ambiguous, hostile, or over-budget arguments without truncation collisions', () => {
@@ -99,7 +106,7 @@ test('canonicalization skips ambiguous, hostile, or over-budget arguments withou
     },
   })
   assert.equal(canonicalCallSignature('read', wide), undefined)
-  assert.ok(descriptorReads < 300, `wide input must stop near the node budget, observed ${descriptorReads} descriptor reads`)
+  assert.ok(descriptorReads < 600, `wide input must stop near the node budget, observed ${descriptorReads} descriptor reads`)
 })
 
 test('warns once at the third consecutive identical completed call and preserves downstream decisions', async () => {

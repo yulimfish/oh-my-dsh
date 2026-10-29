@@ -47,9 +47,11 @@ export function canonicalCallSignature(name, args) {
     if (type !== 'object') throw invalid()
     if (ancestors.has(value)) throw invalid()
 
+    // Own enumerable values determine the signature; inherited properties and
+    // custom prototype identity are irrelevant. Built-in non-JSON objects are not.
     if (!Array.isArray(value)) {
-      const prototype = Object.getPrototypeOf(value)
-      if (prototype !== Object.prototype && prototype !== null) throw invalid()
+      const tag = Object.prototype.toString.call(value)
+      if (tag !== '[object Object]') throw invalid()
     }
     ancestors.add(value)
     try {
@@ -62,11 +64,15 @@ export function canonicalCallSignature(name, args) {
         return output + append(']')
       }
 
-      // Bound own-key collection before sorting; otherwise a wide object can
-      // allocate and sort arbitrarily many keys before visitation rejects it.
+      // Reflect.ownKeys preserves Object.keys' own-key semantics without its
+      // eager descriptor walk. Check only a bounded prefix before sorting.
       const keys = []
       const remaining = MAX_NODES - state.nodes + 1
-      for (const key in value) {
+      let inspected = 0
+      for (const key of Reflect.ownKeys(value)) {
+        inspected += 1
+        if (inspected > MAX_NODES) throw invalid()
+        if (typeof key !== 'string' || !Object.prototype.propertyIsEnumerable.call(value, key)) continue
         keys.push(key)
         if (keys.length >= remaining) break
       }

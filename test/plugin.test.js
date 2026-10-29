@@ -224,6 +224,7 @@ const baseConfig = {
   enableFocusChain: false,
   enableRepeatedCallAdvisory: false,
   enableProgressContext: false,
+  enableGoalCompletionReview: false,
   enableGoalUseReminder: false,
   enableAgentUsageReminder: false,
   enableCategorySkillReminder: false,
@@ -437,6 +438,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableRepeatedCallAdvisory: true }).enableRepeatedCallAdvisory, true)
   assert.equal(Config({}).enableProgressContext, false)
   assert.equal(Config({ enableProgressContext: true }).enableProgressContext, true)
+  assert.equal(Config({}).enableGoalCompletionReview, false)
+  assert.equal(Config({ enableGoalCompletionReview: true }).enableGoalCompletionReview, true)
   assert.equal(Config({}).enableGoalUseReminder, false)
   assert.equal(Config({ enableGoalUseReminder: true }).enableGoalUseReminder, true)
   assert.equal(Config({}).enableAgentUsageReminder, false)
@@ -3520,6 +3523,47 @@ test('mounts session-log progress context only with exact service prerequisites'
   assert.equal(typeof fixture.events.get('agent/created'), 'function')
   assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /progressContext=enabled/u)
   const effect = fixture.effects.find(entry => entry.label === 'dsh-omo progress context')
+  assert.equal(typeof effect?.dispose, 'function')
+  await effect.dispose()
+})
+
+test('mounts one-shot Goal completion review only with exact service prerequisites', async () => {
+  const goals = { get() {} }
+  const agents = { get: () => undefined }
+
+  const missingGoals = makeContext({ services: { agents } })
+  assert.throws(
+    () => apply(missingGoals.ctx, { ...baseConfig, enableGoalCompletionReview: true }),
+    /enableGoalCompletionReview requires DSH goals\.get/u,
+  )
+  assert.equal(missingGoals.tools.size, 0)
+
+  const missingAgents = makeContext({ services: { goals } })
+  assert.throws(
+    () => apply(missingAgents.ctx, { ...baseConfig, enableGoalCompletionReview: true }),
+    /enableGoalCompletionReview requires DSH agents\.get, Cordis ctx\.on, and ctx\.effect/u,
+  )
+  assert.equal(missingAgents.tools.size, 0)
+
+  const missingEvents = makeContext({ services: { goals, agents } })
+  missingEvents.ctx.on = undefined
+  assert.throws(
+    () => apply(missingEvents.ctx, { ...baseConfig, enableGoalCompletionReview: true }),
+    /enableGoalCompletionReview requires DSH agents\.get, Cordis ctx\.on, and ctx\.effect/u,
+  )
+  assert.equal(missingEvents.tools.size, 0)
+
+  const disabled = makeContext({ services: { goals, agents } })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('agent/turn-stopping'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /goalCompletionReview=disabled/u)
+
+  const fixture = makeContext({ services: { goals, agents } })
+  apply(fixture.ctx, { ...baseConfig, enableGoalCompletionReview: true })
+  assert.equal(typeof fixture.events.get('agent/turn-stopping'), 'function')
+  assert.equal(typeof fixture.events.get('agent/disposed'), 'function')
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /goalCompletionReview=enabled/u)
+  const effect = fixture.effects.find(entry => entry.label === 'dsh-omo Goal completion review')
   assert.equal(typeof effect?.dispose, 'function')
   await effect.dispose()
 })

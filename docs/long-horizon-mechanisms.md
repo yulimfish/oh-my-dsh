@@ -103,6 +103,12 @@ Goose has moved to `aaif-goose/goose`; the source snapshot is pinned to [`361003
 - Keep current progress near the Goal, while warning that checked items are not proof of user-task completion.
 - Reuse the existing Focus Chain and repeated-call advisory independently; no additional per-outcome reminder is needed.
 
+### Phase 4 — One-shot Goal completion review
+
+**Implemented in this phase:** default-off `enableGoalCompletionReview` uses Host's awaited `agent/turn-stopping` boundary and `agent.steer()` rather than a polling loop. It re-reads the exact live Agent's active Goal, then asks once per Goal ID/revision for an evidence-based finish/continue decision. The message is bounded and source-attributed, and it never changes Goal phase. Same-ID replacements get independent state without consuming two capacity slots. Failures in Goal lookup or steering fail open and do not create a retry cycle.
+
+This follows Goose's `/goal` “check before finishing” idea, but deliberately omits `/grind`: an automatic nudge must not become an unbounded continuation mechanism. DSH's native Goal continuation remains authoritative for long-running goals.
+
 ### Deferred / intentionally not copied
 
 - Cline's exact `task_progress` parameter, task-file watcher, percentage UI, and five-call hard escalation.
@@ -111,7 +117,7 @@ Goose has moved to `aaif-goose/goose`; the source snapshot is pinned to [`361003
 
 ### Follow-up candidates, gated by a demonstrated local gap
 
-1. **Structured compaction checkpoint:** compare the installed Host summary contract with Goose's `user_intent` / `pending_tasks` / `current_work` / `next_step` fields. Do not add a second summarizer merely to imitate the schema; the current Goal and recovered todo already provide independent anchors.
+1. **Structured compaction checkpoint (native reuse confirmed):** the installed `@deepseek-ai/dsh-compaction-basic` instruction already requires `Primary Request and Intent`, `Files and Code`, `Errors and Fixes`, `Pending Jobs`, `Current Work`, `Next Step`, and `Critical Context`. This substantially matches Goose's checkpoint fields, so no second summarizer is needed; the Goal and recovered todo remain independent anchors.
 2. **Resumable failed specialists:** Goose permits resume only for failed/cancelled children. Our current Host exposes one-shot activation, not `startContinuable`, so this needs either a verified Host continuation API or an explicitly bounded new-task handoff containing child ID, objective, evidence, and next step. Do not claim transparent resume.
 3. **Deterministic phase checks:** recipe-style success commands could verify a phase before commit, but arbitrary model-authored shell checks are not a safe default. Prefer the repository's existing test commands and explicit configuration if this is later implemented.
 
