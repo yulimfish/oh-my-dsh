@@ -433,7 +433,7 @@ function skillFormatPaths(rootPath, resolverPath) {
   if (typeof rootPath !== 'string' || typeof resolverPath !== 'string' || !resolverPath.startsWith(`${rootPath}/`)) return undefined
   const parts = resolverPath.slice(rootPath.length + 1).split('/')
   if (!parts.every(isSafeEntryName) || parts.some(part => part.startsWith('.'))) return undefined
-  if (parts.length === 1 && parts[0].toLowerCase().endsWith('.md')) {
+  if (parts.length === 1 && parts[0].endsWith('.md')) {
     return { defaultName: parts[0].slice(0, -3) }
   }
   const directories = parts.slice(0, -1)
@@ -1004,7 +1004,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                             relativePath: `${relativeDirectoryPath}/${child.name}`,
                             directoryDepth: directoryDepth + 1,
                           })
-                        } else if (childInfo.type === 'file' && child.name.toLowerCase().endsWith('.md')) {
+                        } else if (childInfo.type === 'file' && child.name.endsWith('.md')) {
                           nestedFiles.push({
                             entry: child,
                             classifiedType: 'file',
@@ -1034,7 +1034,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 if (skillFileInfo.type !== 'file' || !fs.contains(rootTarget, skillFile.target)) continue
                 fileTarget = skillFile.target
                 resolverPath = `${rootPath}/${relativeDirectoryPath}/${skillFile.name}`
-              } else if (entryInfo.type === 'file' && entry.name.toLowerCase().endsWith('.md')) {
+              } else if (entryInfo.type === 'file' && entry.name.endsWith('.md')) {
                 skillDirectoryTarget = orderedEntry.parentTarget ?? rootTarget
                 fileTarget = entry.target
                 resolverPath = `${rootPath}/${relativeDirectoryPath}`

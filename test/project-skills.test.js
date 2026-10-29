@@ -2493,10 +2493,22 @@ test('format compatibility discovers nested skill directories to depth three wit
   assert.deepEqual((await strictFixture.registry.snapshot({ cwd })).skills, [], 'strict discovery remains non-recursive')
 })
 
+test('format compatibility ignores mixed-case Markdown extensions without shadowing valid skills', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeSkill(path.join(cwd, '.opencode/skills/Shadow.MD'), { name: 'shadow', content: 'uppercase must not win' })
+  await writeSkill(path.join(cwd, '.claude/skills/shadow/SKILL.md'), { name: 'shadow', content: 'valid lowercase fallback' })
+  const { fs } = makeFileSystem()
+  const { registry } = compatibilityRegistry(t, fs, { projectSkillDirs: ['.opencode/skills', '.claude/skills'] })
+  const snapshot = await registry.snapshot({ cwd })
+  assert.equal(snapshot.complete, true)
+  assert.equal((await registry.get('shadow', { cwd })).content, 'valid lowercase fallback')
+  assert.equal((await registry.get('shadow', { cwd })).source, 'project-claude')
+})
+
 test('format compatibility discovers bounded nested flat Markdown with container resource bases', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'team/review.md', 'One-level flat body.')
-  await writeCompatibilityDocument(cwd, 'team/reference/checklist.MD', 'Two-level flat body.')
+  await writeCompatibilityDocument(cwd, 'team/reference/checklist.md', 'Two-level flat body.')
   await writeCompatibilityDocument(cwd, 'team/reference/deep/excluded.md', 'Too deep.')
   await writeCompatibilityDocument(cwd, 'team/.hidden.md', 'Hidden.')
   await writeCompatibilityDocument(cwd, 'terminal/SKILL.md', 'Terminal body.')
