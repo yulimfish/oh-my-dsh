@@ -50,7 +50,7 @@ function parseTodos(argumentText) {
 }
 
 function freshProjection(session, offset = 0) {
-  return { session, offset, current: undefined, pending: new Map() }
+  return { session, offset, current: undefined, pending: new Map(), latestTodoCallSeq: -1 }
 }
 
 /** Incrementally fold the latest successful native todo_write from durable session events. */
@@ -90,24 +90,22 @@ export function createProgressProjection(session) {
           const callId = event.data.callId
           if (typeof callId !== 'string' || callId.length === 0) continue
           const todos = parseTodos(event.data.arguments)
-          if (todos) {
-            state.pending.delete(callId)
-            state.pending.set(callId, todos)
-            while (state.pending.size > MAX_PENDING_TODO_CALLS) state.pending.delete(state.pending.keys().next().value)
-          } else {
-            // A syntactically valid native call must clear an older list even if
-            // this adapter cannot safely project its new contents.
-            state.pending.set(callId, undefined)
-          }
+          state.pending.delete(callId)
+          state.pending.set(callId, { seq: event.seq, todos })
+          while (state.pending.size > MAX_PENDING_TODO_CALLS) state.pending.delete(state.pending.keys().next().value)
           continue
         }
         if (event.type !== 'tool/result') continue
         const message = event.data.message
         const callId = message?.toolCallId ?? message?.source?.toolCallId
         if (typeof callId !== 'string' || !state.pending.has(callId)) continue
-        const todos = state.pending.get(callId)
+        const pendingTodo = state.pending.get(callId)
         state.pending.delete(callId)
-        if (event.data.error === undefined && message?.isError !== true) state.current = todos
+        if (event.data.error === undefined && message?.isError !== true
+          && pendingTodo.seq > state.latestTodoCallSeq) {
+          state.latestTodoCallSeq = pendingTodo.seq
+          state.current = pendingTodo.todos
+        }
       }
       state.offset = session.seq
     } catch {
@@ -144,14 +142,11 @@ function silenceThenable(value) {
   } catch {}
 }
 
-function disposeRegistration(registration, fromTracking = false) {
+function disposeRegistration(registration) {
   if (!registration) return Promise.resolve()
   if (registration.disposalPromise) return registration.disposalPromise
   registration.disposed = true
-  registration.disposalPromise = (async () => {
-    if (!fromTracking) await callDisposer(registration.trackingDispose)
-    await callDisposer(registration.contextDispose)
-  })()
+  registration.disposalPromise = Promise.resolve().then(() => callDisposer(registration.contextDispose))
   return registration.disposalPromise
 }
 
@@ -167,7 +162,12 @@ export function createProgressContext(sessionsService, agentsService) {
     void promise.then(() => pendingDisposals.delete(promise), () => pendingDisposals.delete(promise))
     return promise
   }
-  const trackDisposal = (registration, fromTracking = false) => trackPromise(disposeRegistration(registration, fromTracking))
+  const trackDisposal = registration => trackPromise((async () => {
+    // Tracking cleanup owns this outer wait; the shared context-only Promise
+    // must not include it, or a tracking callback would await itself.
+    await callDisposer(registration.trackingDispose)
+    await disposeRegistration(registration)
+  })())
 
   const listener = async payload => {
     let agentId
@@ -227,7 +227,7 @@ export function createProgressContext(sessionsService, agentsService) {
       registrations.set(agentId, registration)
       const trackingDispose = effect.call(agentContext, () => () => {
         if (registrations.get(agentId) === registration) registrations.delete(agentId)
-        return trackDisposal(registration, true)
+        return trackDisposal(registration)
       }, 'dsh-omo progress-context tracking')
       if (typeof trackingDispose !== 'function') {
         silenceThenable(trackingDispose)

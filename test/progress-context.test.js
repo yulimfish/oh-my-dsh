@@ -186,6 +186,25 @@ test('recovers immediately when a restored session resets seq to a smaller in-wi
   assert.doesNotMatch(next, /restored current task/u)
 })
 
+test('does not let an older todo result overwrite a newer plan when results arrive out of order', () => {
+  const projection = createProgressProjection(sessionWith([
+    todoEvent(1, 'old-call', [{ content: 'old plan', status: 'in_progress' }]),
+    todoEvent(2, 'new-call', [{ content: 'new plan', status: 'in_progress' }]),
+    resultEvent(3, 'new-call'),
+    resultEvent(4, 'old-call'),
+  ]))
+  const text = projection.render()
+  assert.match(text, /new plan/u)
+  assert.doesNotMatch(text, /old plan/u)
+  const withFailure = createProgressProjection(sessionWith([
+    todoEvent(1, 'old-call', [{ content: 'old plan', status: 'in_progress' }]),
+    todoEvent(2, 'new-call', [{ content: 'new plan', status: 'in_progress' }]),
+    resultEvent(3, 'new-call'),
+    resultEvent(4, 'old-call', { error: true }),
+  ]))
+  assert.match(withFailure.render(), /new plan/u)
+})
+
 test('malformed session data and snapshot failures fail open', () => {
   const malformed = createProgressProjection({
     seq: 3,
@@ -235,6 +254,7 @@ test('registers exact live Agents, refreshes on compact, and disposes callbacks'
   assert.match(replacement.calls.contexts[0].text(), /restored after compact/u)
 
   replacement.disposeScope()
+  await new Promise(resolve => setImmediate(resolve))
   assert.equal(replacement.calls.contexts[0].text(), '')
   assert.equal(replacement.calls.contextDisposals, 1)
   await feature.dispose()
@@ -264,6 +284,47 @@ test('stale, aborted, malformed, and over-cap Agents receive no progress registr
   await feature.listener({ agent: agents[256] })
   assert.equal(agents[256].calls.contexts.length, 1)
   await feature.dispose()
+})
+
+test('plugin disposal joins replacement cleanup without self-await or duplicate context disposal', async () => {
+  const live = new Map()
+  const feature = createProgressContext({ get: () => undefined }, { get: id => live.get(id) })
+  const original = makeAgent('progress-replacement')
+  let contextCalls = 0
+  original.ctx.systemPrompt.context = () => {
+    contextCalls += 1
+    return () => { contextCalls += 1; original.calls.contextDisposals += 1 }
+  }
+  let releaseTracking
+  const trackingReady = new Promise(resolve => { releaseTracking = resolve })
+  let trackingStartedResolve
+  const trackingStarted = new Promise(resolve => { trackingStartedResolve = resolve })
+  let trackingDispose
+  original.ctx.effect = execute => {
+    execute()
+    trackingDispose = async () => {
+      trackingStartedResolve()
+      await trackingReady
+    }
+    return trackingDispose
+  }
+  live.set(original.id, original)
+  await feature.listener({ agent: original })
+  const replacement = makeAgent(original.id)
+  live.set(replacement.id, replacement)
+  const replacing = feature.listener({ agent: replacement, source: 'compact' })
+  await trackingStarted
+  const cleanup = feature.dispose()
+  let settled = false
+  void cleanup.then(() => { settled = true })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(settled, false)
+  assert.equal(original.calls.contextDisposals, 0)
+  releaseTracking()
+  await Promise.all([replacing, cleanup])
+  assert.equal(original.calls.contextDisposals, 1)
+  assert.equal(contextCalls, 2)
+  assert.equal(replacement.calls.contexts.length, 0)
 })
 
 test('real SessionStore and systemPrompt recover accepted progress in the matching Agent scope', async t => {
