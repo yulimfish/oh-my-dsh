@@ -106,6 +106,7 @@ export function collectBashResults(events) {
     if (event.type === 'tool/call' && event.data?.name === 'bash') {
       const callId = event.data.callId
       if (typeof callId !== 'string' || !callId) continue
+      if (ambiguousCallIds.has(callId)) continue
       if (completedCallIds.has(callId) || calls.has(callId)) {
         calls.delete(callId)
         ambiguousCallIds.delete(callId)
