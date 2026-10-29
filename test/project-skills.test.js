@@ -2877,6 +2877,7 @@ test('format compatibility is opt-in and validates its option without weakening 
   await writeCompatibilityDocument(cwd, 'plain.md', 'Plain body.')
   await writeCompatibilityDocument(cwd, 'named/named.md', 'Named body.')
   await writeSkill(path.join(cwd, '.opencode/skills/strict/SKILL.md'), { name: 'strict-skill' })
+  await writeCompatibilityDocument(cwd, 'strict-falsy.md', '---\nname: null\ndescription: ""\n---\nStrict rejects falsy metadata.')
   for (const options of [{}, { formatCompatibility: false }]) {
     const { fs } = makeFileSystem()
     const { ctx, registry } = makeRegistry(fs)
@@ -2902,8 +2903,8 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
     ['malformed.md', '---\nname: [invalid\n---\nPrivate body.'],
     ['duplicate.md', '---\nname: first\nname: second\n---\nPrivate body.'],
     ['control.md', '---\nname: "bad\\u202evalue"\n---\nPrivate body.'],
-    ['Bad Name.md', 'Private body.'],
-    ['bad name/bad name.md', 'Private body.'],
+    ['Bad Name.md', '---\nname: null\n---\nPrivate body.'],
+    ['bad name/bad name.md', '---\nname: ""\n---\nPrivate body.'],
   ]
   for (const [relative, source] of invalid) await writeCompatibilityDocument(cwd, relative, source)
   const { fs } = makeFileSystem()
