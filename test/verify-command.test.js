@@ -169,6 +169,8 @@ test('prioritizes bash evidence and disclaimer when scripts exceed the display b
   assert.match(response.text, /evidence/u)
   assert.match(response.text, /Missing evidence means unverified, not failed/u)
   assert.match(response.text, /omitted/u)
+  assert.match(response.text, /Latest bash results observed in this session \(1\):/u)
+  assert.match(response.text, /#2 completed without Tool error: pnpm test/u)
 })
 
 test('preserves the latest result and disclaimer when command evidence is oversized', async () => {
