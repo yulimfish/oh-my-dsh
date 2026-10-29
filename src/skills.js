@@ -1,4 +1,4 @@
-export const SKILLS = Object.freeze([
+const BASE_SKILLS = Object.freeze([
   Object.freeze({
     name: 'omo-ultrawork',
     description: 'Plan and complete a substantial multi-step coding task with bounded specialists and explicit verification.',
@@ -149,5 +149,18 @@ This is a workflow guide, not an upstream lifecycle equivalent. DSH host policie
 5. Keep findings scoped to the change and distinguish observed defects from subjective suggestions.
 
 This is a workflow guide, not an upstream lifecycle equivalent. DSH host policies, permissions, approvals, sandbox, and available tools remain authoritative; do not assume a particular tool or service exists.`,
+  }),
+])
+
+// Upstream security-review is an alias of security-research, not a distinct
+// scanner or an additional autonomous review workflow.
+const securityResearch = BASE_SKILLS.find(skill => skill.name === 'security-research')
+export const SKILLS = Object.freeze([
+  ...BASE_SKILLS,
+  Object.freeze({
+    ...securityResearch,
+    name: 'security-review',
+    description: 'Alias for security-research: investigate a bounded, authorized security question with source-backed findings.',
+    whenToUse: 'Use when security-review is requested; loads security-research guidance, not an automated security scanner.',
   }),
 ])

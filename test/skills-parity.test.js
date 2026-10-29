@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import { SkillRegistry } from '@deepseek-ai/dsh-skill'
 import { SKILLS } from '../src/skills.js'
 
 const addedSkills = [
@@ -68,6 +70,50 @@ test('selected upstream workflow skills are present with focused DSH-native guid
     for (const requirement of criticalGuidance.get(name)) {
       assert.match(skill.content, requirement, `${name} should retain critical workflow/safety guidance`)
     }
+  }
+})
+
+test('security-review uses the bounded security-research workflow under the upstream alias name', () => {
+  const research = SKILLS.find(skill => skill.name === 'security-research')
+  const review = SKILLS.find(skill => skill.name === 'security-review')
+  assert.ok(review)
+  assert.equal(review.content, research.content)
+  assert.match(review.description, /Alias.*security-research/u)
+  assert.match(review.content, /Do not probe third-party or live systems without explicit authorization/u)
+  assert.ok(SKILLS.some(skill => skill.name === 'omo-security-review'), 'legacy review checklist remains available')
+})
+
+test('real DSH registry loads, flags, and independently disposes both security skill names', async () => {
+  const names = ['security-research', 'security-review']
+  for (const disabledName of names) {
+    const ctx = new Context()
+    ctx.logger = { warn() {} }
+    const registry = new SkillRegistry(ctx)
+    const disposers = new Map()
+    try {
+      for (const name of names) {
+        const skill = SKILLS.find(entry => entry.name === name)
+        disposers.set(name, registry.register({
+          ...skill,
+          source: 'bundled',
+          invocation: { modelInvocable: name !== disabledName, userInvocable: name !== disabledName },
+        }))
+      }
+      const summary = await registry.snapshot()
+      assert.equal(summary.complete, true)
+      assert.deepEqual(summary.skills.map(skill => skill.name), names)
+      for (const name of names) {
+        const loaded = await registry.get(name)
+        assert.equal(loaded.content, SKILLS.find(skill => skill.name === 'security-research').content)
+        assert.deepEqual(loaded.invocation, { modelInvocable: name !== disabledName, userInvocable: name !== disabledName })
+      }
+      await disposers.get('security-review')()
+      assert.equal(await registry.get('security-review'), undefined)
+      assert.ok(await registry.get('security-research'), 'alias disposal must not remove the canonical registration')
+    } finally {
+      for (const dispose of disposers.values()) await dispose()
+    }
+    assert.deepEqual(await registry.list(), [])
   }
 })
 
