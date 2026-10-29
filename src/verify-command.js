@@ -5,7 +5,7 @@ const MAX_MANIFEST_BYTES = 64 * 1024
 const MAX_SCRIPTS = 32
 const MAX_SCRIPT_CHARS = 512
 const MAX_EVENTS = 128
-const MAX_COMPLETED_CALL_IDS = 256
+const MAX_COMPLETED_CALL_IDS = 2_048
 const MAX_EVIDENCE_CHARS = 2_800
 const MAX_OUTPUT_CHARS = 4_000
 const CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
@@ -98,6 +98,7 @@ export function collectBashResults(events) {
   if (!Array.isArray(events)) throw new TypeError('Session events are not an array.')
   const calls = new Map()
   const completedCallIds = new Set()
+  const malformedCallIds = new Set()
   const ambiguousCallIds = new Set()
   let correlationComplete = true
   const results = []
@@ -107,7 +108,7 @@ export function collectBashResults(events) {
       const callId = event.data.callId
       if (typeof callId !== 'string' || !callId) continue
       if (ambiguousCallIds.has(callId)) continue
-      if (completedCallIds.has(callId) || calls.has(callId)) {
+      if (malformedCallIds.has(callId) || completedCallIds.has(callId) || calls.has(callId)) {
         calls.delete(callId)
         ambiguousCallIds.delete(callId)
         ambiguousCallIds.add(callId)
@@ -122,11 +123,21 @@ export function collectBashResults(events) {
       }
       if (!correlationComplete) continue
       let args
-      try { args = JSON.parse(event.data.arguments) } catch { continue }
-      if (args && typeof args.command === 'string' && args.command.length <= 4_096) {
-        if (calls.size >= MAX_EVENTS) calls.delete(calls.keys().next().value)
-        calls.set(callId, { command: clean(args.command, 4_096), description: clean(args.description, 160) })
+      try { args = JSON.parse(event.data.arguments) } catch { args = undefined }
+      if (!args || typeof args.command !== 'string' || args.command.length > 4_096) {
+        malformedCallIds.delete(callId)
+        malformedCallIds.add(callId)
+        if (malformedCallIds.size > MAX_COMPLETED_CALL_IDS) {
+          malformedCallIds.delete(malformedCallIds.keys().next().value)
+          correlationComplete = false
+        }
+        continue
       }
+      if (calls.size >= MAX_EVENTS) {
+        calls.delete(calls.keys().next().value)
+        correlationComplete = false
+      }
+      calls.set(callId, { command: clean(args.command, 4_096), description: clean(args.description, 160) })
     } else if (event.type === 'tool/result') {
       const message = event.data?.message
       const callId = message?.toolCallId ?? message?.source?.toolCallId
@@ -153,7 +164,12 @@ export function collectBashResults(events) {
       calls.delete(callId)
       completedCallIds.delete(callId)
       completedCallIds.add(callId)
-      if (completedCallIds.size > MAX_COMPLETED_CALL_IDS) completedCallIds.delete(completedCallIds.keys().next().value)
+      if (completedCallIds.size > MAX_COMPLETED_CALL_IDS) {
+        const evicted = completedCallIds.keys().next().value
+        completedCallIds.delete(evicted)
+        ambiguousCallIds.add(evicted)
+        correlationComplete = false
+      }
       if (results.length >= 16) results.shift()
       results.push({
         seq: event.seq,

@@ -114,9 +114,26 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
       { seq: 2, type: 'tool/call', data: { callId: 'malformed-reuse', name: 'bash', arguments: malformed } },
       resultEvent(3, 'malformed-reuse', 'ambiguous result'),
     ]), [], 'malformed or oversized reuse is quarantined before parsing')
+    assert.deepEqual(collectBashResults([
+      { seq: 1, type: 'tool/call', data: { callId: 'malformed-first', name: 'bash', arguments: malformed } },
+      call(2, 'malformed-first', 'pnpm test -- second'),
+      resultEvent(3, 'malformed-first', 'ambiguous result'),
+    ]), [], 'a malformed first call is also quarantined')
   }
-  const overflow = [call(1, 'target', 'pnpm test -- first'), call(2, 'target', 'pnpm test -- second')]
+  const completedEviction = [call(1, 'completed-target', 'pnpm test -- first'), resultEvent(2, 'completed-target', 'first result')]
   let seq = 3
+  for (let index = 0; index < 256; index += 1) {
+    completedEviction.push(call(seq++, `completed-${index}`, 'other'), resultEvent(seq++, `completed-${index}`, 'other result'))
+  }
+  completedEviction.push(call(seq++, 'completed-target', 'pnpm test -- second'), resultEvent(seq++, 'completed-target', 'ambiguous result'))
+  assert.deepEqual(collectBashResults(completedEviction).map(check => check.command).filter(command => command === 'pnpm test -- second'), [])
+  const pendingEviction = [call(1, 'pending-target', 'pnpm test -- first')]
+  seq = 2
+  for (let index = 0; index < 128; index += 1) pendingEviction.push(call(seq++, `pending-${index}`, 'other'))
+  pendingEviction.push(call(seq++, 'pending-target', 'pnpm test -- second'), resultEvent(seq++, 'pending-target', 'ambiguous result'))
+  assert.deepEqual(collectBashResults(pendingEviction).map(check => check.command).filter(command => command === 'pnpm test -- second'), [])
+  const overflow = [call(1, 'target', 'pnpm test -- first'), call(2, 'target', 'pnpm test -- second')]
+  seq = 3
   for (let index = 0; index < 256; index += 1) {
     const id = `overflow-${index}`
     overflow.push(call(seq++, id, 'first'), call(seq++, id, 'second'))
