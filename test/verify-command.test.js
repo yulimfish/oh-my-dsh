@@ -156,6 +156,11 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
   earlyReuse.push(resultEvent(seq++, 'target', 'ambiguous stale result'))
   assert.deepEqual(collectBashResults(earlyReuse), [], 'a call created before overflow cannot survive tombstone eviction')
   assert.deepEqual(collectBashResults([
+    call(1, 'evicted-pending', 'pnpm test -- first'),
+    ...Array.from({ length: 128 }, (_value, index) => call(index + 2, `other-${index}`, 'other')),
+    resultEvent(130, 'evicted-pending', 'late evicted result'),
+  ]), [], 'a result for an evicted pending call is also quarantined')
+  assert.deepEqual(collectBashResults([
     call(1, 'duplicate-result', 'pnpm test'),
     resultEvent(2, 'duplicate-result', 'first result'),
     resultEvent(3, 'duplicate-result', 'duplicate result'),

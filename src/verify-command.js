@@ -147,7 +147,7 @@ export function collectBashResults(events) {
     } else if (event.type === 'tool/result') {
       const message = event.data?.message
       const callId = message?.toolCallId ?? message?.source?.toolCallId
-      if (ambiguousCallIds.has(callId)) {
+      if (ambiguousCallIds.has(callId) || evictedCallIds.has(callId)) {
         calls.delete(callId)
         for (let index = results.length - 1; index >= 0; index -= 1) {
           if (results[index].callId === callId) results.splice(index, 1)
