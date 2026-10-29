@@ -162,7 +162,10 @@ export function createVerifyCommand(sessionQuery, fs) {
           throw new Error('The current DSH session has no safe absolute working directory.')
         }
         const scripts = await readScripts(fs, observation.header.cwd, signal)
-        const events = await sessionQuery.filterEvents(agent.id, [{ kind: 'type', values: ['tool/call', 'tool/result'] }])
+        if (!Array.isArray(observation.events)) throw new Error('The current DSH session has no raw event history.')
+        // observation.events contains raw calls/results. filterEvents returns
+        // semantic-only documents without call arguments and cannot pair bash evidence.
+        const events = observation.events.filter(event => event?.type === 'tool/call' || event?.type === 'tool/result').slice(-MAX_EVENTS)
         assertActive(signal)
         return render(scripts, collectBashResults(events), agent.id)
       } catch (error) {

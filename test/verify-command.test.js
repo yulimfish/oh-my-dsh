@@ -27,8 +27,8 @@ function fsFixture() {
   }
 }
 
-function observation() {
-  return { header: { id: 'agent-1', cwd }, [Symbol.dispose]: async () => {} }
+function observation(events = []) {
+  return { header: { id: 'agent-1', cwd }, events, [Symbol.dispose]: async () => {} }
 }
 
 function call(seq, callId, command, description = 'Run project checks') {
@@ -67,8 +67,8 @@ test('reports scripts and latest evidence without executing tests or changing st
   const events = [call(1, 'test', 'pnpm test'), resultEvent(2, 'test', '1750 pass')]
   const calls = []
   const command = createVerifyCommand({
-    async observeSession(...args) { calls.push(['observe', ...args]); return observation() },
-    async filterEvents(...args) { calls.push(['filter', ...args]); return events },
+    async observeSession(...args) { calls.push(['observe', ...args]); return observation(events) },
+    async filterEvents(...args) { calls.push(['filter', ...args]); return events.map(event => ({ seq: event.seq, type: event.type, text: 'semantic-only' })) },
   }, fsFixture())
   const response = await command.handler({ agent: { id: 'agent-1' }, rawInput: '' })
   assert.equal(response.kind, 'success')
@@ -78,15 +78,13 @@ test('reports scripts and latest evidence without executing tests or changing st
   assert.match(response.text, /completed without Tool error.*pnpm test/u)
   assert.match(response.text, /1750 pass/u)
   assert.match(response.text, /Missing evidence means unverified, not failed/u)
-  assert.equal(calls[0][0], 'observe')
-  assert.equal(calls[1][0], 'filter')
-  assert.deepEqual(calls[1][1], 'agent-1')
+  assert.deepEqual(calls.map(call => call[0]), ['observe'], 'raw observation is sufficient; semantic filterEvents is not used')
 })
 
 test('reports failure evidence and empty history honestly', async () => {
   const failed = createVerifyCommand({
-    observeSession: async () => observation(),
-    filterEvents: async () => [call(1, 'lint', 'pnpm lint'), resultEvent(2, 'lint', 'exit code 2', true)],
+    observeSession: async () => observation([call(1, 'lint', 'pnpm lint'), resultEvent(2, 'lint', 'exit code 2', true)]),
+    filterEvents: async () => [],
   }, fsFixture())
   const response = await failed.handler({ agent: { id: 'agent-1' }, rawInput: '' })
   assert.match(response.text, /FAIL\/ERROR: pnpm lint/u)
@@ -126,16 +124,17 @@ test('rejects arguments, unavailable services, unsafe sessions, and invalid mani
 test('releases session observation on success and query failure', async () => {
   let disposals = 0
   const service = {
-    observeSession: async () => ({ header: { id: 'agent-1', cwd }, [Symbol.dispose]: async () => { disposals += 1 } }),
-    filterEvents: async () => { throw new Error('private query failure') },
+    observeSession: async () => ({ header: { id: 'agent-1', cwd }, events: [], [Symbol.dispose]: async () => { disposals += 1 } }),
+    filterEvents: async () => { throw new Error('filterEvents must not be called') },
   }
-  const response = await createVerifyCommand(service, fsFixture()).handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  const failingFs = { ...fsFixture(), readBytes: async () => { throw new Error('private query failure') } }
+  const response = await createVerifyCommand(service, failingFs).handler({ agent: { id: 'agent-1' }, rawInput: '' })
   assert.equal(response.kind, 'error')
   assert.match(response.text, /private query failure/u)
   assert.equal(disposals, 1)
 
   disposals = 0
-  const success = await createVerifyCommand({ ...service, filterEvents: async () => [] }, fsFixture()).handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  const success = await createVerifyCommand(service, fsFixture()).handler({ agent: { id: 'agent-1' }, rawInput: '' })
   assert.equal(success.kind, 'success')
   assert.equal(disposals, 1)
 })
