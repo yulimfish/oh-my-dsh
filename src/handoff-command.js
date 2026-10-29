@@ -84,8 +84,8 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
 
       const evidence = snapshot.output
         ? evidenceForPrompt(snapshot.output
-          .replace(/^[ \t]*--- BEGIN CHILD EVIDENCE ---[ \t]*\r?$/gmu, '[child BEGIN CHILD EVIDENCE]')
-          .replace(/^[ \t]*--- END CHILD EVIDENCE ---[ \t]*\r?$/gmu, '[child END CHILD EVIDENCE]')
+          .replace(/--- BEGIN CHILD EVIDENCE ---/gu, '[child BEGIN CHILD EVIDENCE]')
+          .replace(/--- END CHILD EVIDENCE ---/gu, '[child END CHILD EVIDENCE]')
           .replace(CONTROL_OR_BIDI_GLOBAL, ' ').replace(/[ \t]+/gu, ' ').trim())
         : '(no retained child output)'
       const nextStep = input.nextStep || 'Inspect the evidence, identify the unfinished work, and continue with the smallest useful next action.'
