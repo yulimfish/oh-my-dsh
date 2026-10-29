@@ -88,11 +88,17 @@ function contentText(message) {
     .map(block => block.text).join('\n').slice(0, 2_000)
 }
 
+function hasNonTextContent(message) {
+  return Array.isArray(message?.content) && message.content.slice(0, 32)
+    .some(block => block?.type !== 'text')
+}
+
 /** Collect only bash Tool results with their matching call metadata; other tools are ignored. */
 export function collectBashResults(events) {
   if (!Array.isArray(events)) throw new TypeError('Session events are not an array.')
   const calls = new Map()
   const completedCallIds = new Set()
+  const ambiguousCallIds = new Set()
   const results = []
   for (const event of events) {
     if (!event || typeof event !== 'object' || !Number.isSafeInteger(event.seq)) throw new TypeError('Invalid session event metadata.')
@@ -108,7 +114,14 @@ export function collectBashResults(events) {
             if (results[index].callId === callId) results.splice(index, 1)
           }
         }
-        if (calls.has(callId)) calls.delete(callId)
+        if (calls.has(callId)) {
+          calls.delete(callId)
+          ambiguousCallIds.delete(callId)
+          ambiguousCallIds.add(callId)
+          if (ambiguousCallIds.size > MAX_COMPLETED_CALL_IDS) ambiguousCallIds.delete(ambiguousCallIds.keys().next().value)
+          continue
+        }
+        ambiguousCallIds.delete(callId)
         if (calls.size >= MAX_EVENTS) calls.delete(calls.keys().next().value)
         calls.set(callId, { command: clean(args.command, 4_096), description: clean(args.description, 160) })
       }
@@ -129,6 +142,7 @@ export function collectBashResults(events) {
         description: call.description,
         isError: message?.isError === true || event.data?.error !== undefined,
         text: contentText(message),
+        hasNonText: hasNonTextContent(message),
       })
     }
   }
@@ -141,6 +155,7 @@ function render(scripts, checks, sessionId) {
   for (const check of checks) {
     evidenceLines.push(`- #${check.seq} ${check.isError ? 'FAIL/ERROR' : 'completed without Tool error'}: ${check.command.slice(0, 256)}`)
     if (check.text) evidenceLines.push(`  Output excerpt (untrusted): ${clean(check.text, 300)}`)
+    if (check.hasNonText) evidenceLines.push('  (non-text result blocks present; inspect the original Tool result for details)')
   }
   const disclaimer = 'Interpretation: a completed bash Tool result is not by itself a passing test. Check its exit code/output. Missing evidence means unverified, not failed. Run an explicitly chosen script through normal DSH tools/approvals, then rerun /omo verify.'
   const header = `Read-only verification evidence for session ${sessionId}. No tests were run and no Goal or workspace state was changed.`
@@ -150,6 +165,7 @@ function render(scripts, checks, sessionId) {
     const records = checks.map(check => [
       `- #${check.seq} ${check.isError ? 'FAIL/ERROR' : 'completed without Tool error'}: ${check.command.slice(0, 256)}`,
       ...(check.text ? [`  Output excerpt (untrusted): ${clean(check.text, 300)}`] : []),
+      ...(check.hasNonText ? ['  (non-text result blocks present; inspect the original Tool result for details)'] : []),
     ].join('\n'))
     const retained = [records.at(-1)]
     let used = marker.length + 1 + retained[0].length
