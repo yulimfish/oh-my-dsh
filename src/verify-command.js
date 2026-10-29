@@ -136,6 +136,17 @@ export function collectBashResults(events) {
         }
         continue
       }
+      if (completedCallIds.has(callId) && !calls.has(callId)) {
+        ambiguousCallIds.add(callId)
+        if (ambiguousCallIds.size > MAX_COMPLETED_CALL_IDS) {
+          ambiguousCallIds.delete(ambiguousCallIds.keys().next().value)
+          correlationComplete = false
+        }
+        for (let index = results.length - 1; index >= 0; index -= 1) {
+          if (results[index].callId === callId) results.splice(index, 1)
+        }
+        continue
+      }
       const call = calls.get(callId)
       if (!call) continue
       calls.delete(callId)

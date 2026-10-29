@@ -110,6 +110,11 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
   }
   overflow.push(call(seq++, 'target', 'pnpm test -- later'), resultEvent(seq++, 'target', 'ambiguous stale result'))
   assert.deepEqual(collectBashResults(overflow), [], 'tombstone overflow cannot re-admit an ambiguous ID')
+  assert.deepEqual(collectBashResults([
+    call(1, 'duplicate-result', 'pnpm test'),
+    resultEvent(2, 'duplicate-result', 'first result'),
+    resultEvent(3, 'duplicate-result', 'duplicate result'),
+  ]), [], 'a duplicate result without a second call is also ambiguous')
 })
 
 test('reports scripts and latest evidence without executing tests or changing state', async () => {
