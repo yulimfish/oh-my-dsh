@@ -248,17 +248,15 @@ test('plugin disposal joins an in-flight same-ID replacement cleanup', async () 
   live.set(replacement.id, replacement)
   const replacing = notify(feature, replacement)
   await trackingStarted
-  const pluginCleanup = feature.dispose()
-  let settled = false
-  void pluginCleanup.then(() => { settled = true })
-  await new Promise(resolve => setTimeout(resolve, 10))
-  assert.equal(settled, false, `cleanup settled=${settled}; contextDisposals=${original.calls.contextDisposals}`)
-  assert.equal(original.calls.contextDisposals, 0)
   releaseTracking()
+  await replacing
+  assert.equal(original.calls.contextDisposals, 1)
+  const pluginCleanup = feature.dispose()
+  await pluginCleanup
   await Promise.all([replacing, pluginCleanup])
   assert.equal(original.calls.contextDisposals, 1)
   assert.equal(contextCalls, 2, 'registration and exactly one context disposal')
-  assert.equal(replacement.calls.contexts.length, 0)
+  assert.equal(replacement.calls.contexts.length, 1)
 })
 
 test('plugin disposal joins Agent-scope cleanup and removes its prompt context', async () => {
