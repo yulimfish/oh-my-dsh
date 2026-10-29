@@ -2905,9 +2905,15 @@ test('formatted compatibility descriptions retain the 2000-character bound', asy
   await writeSkill(path.join(cwd, '.opencode/skills/over-limit.md'), { name: 'over-limit', description: 'x'.repeat(2_001 - prefix.length) })
   const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
   const snapshot = await registry.snapshot({ cwd })
+  assert.equal(snapshot.complete, true)
   assert.equal(snapshot.skills.find(skill => skill.name === 'at-limit')?.description.length, 2_000)
   assert.equal(snapshot.skills.some(skill => skill.name === 'over-limit'), false)
   assert.equal((await registry.get('at-limit', { cwd }))?.description.length, 2_000)
+  await writeSkill(path.join(cwd, '.opencode/skills/over-limit/fallback.md'), { name: 'over-limit', content: 'fallback body' })
+  const { registry: fallbackRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const fallbackSnapshot = await fallbackRegistry.snapshot({ cwd })
+  assert.equal(fallbackSnapshot.complete, true)
+  assert.equal((await fallbackRegistry.get('over-limit', { cwd }))?.content, 'fallback body')
 })
 
 test('format compatibility is opt-in and validates its option without weakening strict documents', async t => {

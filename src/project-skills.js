@@ -1094,8 +1094,12 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
               }
             } catch (error) {
               if (signal?.aborted || !formatCompatibility) throw error
-              complete = false
-              warn(ctx, 'dsh-omo could not process a project skill entry')
+              if (error instanceof SkillFormatError) {
+                warn(ctx, 'dsh-omo skipped an invalid project skill file', error)
+              } else {
+                complete = false
+                warn(ctx, 'dsh-omo could not process a project skill entry')
+              }
             }
           }
         } catch (error) {
