@@ -95,6 +95,19 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
   ])
   assert.equal(nonText[0].text, '')
   assert.equal(nonText[0].hasNonText, true)
+  const hostFailure = collectBashResults([
+    call(1, 'host-failure', 'pnpm test'),
+    {
+      seq: 2,
+      type: 'tool/result',
+      data: {
+        error: { name: 'Error', code: 'FAILED' },
+        message: { toolCallId: 'host-failure', isError: false, content: [{ type: 'text', text: 'partial output' }] },
+      },
+    },
+  ])
+  assert.equal(hostFailure[0].isError, true)
+  assert.equal(hostFailure[0].text, 'partial output')
   for (const malformed of ['{bad json', JSON.stringify({ command: 42 }), JSON.stringify({ command: 'x'.repeat(4_097) })]) {
     assert.deepEqual(collectBashResults([
       call(1, 'malformed-reuse', 'pnpm test -- first'),
