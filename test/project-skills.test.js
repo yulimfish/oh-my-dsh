@@ -2819,7 +2819,9 @@ test('format compatibility derives flat and directory names for absent or falsy 
   assert.equal((await crRegistry.get('cr-frontmatter', { cwd })).content, 'first\rsecond')
   await writeCompatibilityDocument(cwd, 'inline-delimiter.md', '---\ndescription: Demo---\nname: inline-delimiter\n---\nfirst\nsecond\n')
   const { registry: inlineRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
-  assert.equal((await inlineRegistry.get('inline-delimiter', { cwd })).content, 'first\nsecond')
+  const inlineSkill = await inlineRegistry.get('inline-delimiter', { cwd })
+  assert.equal(inlineSkill.description, '(opencode-project - Skill) Demo')
+  assert.equal(inlineSkill.content, 'name: inline-delimiter\n---\nfirst\nsecond')
 })
 
 test('format compatibility rewrites only bounded nonescaping file-like references', async t => {

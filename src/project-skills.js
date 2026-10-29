@@ -224,6 +224,9 @@ export function resolveCompatibleSkillReferences(content, basePath) {
 function parseSkillDocument(source, { formatCompatibility = false, defaultName } = {}) {
   if (typeof source !== 'string') throw new SkillFormatError('skill file is not text')
   const unprefixed = source.replace(/^\uFEFF/u, '')
+  const pinnedFrontmatter = formatCompatibility
+    ? /^---\r?\n([\s\S]*?)\r?\n?---\r?\n([\s\S]*)$/u.exec(unprefixed)
+    : undefined
   const normalized = unprefixed.replace(/\r\n?/gu, '\n')
   const lines = normalized.split('\n')
   const hasFrontmatter = lines[0] === '---'
@@ -231,9 +234,11 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
   const end = hasFrontmatter ? lines.indexOf('---', 1) : -1
   if (hasFrontmatter && end < 0) throw new SkillFormatError('skill YAML frontmatter has no closing delimiter')
   let originalBody
-  if (formatCompatibility && hasFrontmatter) {
-    // Map the exact normalized delimiter line back to the original source;
-    // upstream's optional preceding newline must not capture inline `---`.
+  if (formatCompatibility && pinnedFrontmatter) {
+    originalBody = pinnedFrontmatter[2]
+  } else if (formatCompatibility && hasFrontmatter) {
+    // Retain the local standalone-delimiter fallback for source shapes the
+    // pinned parser does not accept, mapping it back to original line endings.
     let originalOffset = 0
     for (let lineIndex = 0; lineIndex <= end; lineIndex += 1) {
       const newline = unprefixed.indexOf('\n', originalOffset)
@@ -253,7 +258,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
   if (hasFrontmatter) {
     let document
     try {
-      document = parseDocument(lines.slice(1, end).join('\n'), {
+      document = parseDocument(pinnedFrontmatter ? pinnedFrontmatter[1] : lines.slice(1, end).join('\n'), {
         schema: 'core',
         uniqueKeys: true,
       })
