@@ -53,18 +53,28 @@ function freshProjection(session, offset = 0) {
   return {
     session, offset, current: undefined, pending: new Map(), latestTodoCallSeq: -1,
     ambiguousCallIds: new Set(), completedCallIds: new Set(), currentCallId: undefined,
+    evictedCallIds: new Set(), correlationSaturated: false,
   }
+}
+
+function evictIdentity(state, ids, callId) {
+  ids.delete(callId)
+  state.evictedCallIds.add(callId)
+  if (state.evictedCallIds.size > MAX_PENDING_TODO_CALLS * 8) state.correlationSaturated = true
+}
+
+function clearCurrentCallId(state, callId) {
+  if (state.currentCallId !== callId) return
+  state.current = undefined
+  state.currentCallId = undefined
 }
 
 function quarantineCallId(state, callId) {
   state.pending.delete(callId)
   state.ambiguousCallIds.add(callId)
-  if (state.currentCallId === callId) {
-    state.current = undefined
-    state.currentCallId = undefined
-  }
+  clearCurrentCallId(state, callId)
   while (state.ambiguousCallIds.size > MAX_PENDING_TODO_CALLS) {
-    state.ambiguousCallIds.delete(state.ambiguousCallIds.keys().next().value)
+    evictIdentity(state, state.ambiguousCallIds, state.ambiguousCallIds.keys().next().value)
   }
 }
 
@@ -90,6 +100,13 @@ export function createProgressProjection(session) {
         // Never show an older list as current after skipping an event window.
         state = freshProjection(session, Math.max(0, session.seq - MAX_EVENTS_PER_RENDER))
       }
+      if (state.correlationSaturated) {
+        state.current = undefined
+        state.pending.clear()
+        state.completedCallIds.clear()
+        state.ambiguousCallIds.clear()
+        return ''
+      }
       const events = session.snapshotEvents(state.offset, session.seq)
       if (!Array.isArray(events)) {
         state = freshProjection(session, session.seq)
@@ -105,19 +122,25 @@ export function createProgressProjection(session) {
           const callId = event.data.callId
           if (typeof callId !== 'string' || callId.length === 0) continue
           const todos = parseTodos(event.data.arguments)
-          if (state.ambiguousCallIds.has(callId)) continue
+          if (state.ambiguousCallIds.has(callId) || state.evictedCallIds.has(callId)) continue
           if (state.pending.has(callId) || state.completedCallIds.has(callId)) {
             quarantineCallId(state, callId)
             continue
           }
           state.pending.set(callId, { seq: event.seq, todos })
-          while (state.pending.size > MAX_PENDING_TODO_CALLS) state.pending.delete(state.pending.keys().next().value)
+          while (state.pending.size > MAX_PENDING_TODO_CALLS) {
+            evictIdentity(state, state.pending, state.pending.keys().next().value)
+          }
           continue
         }
         if (event.type !== 'tool/result') continue
         const message = event.data.message
         const callId = message?.toolCallId ?? message?.source?.toolCallId
         if (typeof callId !== 'string' || state.ambiguousCallIds.has(callId)) continue
+        if (state.evictedCallIds.has(callId)) {
+          clearCurrentCallId(state, callId)
+          continue
+        }
         if (state.completedCallIds.has(callId) && !state.pending.has(callId)) {
           quarantineCallId(state, callId)
           continue
@@ -127,7 +150,12 @@ export function createProgressProjection(session) {
         state.pending.delete(callId)
         state.completedCallIds.add(callId)
         while (state.completedCallIds.size > MAX_PENDING_TODO_CALLS) {
-          state.completedCallIds.delete(state.completedCallIds.keys().next().value)
+          const evicted = state.completedCallIds.keys().next().value
+          evictIdentity(state, state.completedCallIds, evicted)
+          if (state.currentCallId === evicted) {
+            state.current = undefined
+            state.currentCallId = undefined
+          }
         }
         if (event.data.error === undefined && message?.isError !== true
           && pendingTodo.seq > state.latestTodoCallSeq) {

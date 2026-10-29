@@ -256,9 +256,28 @@ test('does not re-admit an ambiguous todo call ID after quarantine eviction', ()
     events.push(todoEvent(index * 2 + 3, id, [{ content: `plan ${index}`, status: 'pending' }]))
     events.push(todoEvent(index * 2 + 4, id, [{ content: `plan ${index} duplicate`, status: 'pending' }]))
   }
-  events.push(todoEvent(100, 'old-ambiguous', [{ content: 'revived old plan', status: 'in_progress' }]), resultEvent(101, 'old-ambiguous'))
+  events.push(todoEvent(83, 'old-ambiguous', [{ content: 'revived old plan', status: 'in_progress' }]), resultEvent(84, 'old-ambiguous'))
   const projection = createProgressProjection(sessionWith(events))
   assert.equal(projection.render(), '')
+})
+
+test('does not re-admit a completed call ID or accept a duplicate result after eviction', () => {
+  const completedEvents = [todoEvent(1, 'old-completed', [{ content: 'revived old plan', status: 'in_progress' }]), resultEvent(2, 'old-completed')]
+  for (let index = 0; index < 40; index += 1) {
+    completedEvents.push(todoEvent(index * 2 + 3, `completed-${index}`, [{ content: 'other plan', status: 'pending' }]))
+    completedEvents.push(resultEvent(index * 2 + 4, `completed-${index}`))
+  }
+  completedEvents.push(todoEvent(83, 'old-completed', [{ content: 'revived old plan', status: 'in_progress' }]), resultEvent(84, 'old-completed'))
+  const completedText = createProgressProjection(sessionWith(completedEvents)).render()
+  assert.doesNotMatch(completedText, /revived old plan/u)
+
+  const duplicateEvents = [todoEvent(1, 'current', [{ content: 'stale current plan', status: 'in_progress' }]), resultEvent(2, 'current')]
+  for (let index = 0; index < 32; index += 1) {
+    duplicateEvents.push(todoEvent(index * 2 + 3, `failed-${index}`, [{ content: 'failed plan', status: 'pending' }]))
+    duplicateEvents.push(resultEvent(index * 2 + 4, `failed-${index}`, { error: true }))
+  }
+  duplicateEvents.push(resultEvent(67, 'current'))
+  assert.equal(createProgressProjection(sessionWith(duplicateEvents)).render(), '')
 })
 
 test('keeps the newest successful plan when a later call fails before an older result succeeds', () => {
