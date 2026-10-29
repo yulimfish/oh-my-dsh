@@ -319,6 +319,17 @@ test('retains a chronological contiguous suffix of complete evidence records wit
   assert.equal(Number(records.at(-1)[2]), 15)
 })
 
+test('continues accepting independent new calls after correlation budget exhaustion', () => {
+  const events = [call(1, 'first', 'pnpm test -- first'), call(2, 'first', 'pnpm test -- reused')]
+  for (let index = 0; index < 300; index += 1) {
+    events.push(call(index + 3, `independent-${index}`, 'pnpm test -- independent'))
+  }
+  events.push(resultEvent(303, 'independent-299', 'latest valid result'))
+  const results = collectBashResults(events)
+  assert.equal(results.at(-1).command, 'pnpm test -- independent')
+  assert.equal(results.at(-1).text, 'latest valid result')
+})
+
 test('retains latest failure and non-text notices under output pressure', async () => {
   const events = []
   for (let index = 0; index < 16; index += 1) {

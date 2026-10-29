@@ -100,6 +100,7 @@ export function collectBashResults(events) {
   const completedCallIds = new Set()
   const malformedCallIds = new Set()
   const ambiguousCallIds = new Set()
+  const evictedCallIds = new Set()
   let correlationComplete = true
   const results = []
   for (const event of events) {
@@ -107,13 +108,15 @@ export function collectBashResults(events) {
     if (event.type === 'tool/call' && event.data?.name === 'bash') {
       const callId = event.data.callId
       if (typeof callId !== 'string' || !callId) continue
-      if (ambiguousCallIds.has(callId)) continue
+      if (ambiguousCallIds.has(callId) || evictedCallIds.has(callId)) continue
       if (malformedCallIds.has(callId) || completedCallIds.has(callId) || calls.has(callId)) {
         calls.delete(callId)
         ambiguousCallIds.delete(callId)
         ambiguousCallIds.add(callId)
         if (ambiguousCallIds.size > MAX_COMPLETED_CALL_IDS) {
-          ambiguousCallIds.delete(ambiguousCallIds.keys().next().value)
+          const evicted = ambiguousCallIds.keys().next().value
+          ambiguousCallIds.delete(evicted)
+          evictedCallIds.add(evicted)
           correlationComplete = false
         }
         for (let index = results.length - 1; index >= 0; index -= 1) {
@@ -121,20 +124,23 @@ export function collectBashResults(events) {
         }
         continue
       }
-      if (!correlationComplete) continue
       let args
       try { args = JSON.parse(event.data.arguments) } catch { args = undefined }
       if (!args || typeof args.command !== 'string' || args.command.length > 4_096) {
         malformedCallIds.delete(callId)
         malformedCallIds.add(callId)
         if (malformedCallIds.size > MAX_COMPLETED_CALL_IDS) {
-          malformedCallIds.delete(malformedCallIds.keys().next().value)
+          const evicted = malformedCallIds.keys().next().value
+          malformedCallIds.delete(evicted)
+          evictedCallIds.add(evicted)
           correlationComplete = false
         }
         continue
       }
       if (calls.size >= MAX_EVENTS) {
-        calls.delete(calls.keys().next().value)
+        const evicted = calls.keys().next().value
+        calls.delete(evicted)
+        evictedCallIds.add(evicted)
         correlationComplete = false
       }
       calls.set(callId, { command: clean(args.command, 4_096), description: clean(args.description, 160) })
@@ -151,7 +157,9 @@ export function collectBashResults(events) {
       if (completedCallIds.has(callId) && !calls.has(callId)) {
         ambiguousCallIds.add(callId)
         if (ambiguousCallIds.size > MAX_COMPLETED_CALL_IDS) {
-          ambiguousCallIds.delete(ambiguousCallIds.keys().next().value)
+          const evicted = ambiguousCallIds.keys().next().value
+          ambiguousCallIds.delete(evicted)
+          evictedCallIds.add(evicted)
           correlationComplete = false
         }
         for (let index = results.length - 1; index >= 0; index -= 1) {
@@ -167,8 +175,13 @@ export function collectBashResults(events) {
       if (completedCallIds.size > MAX_COMPLETED_CALL_IDS) {
         const evicted = completedCallIds.keys().next().value
         completedCallIds.delete(evicted)
+        evictedCallIds.add(evicted)
         ambiguousCallIds.add(evicted)
-        correlationComplete = false
+        if (evictedCallIds.size > MAX_COMPLETED_CALL_IDS * 16) {
+          // Keep the independent-call path open, but never re-admit an ID that
+          // exceeded the completed-result tombstone budget.
+          correlationComplete = false
+        }
       }
       if (results.length >= 16) results.shift()
       results.push({
