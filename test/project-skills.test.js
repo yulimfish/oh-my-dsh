@@ -223,6 +223,7 @@ test('discovers the singular OpenCode skill root after the plural root by defaul
   assert.equal(snapshot.complete, true)
   const singular = await registry.get('singular-demo', { cwd })
   assert.equal(singular.content, 'singular body')
+  assert.equal(singular.source, 'project-opencode')
   assert.equal(singular.description, '(opencode-project - Skill) Project skill')
   assert.equal((await registry.get('shared-root', { cwd })).content, 'plural wins')
 })
