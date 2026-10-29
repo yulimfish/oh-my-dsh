@@ -317,7 +317,7 @@ const baseConfig = {
 test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(name, 'dsh-omo')
   assert.deepEqual(inject, ['tools', 'subagents', 'systemPrompt', 'commands', 'skills', 'fs'])
-  assert.deepEqual(Config({}).projectSkillDirs, ['.opencode/skills', '.claude/skills', '.agents/skills'])
+  assert.deepEqual(Config({}).projectSkillDirs, ['.opencode/skills', '.opencode/skill', '.claude/skills', '.agents/skills'])
   assert.equal(Config({}).enableProjectSkillFormatCompatibility, false)
   assert.equal(Config({ enableProjectSkillFormatCompatibility: true }).enableProjectSkillFormatCompatibility, true)
   assert.deepEqual(Config({}).disabledSkills, [])

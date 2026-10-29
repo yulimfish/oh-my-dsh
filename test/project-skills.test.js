@@ -209,6 +209,24 @@ function makeRegistry(fs) {
   return { ctx, registry }
 }
 
+test('discovers the singular OpenCode skill root after the plural root by default', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeSkill(path.join(cwd, '.opencode/skill/singular-demo/SKILL.md'), { name: 'singular-demo', content: 'singular body' })
+  await writeSkill(path.join(cwd, '.opencode/skill/shared/SKILL.md'), { name: 'shared-root', content: 'singular loses' })
+  await writeSkill(path.join(cwd, '.opencode/skills/shared/SKILL.md'), { name: 'shared-root', content: 'plural wins' })
+  await writeSkill(path.join(cwd, '.claude/skills/shared/SKILL.md'), { name: 'shared-root', content: 'later root loses' })
+  const { fs } = makeFileSystem()
+  const { ctx, registry } = makeRegistry(fs)
+  const registration = registerProjectSkillProvider(ctx, { formatCompatibility: true })
+  t.after(() => registration.dispose())
+  const snapshot = await registry.snapshot({ cwd })
+  assert.equal(snapshot.complete, true)
+  const singular = await registry.get('singular-demo', { cwd })
+  assert.equal(singular.content, 'singular body')
+  assert.equal(singular.description, '(opencode-project - Skill) Project skill')
+  assert.equal((await registry.get('shared-root', { cwd })).content, 'plural wins')
+})
+
 test('loads explicitly configured user skill roots outside cwd with project-to-user-to-runtime precedence', async t => {
   const cwd = await makeWorkspace(t)
   const userRoot = path.join(await makeWorkspace(t), 'skills')
@@ -1923,7 +1941,7 @@ test('recovers from watcher runtime errors by retrying and reporting incomplete 
 })
 
 test('accepts only relative project skill directories', () => {
-  const defaultRoots = ['.opencode/skills', '.claude/skills', '.agents/skills']
+  const defaultRoots = ['.opencode/skills', '.opencode/skill', '.claude/skills', '.agents/skills']
   assert.deepEqual(normalizeProjectSkillDirs(), defaultRoots)
   assert.deepEqual(normalizeProjectSkillDirs(defaultRoots), defaultRoots)
   assert.throws(() => normalizeProjectSkillDirs(['../outside']), /stay relative/)

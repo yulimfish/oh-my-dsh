@@ -3,7 +3,7 @@ import { parseDocument } from 'yaml'
 import { basename, dirname, isAbsolute, normalize, parse as parsePath, posix, relative, win32 } from 'node:path'
 
 export const PROJECT_SKILL_PROVIDER = 'dsh-omo-project-skills'
-export const DEFAULT_PROJECT_SKILL_DIRS = Object.freeze(['.opencode/skills', '.claude/skills', '.agents/skills'])
+export const DEFAULT_PROJECT_SKILL_DIRS = Object.freeze(['.opencode/skills', '.opencode/skill', '.claude/skills', '.agents/skills'])
 
 const MAX_SKILL_BYTES = 256 * 1024
 const MAX_SKILLS = 256
@@ -374,7 +374,7 @@ async function readSkillFile(ctx, target, signal, byteLimit = MAX_SKILL_BYTES, f
 }
 
 function sourceForDirectory(directory) {
-  if (directory === '.opencode/skills') return 'project-opencode'
+  if (directory === '.opencode/skills' || directory === '.opencode/skill') return 'project-opencode'
   if (directory === '.claude/skills') return 'project-claude'
   if (directory === '.agents/skills') return 'project-agents'
   return 'project-local'
@@ -412,7 +412,7 @@ function compatibleSkillDescription(description, scope) {
 function skillDescriptionScope(rootPath, userRoot) {
   if (userRoot?.source === 'user-opencode') return 'opencode'
   if (userRoot) return 'user'
-  return rootPath === '.opencode/skills' ? 'opencode-project' : 'project'
+  return rootPath === '.opencode/skills' || rootPath === '.opencode/skill' ? 'opencode-project' : 'project'
 }
 
 function matchesCandidate(skill, candidate, disabledSkills) {
