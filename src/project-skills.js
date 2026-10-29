@@ -232,7 +232,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
   const hasFrontmatter = lines[0] === '---'
   if (!hasFrontmatter && !formatCompatibility) throw new SkillFormatError('skill file must begin with YAML frontmatter')
   const end = hasFrontmatter ? lines.indexOf('---', 1) : -1
-  if (hasFrontmatter && end < 0) throw new SkillFormatError('skill YAML frontmatter has no closing delimiter')
+  if (hasFrontmatter && end < 0 && !pinnedFrontmatter) throw new SkillFormatError('skill YAML frontmatter has no closing delimiter')
   let originalBody
   if (formatCompatibility && pinnedFrontmatter) {
     originalBody = pinnedFrontmatter[2]
