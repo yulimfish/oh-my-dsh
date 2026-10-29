@@ -249,6 +249,18 @@ test('quarantines duplicate results for one todo call ID', () => {
   assert.equal(projection.render(), '')
 })
 
+test('does not re-admit an ambiguous todo call ID after quarantine eviction', () => {
+  const events = [todoEvent(1, 'old-ambiguous', [{ content: 'old ambiguous plan', status: 'in_progress' }]), todoEvent(2, 'old-ambiguous', [{ content: 'old ambiguous second', status: 'pending' }])]
+  for (let index = 0; index < 40; index += 1) {
+    const id = `ambiguous-${index}`
+    events.push(todoEvent(index * 2 + 3, id, [{ content: `plan ${index}`, status: 'pending' }]))
+    events.push(todoEvent(index * 2 + 4, id, [{ content: `plan ${index} duplicate`, status: 'pending' }]))
+  }
+  events.push(todoEvent(100, 'old-ambiguous', [{ content: 'revived old plan', status: 'in_progress' }]), resultEvent(101, 'old-ambiguous'))
+  const projection = createProgressProjection(sessionWith(events))
+  assert.equal(projection.render(), '')
+})
+
 test('keeps the newest successful plan when a later call fails before an older result succeeds', () => {
   const projection = createProgressProjection(sessionWith([
     todoEvent(1, 'old-call', [{ content: 'old successful plan', status: 'in_progress' }]),
