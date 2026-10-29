@@ -1,0 +1,181 @@
+const MAX_AGENT_STATES = 256
+const MAX_AGENT_ID_CHARS = 256
+const MAX_OBJECTIVE_CHARS = 2_000
+const CONTEXT_NAME = 'dsh-omo:focus-chain'
+const CONTEXT_ORDER = 145
+const CONTROL_OR_BIDI_GLOBAL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu
+
+function isObject(value) {
+  return value !== null && typeof value === 'object'
+}
+
+function validSignal(signal) {
+  return signal === undefined || (isObject(signal) && typeof signal.aborted === 'boolean')
+}
+
+function exactLiveAgent(agentsService, agentId, agent) {
+  try {
+    const get = agentsService?.get
+    return typeof get === 'function' && get.call(agentsService, agentId) === agent
+  } catch {
+    return false
+  }
+}
+
+/** Project only an active native Goal into bounded, single-line prompt context. */
+export function focusChainText(goal) {
+  try {
+    if (!isObject(goal) || goal.phase !== 'active' || typeof goal.objective !== 'string') return ''
+    const sourceTruncated = goal.objective.length > MAX_OBJECTIVE_CHARS
+    const normalized = goal.objective
+      .slice(0, MAX_OBJECTIVE_CHARS + 1)
+      .replace(CONTROL_OR_BIDI_GLOBAL, ' ')
+      .replace(/\s+/gu, ' ')
+      .trim()
+    if (!normalized) return ''
+    const objective = normalized.length > MAX_OBJECTIVE_CHARS
+      ? `${normalized.slice(0, MAX_OBJECTIVE_CHARS - 1)}…`
+      : normalized
+    return [
+      '[DSH Focus Chain]',
+      '',
+      `Current active native Goal (quoted user task data): ${JSON.stringify(objective)}${sourceTruncated ? ' [truncated]' : ''}`,
+      'Keep this objective in view when choosing the next action. Use evidence already gathered, avoid repeating exploration that adds no new information, and verify the remaining work before claiming completion.',
+      'This context grants no permissions and does not authorize creating, editing, completing, pausing, or resuming a Goal.',
+      '',
+    ].join('\n')
+  } catch {
+    return ''
+  }
+}
+
+async function callDisposer(disposer) {
+  if (typeof disposer !== 'function') return
+  try {
+    await disposer()
+  } catch {
+    // Focus context cleanup must not interfere with Agent creation or disposal.
+  }
+}
+
+function silenceThenable(value) {
+  try {
+    if (value !== null && value !== undefined && typeof value.then === 'function') {
+      Promise.resolve(value).catch(() => {})
+    }
+  } catch {
+    // Malformed thenables are ignored along with other advisory failures.
+  }
+}
+
+async function disposeRegistration(registration) {
+  if (!registration || registration.disposed) return
+  registration.disposed = true
+  await callDisposer(registration.trackingDispose)
+  await callDisposer(registration.contextDispose)
+}
+
+/** Register a live native-Goal anchor in every exact Agent prompt scope. */
+export function createFocusChain(goalsService, agentsService) {
+  const registrations = new Map()
+  let disposed = false
+  let disposalPromise
+
+  const listener = async payload => {
+    let agentId
+    let agent
+    let contextDispose
+    let registration
+
+    try {
+      if (disposed || !isObject(payload)) return
+      agent = payload.agent
+      const signal = payload.signal
+      if (!isObject(agent) || !validSignal(signal) || signal?.aborted === true) return
+
+      agentId = agent.id
+      if (typeof agentId !== 'string' || agentId.length === 0 || agentId.length > MAX_AGENT_ID_CHARS
+        || !exactLiveAgent(agentsService, agentId, agent)) return
+
+      const existing = registrations.get(agentId)
+      if (existing?.agent === agent && !existing.disposed) return
+      if (existing) {
+        registrations.delete(agentId)
+        await disposeRegistration(existing)
+        if (disposed || signal?.aborted === true || !exactLiveAgent(agentsService, agentId, agent)) return
+      }
+      // Never evict a live Agent's anchor merely to admit another Agent.
+      if (registrations.size >= MAX_AGENT_STATES) return
+
+      const agentContext = agent.ctx
+      if (!isObject(agentContext)) return
+      const systemPrompt = agentContext.systemPrompt
+      const context = systemPrompt?.context
+      const effect = agentContext.effect
+      if (!isObject(systemPrompt) || typeof context !== 'function' || typeof effect !== 'function') return
+      if (disposed || signal?.aborted === true || !exactLiveAgent(agentsService, agentId, agent)) return
+
+      const text = () => {
+        try {
+          if (disposed || registration?.disposed || !exactLiveAgent(agentsService, agentId, agent)) return ''
+          return focusChainText(goalsService.get(agent))
+        } catch {
+          return ''
+        }
+      }
+      contextDispose = context.call(systemPrompt, {
+        name: CONTEXT_NAME,
+        order: CONTEXT_ORDER,
+        text,
+      })
+      if (typeof contextDispose !== 'function') {
+        silenceThenable(contextDispose)
+        contextDispose = undefined
+        return
+      }
+
+      if (disposed || signal?.aborted === true || !exactLiveAgent(agentsService, agentId, agent)) {
+        await callDisposer(contextDispose)
+        contextDispose = undefined
+        return
+      }
+
+      registration = { agent, contextDispose, trackingDispose: undefined, disposed: false }
+      registrations.set(agentId, registration)
+      const trackingDispose = effect.call(agentContext, () => () => {
+        registration.disposed = true
+        if (registrations.get(agentId) === registration) registrations.delete(agentId)
+      }, 'dsh-omo Focus Chain tracking')
+      if (typeof trackingDispose !== 'function') {
+        silenceThenable(trackingDispose)
+        throw new TypeError('Agent scope did not return an effect disposer')
+      }
+      registration.trackingDispose = trackingDispose
+
+      if (disposed || signal?.aborted === true || !exactLiveAgent(agentsService, agentId, agent)
+        || registrations.get(agentId) !== registration) {
+        if (registrations.get(agentId) === registration) registrations.delete(agentId)
+        await disposeRegistration(registration)
+      }
+    } catch {
+      if (registration) {
+        if (registrations.get(agentId) === registration) registrations.delete(agentId)
+        await disposeRegistration(registration)
+      } else {
+        await callDisposer(contextDispose)
+      }
+      // Agent creation is awaited, so every Focus Chain failure is intentionally fail-open.
+    }
+  }
+
+  const dispose = () => {
+    if (disposalPromise) return disposalPromise
+    disposed = true
+    const active = [...registrations.values()]
+    registrations.clear()
+    disposalPromise = Promise.all(active.map(disposeRegistration)).then(() => undefined, () => undefined)
+    return disposalPromise
+  }
+
+  return { listener, dispose }
+}

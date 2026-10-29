@@ -221,6 +221,7 @@ const baseConfig = {
   enableContinuableTasks: false,
   enableContinuableTaskFollowups: false,
   enableGoalTools: false,
+  enableFocusChain: false,
   enableGoalUseReminder: false,
   enableAgentUsageReminder: false,
   enableCategorySkillReminder: false,
@@ -428,6 +429,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(concurrencyConfig.modelConcurrency, { 'deepseek-official/deepseek-flash': 1 })
   assert.equal(Config({}).enableGoalTools, false)
   assert.equal(Config({ enableGoalTools: true }).enableGoalTools, true)
+  assert.equal(Config({}).enableFocusChain, false)
+  assert.equal(Config({ enableFocusChain: true }).enableFocusChain, true)
   assert.equal(Config({}).enableGoalUseReminder, false)
   assert.equal(Config({ enableGoalUseReminder: true }).enableGoalUseReminder, true)
   assert.equal(Config({}).enableAgentUsageReminder, false)
@@ -3391,6 +3394,54 @@ test('mounts model-facing DSH Goal tools only when opted in and the full Host se
   assert.equal(enabled.tools.has('dsh_omo_goal_get'), false)
   assert.equal(enabled.tools.has('dsh_omo_goal_create'), false)
   assert.equal(enabled.tools.has('dsh_omo_goal_update'), false)
+})
+
+test('mounts native Goal Focus Chain only with exact service prerequisites', async () => {
+  const goals = { get() {} }
+  const agents = { get: () => undefined }
+  const systemPrompt = { context: () => () => {} }
+
+  const missingGoals = makeContext({ services: { agents, systemPrompt } })
+  assert.throws(
+    () => apply(missingGoals.ctx, { ...baseConfig, enableFocusChain: true }),
+    /enableFocusChain requires DSH goals\.get/u,
+  )
+  assert.equal(missingGoals.tools.size, 0)
+
+  const missingAgents = makeContext({ services: { goals, systemPrompt } })
+  assert.throws(
+    () => apply(missingAgents.ctx, { ...baseConfig, enableFocusChain: true }),
+    /enableFocusChain requires DSH agents\.get, systemPrompt\.context, Cordis ctx\.on, and ctx\.effect/u,
+  )
+  assert.equal(missingAgents.tools.size, 0)
+
+  const missingPrompt = makeContext({ services: { goals, agents } })
+  assert.throws(
+    () => apply(missingPrompt.ctx, { ...baseConfig, enableFocusChain: true }),
+    /enableFocusChain requires DSH agents\.get, systemPrompt\.context, Cordis ctx\.on, and ctx\.effect/u,
+  )
+  assert.equal(missingPrompt.tools.size, 0)
+
+  const missingEvents = makeContext({ services: { goals, agents, systemPrompt } })
+  missingEvents.ctx.on = undefined
+  assert.throws(
+    () => apply(missingEvents.ctx, { ...baseConfig, enableFocusChain: true }),
+    /enableFocusChain requires DSH agents\.get, systemPrompt\.context, Cordis ctx\.on, and ctx\.effect/u,
+  )
+  assert.equal(missingEvents.tools.size, 0)
+
+  const disabled = makeContext({ services: { goals, agents, systemPrompt } })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('agent/created'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /focusChain=disabled/u)
+
+  const fixture = makeContext({ services: { goals, agents, systemPrompt } })
+  apply(fixture.ctx, { ...baseConfig, enableFocusChain: true })
+  assert.equal(typeof fixture.events.get('agent/created'), 'function')
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /focusChain=enabled/u)
+  const effect = fixture.effects.find(entry => entry.label === 'dsh-omo Focus Chain')
+  assert.equal(typeof effect?.dispose, 'function')
+  await effect.dispose()
 })
 
 test('mounts the bounded non-Team Goal-use reminder only with explicit prerequisites', async () => {
