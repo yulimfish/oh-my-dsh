@@ -107,6 +107,21 @@ test('does not queue handoff after the exact parent is replaced during async res
   assert.equal(queued.length, 0)
 })
 
+test('queues only after the exact live parent passes the post-read liveness check', async () => {
+  const agent = { id: 'parent-live' }
+  const queued = []
+  const checks = []
+  const command = createHandoffCommand({ read: () => failed() }, {
+    queueMessage: (...args) => queued.push(args),
+    isParentCurrent: actual => { checks.push(actual); return true },
+  })
+  const response = await command.handler({ agent, rawInput: 'child-1' })
+  assert.equal(response.kind, 'success')
+  assert.deepEqual(checks, [agent])
+  assert.equal(queued.length, 1)
+  assert.strictEqual(queued[0][0], agent)
+})
+
 test('returns a bounded error when the handoff queue rejects delivery', async () => {
   const command = createHandoffCommand({ read: () => failed() }, {
     async queueMessage() { throw new Error('private queue failure') },
