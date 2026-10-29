@@ -170,10 +170,34 @@ test('does not consume a review when Agent identity changes before steering', as
   }
   const racingReview = createGoalCompletionReview(goals, { get: id => live.get(id) })
   await racingReview.listener(payload(agent))
+  assert.equal(messages.length, 0, 'the stale Agent must not steer')
   live.set(agent.id, agent)
   await racingReview.listener(payload(agent, 2))
   assert.equal(messages.length, 1, 'a stale pre-steer identity check must not consume the review')
   racingReview.dispose()
+})
+
+test('a stale replacement cannot erase the displaced Agent review history', async () => {
+  const { live, goal } = harness()
+  const messages = []
+  const original = { id: 'agent-displaced', steer: message => messages.push(message) }
+  const replacement = { id: original.id, steer() {} }
+  live.set(original.id, original)
+  let restored = false
+  const review = createGoalCompletionReview({
+    get() {
+      if (restored) live.set(original.id, original)
+      restored = true
+      return goal
+    },
+  }, { get: id => live.get(id) })
+  await review.listener(payload(original))
+  assert.equal(messages.length, 1)
+  live.set(original.id, replacement)
+  await review.listener(payload(replacement))
+  await review.listener(payload(original, 2))
+  assert.equal(messages.length, 1, 'the displaced Agent must not review the same revision twice')
+  review.dispose()
 })
 
 test('does not throw or consume review when steer accessor fails', async () => {
