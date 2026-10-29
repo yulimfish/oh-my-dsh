@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { spawnSync } from 'node:child_process'
 import { posix as path } from 'node:path'
 import { resolveChildAgentOptions, snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { apply, Config, inject, name } from '../src/index.js'
@@ -67,6 +68,7 @@ function makeContext(options = {}) {
     },
     fs: options.fs ?? {},
     skills: {
+      get: options.skillGet,
       register: skill => { skills.set(skill.name, skill); return () => skills.delete(skill.name) },
       registerProvider: create => {
         const lifetime = new AbortController()
@@ -211,6 +213,9 @@ const baseConfig = {
   maxTaskChars: 12_000,
   maxResultChars: 8_000,
   enableTaskResultTool: false,
+  enableTaskResultPersistence: false,
+  enableTaskWaitTool: false,
+  enableCallOmoAgentTool: false,
   enableTaskCancelTool: false,
   enablePersistentMemoryTools: false,
   enableContinuableTasks: false,
@@ -218,6 +223,7 @@ const baseConfig = {
   enableGoalTools: false,
   enableGoalUseReminder: false,
   enableAgentUsageReminder: false,
+  enableCategorySkillReminder: false,
   enableCompactionResumeAdvisory: false,
   enableTeamTools: false,
   enableTeamModeContext: false,
@@ -225,6 +231,7 @@ const baseConfig = {
   enableTeamTaskUseReminder: false,
   enableSessionSearch: false,
   enableSessionEventSearch: false,
+  enableSessionEventTrace: false,
   enableSessionRead: false,
   enableSessionList: false,
   enableSessionInfo: false,
@@ -240,20 +247,44 @@ const baseConfig = {
   enableGeneralToolResultPruning: false,
   additionalSearchToolResultPruningTools: [],
   enableImageQueryTool: false,
+  enableReadImageResizing: false,
   enableAgentTerminalTools: false,
   enableLspTools: false,
   enableRootAgentsContext: false,
+  enableRootAgentsContextWatch: false,
+  enableProjectRootAgentsContext: false,
+  enableProjectRootAgentsContextWatch: false,
+  projectAgentsRoot: '',
   enableAgentsOnRead: false,
+  enableProjectRootAgentsOnRead: false,
   enableProjectAgentFiles: false,
   enableProjectCommands: false,
+  enableProjectRootCommands: false,
+  projectCommandsRoot: '',
+  enableProjectCommandWatch: false,
   enablePromptFileExpansion: false,
   enableRootReadmeContext: false,
   enableReadmeOnRead: false,
+  enableProjectRootReadmeOnRead: false,
+  projectReadmeRoot: '',
   enableClaudeRulesOnRead: false,
+  enableProjectRootClaudeRulesOnRead: false,
+  projectClaudeRulesRoot: '',
   enableOmoProjectRulesOnRead: false,
+  enableProjectRootOmoRulesOnRead: false,
+  projectOmoRulesRoot: '',
   enableCursorProjectRulesOnRead: false,
+  enableProjectRootCursorRulesOnRead: false,
+  projectCursorRulesRoot: '',
   enableGitHubProjectInstructionsOnRead: false,
+  enableProjectRootGitHubInstructionsOnRead: false,
+  projectGitHubInstructionsRoot: '',
   enableGitHubCopilotInstructionsOnRead: false,
+  enableSisyphusProjectRulesOnRead: false,
+  enableProjectRootSisyphusRulesOnRead: false,
+  projectSisyphusRulesRoot: '',
+  enableSisyphusUserRulesOnRead: false,
+  userSisyphusRulesRoot: '',
   userClaudeRulesRoots: [],
   enableOpenCodeRulesOnRead: false,
   userOpenCodeRulesRoots: [],
@@ -263,19 +294,26 @@ const baseConfig = {
   enableJsonErrorRecovery: false,
   enableDelegateTaskErrorGuidance: false,
   enableBashFileReadGuidance: false,
-  projectSkillDirs: ['.opencode/skills', '.claude/skills'],
+  projectSkillDirs: ['.opencode/skills', '.claude/skills', '.agents/skills'],
   disabledSkills: [],
   disabledOmoCommands: [],
   disabledOmoRoles: [],
   userAgents: [],
   categoryRoutes: [],
   roleRoutes: [],
+  enableRoleCategoryRouteAliases: false,
+  roleCategoryRouteAliases: [],
+  enablePinnedRoutePreflight: false,
+  enableAgentPresetPreflight: false,
+  enableThinkModeReasoning: false,
 }
 
 test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(name, 'dsh-omo')
   assert.deepEqual(inject, ['tools', 'subagents', 'systemPrompt', 'commands', 'skills', 'fs'])
-  assert.deepEqual(Config({}).projectSkillDirs, ['.opencode/skills', '.claude/skills'])
+  assert.deepEqual(Config({}).projectSkillDirs, ['.opencode/skills', '.claude/skills', '.agents/skills'])
+  assert.equal(Config({}).enableProjectSkillFormatCompatibility, false)
+  assert.equal(Config({ enableProjectSkillFormatCompatibility: true }).enableProjectSkillFormatCompatibility, true)
   assert.deepEqual(Config({}).disabledSkills, [])
   assert.deepEqual(Config({}).disabledOmoCommands, [])
   assert.deepEqual(Config({ disabledOmoCommands: ['refactor', 'ulw'] }).disabledOmoCommands, ['refactor', 'ulw'])
@@ -284,6 +322,12 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).userAgents, [])
   assert.equal(Config({}).enableTaskResultTool, false)
   assert.equal(Config({ enableTaskResultTool: true }).enableTaskResultTool, true)
+  assert.equal(Config({}).enableTaskResultPersistence, false)
+  assert.equal(Config({ enableTaskResultPersistence: true }).enableTaskResultPersistence, true)
+  assert.equal(Config({}).enableTaskWaitTool, false)
+  assert.equal(Config({ enableTaskWaitTool: true }).enableTaskWaitTool, true)
+  assert.equal(Config({}).enableCallOmoAgentTool, false)
+  assert.equal(Config({ enableCallOmoAgentTool: true }).enableCallOmoAgentTool, true)
   assert.equal(Config({}).enableTaskCancelTool, false)
   assert.equal(Config({ enableTaskCancelTool: true }).enableTaskCancelTool, true)
   assert.equal(Config({}).enablePersistentMemoryTools, false)
@@ -297,6 +341,12 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableProjectAgentFiles: true }).enableProjectAgentFiles, true)
   assert.equal(Config({}).enableProjectCommands, false)
   assert.equal(Config({ enableProjectCommands: true }).enableProjectCommands, true)
+  assert.equal(Config({}).enableProjectRootCommands, false)
+  assert.equal(Config({ enableProjectRootCommands: true }).enableProjectRootCommands, true)
+  assert.equal(Config({}).projectCommandsRoot, '')
+  assert.equal(Config({ projectCommandsRoot: '/workspace/project' }).projectCommandsRoot, '/workspace/project')
+  assert.equal(Config({}).enableProjectCommandWatch, false)
+  assert.equal(Config({ enableProjectCommandWatch: true }).enableProjectCommandWatch, true)
   assert.equal(Config({}).enablePromptFileExpansion, false)
   assert.equal(Config({ enablePromptFileExpansion: true }).enablePromptFileExpansion, true)
   assert.equal(Config({}).enableWriteExistingFileGuard, false)
@@ -325,9 +375,22 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).disabledOmoBundledSkills, [])
   assert.deepEqual(Config({ disabledOmoBundledSkills: ['debugging'] }).disabledOmoBundledSkills, ['debugging'])
   assert.deepEqual(Config({}).categoryRoutes, [])
+  assert.equal(Config({}).enableRoleCategoryRouteAliases, false)
+  assert.deepEqual(Config({}).roleCategoryRouteAliases, [])
+  assert.equal(Config({ enableRoleCategoryRouteAliases: true }).enableRoleCategoryRouteAliases, true)
+  assert.deepEqual(Config({ roleCategoryRouteAliases: [{
+    from: { provider: 'legacy-provider', model: 'legacy-model' },
+    to: { provider: 'current-provider', model: 'current-model' },
+    reasoningEffort: 'high',
+  }] }).roleCategoryRouteAliases, [{
+    from: { provider: 'legacy-provider', model: 'legacy-model' },
+    to: { provider: 'current-provider', model: 'current-model' },
+    reasoningEffort: 'high',
+  }])
   const categoryConfig = Config({ categoryRoutes: [{
     name: 'budget', provider: 'p', model: 'm', maxTokens: 128, disable: true,
     promptAppend: 'Use a bounded budget.', description: 'A short chooser description.', tools: { read: false, bash: true },
+    skills: ['debugging', 'git-master'],
     fallbackModels: [{ provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'high', maxTokens: 1024 }],
   }] })
   assert.equal(categoryConfig.categoryRoutes[0].maxTokens, 128)
@@ -338,6 +401,7 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(categoryConfig.categoryRoutes[0].promptAppend, 'Use a bounded budget.')
   assert.equal(categoryConfig.categoryRoutes[0].description, 'A short chooser description.')
   assert.deepEqual(categoryConfig.categoryRoutes[0].tools, { read: false, bash: true })
+  assert.deepEqual(categoryConfig.categoryRoutes[0].skills, ['debugging', 'git-master'])
   assert.deepEqual(Config({ roleRoutes: [{ role: 'reviewer', denyTools: ['bash'] }] }).roleRoutes[0].denyTools, ['bash'])
   assert.equal(Config({ roleRoutes: [{ role: 'reviewer', agentPreset: 'trusted-reviewer-v2' }] }).roleRoutes[0].agentPreset, 'trusted-reviewer-v2')
   assert.deepEqual(Config({ roleRoutes: [{
@@ -346,6 +410,17 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   }] }).roleRoutes[0].fallbackModels, [
     { provider: 'backup', model: 'backup-model', reasoningEffort: 'low', maxTokens: 2048 },
   ])
+  assert.equal(Config({}).enablePinnedRoutePreflight, false)
+  assert.equal(Config({ enablePinnedRoutePreflight: true }).enablePinnedRoutePreflight, true)
+  assert.equal(Config({}).enableAgentPresetPreflight, false)
+  assert.equal(Config({ enableAgentPresetPreflight: true }).enableAgentPresetPreflight, true)
+  assert.equal(Config({}).enableThinkModeReasoning, false)
+  assert.equal(Config({ enableThinkModeReasoning: true }).enableThinkModeReasoning, true)
+  assert.equal(Config({}).contextOverflowRecovery.enabled, false)
+  assert.deepEqual(Config({}).contextOverflowRecovery.codesByProvider, {})
+  assert.deepEqual(Config({ contextOverflowRecovery: {
+    enabled: true, codesByProvider: { 'provider-a': ['context_window_exceeded'] },
+  } }).contextOverflowRecovery.codesByProvider, { 'provider-a': ['context_window_exceeded'] })
   assert.deepEqual(Config({}).providerConcurrency, {})
   assert.deepEqual(Config({}).modelConcurrency, {})
   const concurrencyConfig = Config({ providerConcurrency: { 'deepseek-official': 2 }, modelConcurrency: { 'deepseek-official/deepseek-flash': 1 } })
@@ -357,8 +432,12 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableGoalUseReminder: true }).enableGoalUseReminder, true)
   assert.equal(Config({}).enableAgentUsageReminder, false)
   assert.equal(Config({ enableAgentUsageReminder: true }).enableAgentUsageReminder, true)
+  assert.equal(Config({}).enableCategorySkillReminder, false)
+  assert.equal(Config({ enableCategorySkillReminder: true }).enableCategorySkillReminder, true)
   assert.equal(Config({}).enableCompactionResumeAdvisory, false)
   assert.equal(Config({ enableCompactionResumeAdvisory: true }).enableCompactionResumeAdvisory, true)
+  assert.equal(Config({}).enablePressureCompaction, false)
+  assert.equal(Config({ enablePressureCompaction: true }).enablePressureCompaction, true)
   assert.equal(Config({}).enableTeamTools, false)
   assert.equal(Config({ enableTeamTools: true }).enableTeamTools, true)
   assert.equal(Config({}).enableTeamModeContext, false)
@@ -371,6 +450,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableSessionSearch: true }).enableSessionSearch, true)
   assert.equal(Config({}).enableSessionEventSearch, false)
   assert.equal(Config({ enableSessionEventSearch: true }).enableSessionEventSearch, true)
+  assert.equal(Config({}).enableSessionEventTrace, false)
+  assert.equal(Config({ enableSessionEventTrace: true }).enableSessionEventTrace, true)
   assert.equal(Config({}).enableSessionRead, false)
   assert.equal(Config({ enableSessionRead: true }).enableSessionRead, true)
   assert.equal(Config({}).enableSessionList, false)
@@ -390,6 +471,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({}).additionalSearchToolResultPruningTools, [])
   assert.deepEqual(Config({ enableSearchToolResultPruning: true, additionalSearchToolResultPruningTools: ['custom_text_tool'] }).additionalSearchToolResultPruningTools, ['custom_text_tool'])
   assert.equal(Config({}).enableImageQueryTool, false)
+  assert.equal(Config({}).enableReadImageResizing, false)
+  assert.equal(Config({ enableReadImageResizing: true }).enableReadImageResizing, true)
   assert.equal(Config({}).imageQueryRoute, undefined)
   assert.equal(Config({ enableImageQueryTool: true, imageQueryRoute: { provider: 'vision-provider', model: 'vision-model' } }).enableImageQueryTool, true)
   assert.equal(Config({}).enableAgentTerminalTools, false)
@@ -406,22 +489,73 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableLspTools: true }).enableLspTools, true)
   assert.equal(Config({}).enableRootAgentsContext, false)
   assert.equal(Config({ enableRootAgentsContext: true }).enableRootAgentsContext, true)
+  assert.equal(Config({}).enableRootAgentsContextWatch, false)
+  assert.equal(Config({ enableRootAgentsContext: true, enableRootAgentsContextWatch: true }).enableRootAgentsContextWatch, true)
+  assert.equal(Config({}).enableProjectRootAgentsContext, false)
+  assert.equal(Config({}).enableProjectRootAgentsContextWatch, false)
+  assert.equal(Config({}).projectAgentsRoot, '')
+  assert.equal(Config({ enableProjectRootAgentsContext: true, projectAgentsRoot: '/workspace/project' }).enableProjectRootAgentsContext, true)
+  assert.equal(Config({
+    enableProjectRootAgentsContext: true, enableProjectRootAgentsContextWatch: true,
+    projectAgentsRoot: '/workspace/project',
+  }).enableProjectRootAgentsContextWatch, true)
   assert.equal(Config({}).enableAgentsOnRead, false)
   assert.equal(Config({ enableAgentsOnRead: true }).enableAgentsOnRead, true)
+  assert.equal(Config({}).enableProjectRootAgentsOnRead, false)
+  assert.equal(Config({
+    enableProjectRootAgentsOnRead: true, projectAgentsRoot: '/workspace/project',
+  }).enableProjectRootAgentsOnRead, true)
   assert.equal(Config({}).enableRootReadmeContext, false)
   assert.equal(Config({ enableRootReadmeContext: true }).enableRootReadmeContext, true)
   assert.equal(Config({}).enableReadmeOnRead, false)
   assert.equal(Config({ enableReadmeOnRead: true }).enableReadmeOnRead, true)
+  assert.equal(Config({}).enableProjectRootReadmeOnRead, false)
+  assert.equal(Config({}).projectReadmeRoot, '')
+  assert.equal(Config({
+    enableProjectRootReadmeOnRead: true, projectReadmeRoot: '/workspace/project',
+  }).enableProjectRootReadmeOnRead, true)
   assert.equal(Config({}).enableClaudeRulesOnRead, false)
   assert.equal(Config({ enableClaudeRulesOnRead: true }).enableClaudeRulesOnRead, true)
+  assert.equal(Config({}).enableProjectRootClaudeRulesOnRead, false)
+  assert.equal(Config({}).projectClaudeRulesRoot, '')
+  assert.equal(Config({ enableProjectRootClaudeRulesOnRead: true, projectClaudeRulesRoot: '/workspace/project' }).enableProjectRootClaudeRulesOnRead, true)
   assert.equal(Config({}).enableOmoProjectRulesOnRead, false)
   assert.equal(Config({ enableOmoProjectRulesOnRead: true }).enableOmoProjectRulesOnRead, true)
+  assert.equal(Config({}).enableProjectRootOmoRulesOnRead, false)
+  assert.equal(Config({}).projectOmoRulesRoot, '')
+  assert.equal(Config({ enableProjectRootOmoRulesOnRead: true, projectOmoRulesRoot: '/workspace/project' }).enableProjectRootOmoRulesOnRead, true)
   assert.equal(Config({}).enableCursorProjectRulesOnRead, false)
   assert.equal(Config({ enableCursorProjectRulesOnRead: true }).enableCursorProjectRulesOnRead, true)
+  assert.equal(Config({}).enableProjectRootCursorRulesOnRead, false)
+  assert.equal(Config({}).projectCursorRulesRoot, '')
+  assert.equal(Config({
+    enableProjectRootCursorRulesOnRead: true,
+    projectCursorRulesRoot: '/workspace/project',
+  }).enableProjectRootCursorRulesOnRead, true)
   assert.equal(Config({}).enableGitHubProjectInstructionsOnRead, false)
   assert.equal(Config({ enableGitHubProjectInstructionsOnRead: true }).enableGitHubProjectInstructionsOnRead, true)
+  assert.equal(Config({}).enableProjectRootGitHubInstructionsOnRead, false)
+  assert.equal(Config({}).projectGitHubInstructionsRoot, '')
+  assert.equal(Config({
+    enableProjectRootGitHubInstructionsOnRead: true,
+    projectGitHubInstructionsRoot: '/workspace/project',
+  }).enableProjectRootGitHubInstructionsOnRead, true)
   assert.equal(Config({}).enableGitHubCopilotInstructionsOnRead, false)
   assert.equal(Config({ enableGitHubCopilotInstructionsOnRead: true }).enableGitHubCopilotInstructionsOnRead, true)
+  assert.equal(Config({}).enableSisyphusProjectRulesOnRead, false)
+  assert.equal(Config({ enableSisyphusProjectRulesOnRead: true }).enableSisyphusProjectRulesOnRead, true)
+  assert.equal(Config({}).enableProjectRootSisyphusRulesOnRead, false)
+  assert.equal(Config({}).projectSisyphusRulesRoot, '')
+  assert.equal(Config({
+    enableProjectRootSisyphusRulesOnRead: true,
+    projectSisyphusRulesRoot: '/workspace/project',
+  }).enableProjectRootSisyphusRulesOnRead, true)
+  assert.equal(Config({}).enableSisyphusUserRulesOnRead, false)
+  assert.equal(Config({}).userSisyphusRulesRoot, '')
+  assert.equal(Config({
+    enableSisyphusUserRulesOnRead: true,
+    userSisyphusRulesRoot: '/Users/alice/.sisyphus/rules',
+  }).enableSisyphusUserRulesOnRead, true)
   assert.deepEqual(Config({}).userClaudeRulesRoots, [])
   assert.deepEqual(Config({ userClaudeRulesRoots: ['/Users/alice/.claude/rules'] }).userClaudeRulesRoots, ['/Users/alice/.claude/rules'])
   assert.equal(Config({}).enableOpenCodeRulesOnRead, false)
@@ -430,12 +564,17 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.deepEqual(Config({ userOpenCodeRulesRoots: ['/Users/alice/.omo/rules'] }).userOpenCodeRulesRoots, ['/Users/alice/.omo/rules'])
   assert.equal(Config({}).runtimeFallback.enabled, false)
   assert.deepEqual(Config({}).runtimeFallback.retryOnStatuses, [429, 500, 502, 503, 504])
+  assert.equal(Config({}).runtimeFallback.cooldownSeconds, 60)
+  assert.deepEqual(Config({ runtimeFallback: { cooldownSeconds: 0 } }).runtimeFallback.cooldownSeconds, 0)
+  assert.throws(() => Config({ runtimeFallback: { cooldownSeconds: 86_401 } }), /86400/u)
+  assert.throws(() => Config({ runtimeFallback: { cooldownSeconds: 1.5 } }))
   assert.deepEqual(Config({}).runtimeFallback.chains, [])
   const fallbackConfig = Config({ runtimeFallback: {
     enabled: true,
     chains: [{ provider: 'primary', model: 'main', fallbacks: [{ provider: 'backup', model: 'alternate' }] }],
   } })
   assert.equal(fallbackConfig.runtimeFallback.enabled, true)
+  assert.equal(fallbackConfig.runtimeFallback.cooldownSeconds, 60)
   assert.equal(fallbackConfig.runtimeFallback.chains[0].fallbacks[0].provider, 'backup')
   assert.throws(() => Config({ runtimeFallback: {
     enabled: true,
@@ -443,7 +582,32 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   } }), /fallbacks/u)
 })
 
-test('image-query Tool is default-off and requires an explicit route plus an optional LLM service', () => {
+test('think-mode reasoning adaptation is default-off and requires bounded call-config resolution', () => {
+  const llm = { resolveCallConfig: async config => ({ ...config }) }
+  const disabled = makeContext({ services: { llm } })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('agent/pre-step'), false)
+  assert.equal(disabled.events.has('agent/request'), false)
+
+  const missingResolver = makeContext()
+  assert.throws(
+    () => apply(missingResolver.ctx, { ...baseConfig, enableThinkModeReasoning: true }),
+    /enableThinkModeReasoning requires the optional DSH llm\.resolveCallConfig service/u,
+  )
+
+  const enabled = makeContext({ services: { llm } })
+  apply(enabled.ctx, { ...baseConfig, enableThinkModeReasoning: true })
+  assert.equal(enabled.events.has('agent/pre-step'), true)
+  assert.equal(enabled.events.has('agent/request'), true)
+  assert.equal(enabled.events.has('agent/disposed'), true)
+  const registration = enabled.effects.find(effect => effect.label === 'dsh-omo think-mode reasoning-effort adapter')
+  assert.ok(registration)
+  const status = enabled.commands.get('omo').handler({ rawInput: 'status' }).text
+  assert.match(status, /thinkModeReasoning=enabled/u)
+  registration.dispose()
+})
+
+test('image-query Tool is default-off and requires an explicit route plus an optional LLM service', async () => {
   let prepareCalls = 0
   const llm = { prepareCall() { prepareCalls += 1; throw new Error('must not run during setup') } }
   const disabled = makeContext({ services: { llm } })
@@ -491,7 +655,10 @@ test('image-query Tool is default-off and requires an explicit route plus an opt
   )
   assert.equal(missingToolRegistry.tools.size, 0)
 
-  const enabled = makeContext({ services: { llm } })
+  const liveAgents = new Map()
+  let agentLookups = 0
+  const agents = { get: id => { agentLookups += 1; return liveAgents.get(id) } }
+  const enabled = makeContext({ services: { llm, agents } })
   apply(enabled.ctx, {
     ...baseConfig,
     enableImageQueryTool: true,
@@ -499,11 +666,75 @@ test('image-query Tool is default-off and requires an explicit route plus an opt
   })
   assert.equal(enabled.tools.has('dsh_omo_image_query'), true)
   assert.equal(enabled.events.has('agent/pre-step'), true)
+  const agent = { id: 'image-query-agent' }
+  liveAgents.set(agent.id, agent)
+  await enabled.events.get('agent/pre-step')({ agent }, async () => ({ kind: 'enter', messages: [] }))
+  assert.ok(agentLookups >= 2, 'the live registry is checked before and after asynchronous pre-step dispatch')
   assert.equal(prepareCalls, 0, 'enabling the Tool performs no model request')
   const registration = enabled.effects.find(effect => effect.label === 'dsh-omo image-query Tool and pre-step capture')
   assert.ok(registration)
   registration.dispose()
   assert.equal(enabled.tools.has('dsh_omo_image_query'), false)
+})
+
+test('read-image resizing is default-off and requires optional DSH attachment services', async () => {
+  let readCalls = 0
+  let saveCalls = 0
+  const source = {
+    attachmentId: 'read-source', mediaType: 'image/png', bytes: 6 * 1024 * 1024,
+    width: 3_000, height: 2_000,
+  }
+  const attachments = {
+    async readImageRequest(ref, target, signal) {
+      readCalls += 1
+      assert.equal(ref, source)
+      assert.deepEqual(target, { width: 1_568, height: 1_568, maxBytes: 5 * 1024 * 1024 })
+      assert.equal(signal.aborted, false)
+      return {
+        variantId: 'read-request-variant', attachment: ref, data: new Uint8Array(1024),
+        mediaType: 'image/jpeg', bytes: 1024, width: 1_568, height: 1_045,
+        depth: 'uchar', space: 'srgb', hasAlpha: false,
+      }
+    },
+    async saveImages(inputs) {
+      saveCalls += 1
+      assert.equal(inputs.length, 1)
+      return [{ attachmentId: 'read-derived', mediaType: 'image/jpeg', bytes: 1024, width: 1_568, height: 1_045 }]
+    },
+  }
+
+  const disabled = makeContext({ services: { attachments } })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.eventListeners.get('tools/post-execute')?.length ?? 0, 0)
+  assert.equal(readCalls, 0)
+  assert.equal(saveCalls, 0)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /readImageResizing=disabled/u)
+
+  const missing = makeContext()
+  assert.throws(
+    () => apply(missing.ctx, { ...baseConfig, enableReadImageResizing: true }),
+    /enableReadImageResizing requires the optional DSH attachments\.readImageRequest and attachments\.saveImages services/u,
+  )
+  assert.equal(missing.eventListeners.get('tools/post-execute')?.length ?? 0, 0)
+
+  const enabled = makeContext({ services: { attachments } })
+  apply(enabled.ctx, { ...baseConfig, enableReadImageResizing: true })
+  const listeners = enabled.eventListeners.get('tools/post-execute') ?? []
+  assert.equal(listeners.length, 1)
+  const value = { card: 'read', path: '/workspace/image.png', content: [{ type: 'image', attachment: source }] }
+  const decision = { kind: 'accept', value }
+  const returned = await enabled.events.get('tools/post-execute')(
+    { name: 'read', signal: new AbortController().signal },
+    { isError: false, value },
+    async () => decision,
+  )
+  assert.equal(readCalls, 1)
+  assert.equal(saveCalls, 1)
+  assert.equal(returned.value.content[0].attachment.attachmentId, 'read-derived')
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /readImageResizing=enabled/u)
+  const registration = enabled.effects.find(effect => effect.label === 'dsh-omo read-image resizing adapter')
+  assert.ok(registration)
+  await registration.dispose()
 })
 
 test('read-only plan checklist is default-off and requires DSH workspace-read contracts', async () => {
@@ -606,13 +837,16 @@ test('runtime fallback registers DSH request events only with explicit opt-in', 
   const enabled = makeContext()
   apply(enabled.ctx, {
     ...baseConfig,
+    enablePinnedRoutePreflight: true,
     runtimeFallback: {
       enabled: true,
       chains: [{ provider: 'primary', model: 'main', fallbacks: [{ provider: 'backup', model: 'alternate' }] }],
     },
   })
   assert.deepEqual([...enabled.events.keys()].sort(), ['agent/disposed', 'agent/request', 'agent/request-error'])
-  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /runtimeFallback=enabled/u)
+  const enabledStatus = enabled.commands.get('omo').handler({ rawInput: 'status' }).text
+  assert.match(enabledStatus, /runtimeFallback=enabled/u)
+  assert.match(enabledStatus, /pinnedRoutePreflight=enabled/u)
   const lifecycle = enabled.effects.find(effect => effect.label === 'dsh-omo runtime model fallback')
   assert.equal(typeof lifecycle?.dispose, 'function')
   await lifecycle.dispose()
@@ -622,7 +856,11 @@ test('/omo status reports feature flags and service presence without calling bus
   const calls = []
   const services = {
     goals: { get: () => calls.push('goals.get'), clear: () => calls.push('goals.clear') },
-    llm: { listProviders: () => calls.push('llm.listProviders'), resolveModelInfo: () => calls.push('llm.resolveModelInfo') },
+    llm: {
+      listProviders: () => calls.push('llm.listProviders'),
+      resolveModelInfo: () => calls.push('llm.resolveModelInfo'),
+      resolveCallConfig: () => calls.push('llm.resolveCallConfig'),
+    },
     web: { fetch: () => calls.push('web.fetch') },
     agentTeams: { membership: () => calls.push('agentTeams.membership') },
     agents: { get: () => calls.push('agents.get') },
@@ -633,24 +871,37 @@ test('/omo status reports feature flags and service presence without calling bus
     mcpResources: { register: () => calls.push('mcpResources.register') },
   }
   const fixture = makeContext({ services })
-  const mutableConfig = { ...baseConfig, enableJobTools: true, enableSessionSearch: true }
+  const mutableConfig = {
+    ...baseConfig,
+    enableJobTools: true,
+    enableSessionSearch: true,
+    categoryRoutes: [{ name: 'review', provider: 'review-provider', model: 'review-model' }],
+  }
   apply(fixture.ctx, mutableConfig)
   assert.equal(fixture.tools.has('lsp_goto_definition'), false, 'present LSP services do not enable tools by default')
   assert.equal(fixture.tools.has('lsp_find_references'), false, 'present LSP services do not enable tools by default')
   assert.equal(fixture.tools.has('dsh_omo_task_result'), false, 'task result caching and its Tool are disabled by default')
+  assert.equal(fixture.tools.has('dsh_omo_task_list'), false, 'status-only child listing is disabled with result tracking by default')
+  assert.equal(fixture.tools.has('dsh_omo_task_wait'), false, 'task waiting is disabled by default')
+  assert.equal(fixture.tools.has('dsh_omo_task_pending_status'), false, 'pending lifecycle Tools are disabled with pending admission by default')
+  assert.equal(fixture.tools.has('dsh_omo_task_pending_cancel'), false, 'pending lifecycle Tools are disabled with pending admission by default')
+  const defaultTaskDescription = fixture.tools.get('dsh_omo_task').description
+  assert.match(defaultTaskDescription, /saturated calls reject immediately rather than queue/u)
+  assert.doesNotMatch(defaultTaskDescription, /pending task ID|pending_status|pending_cancel|bound-child interruption/u, 'the default first-turn Tool definition has no pending-mode guidance')
 
   const command = fixture.commands.get('omo')
-  assert.equal(command.input.hint, '[status|status capabilities]', 'both status modes are discoverable')
+  assert.equal(command.input.hint, '[status|status capabilities|status route role:<name>|status route category:<name>]', 'status modes and explicit route selectors are discoverable')
   mutableConfig.enableJobTools = false
   const status = command.handler({ rawInput: 'status' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /config flags and optional-service presence observed at plugin setup/u)
   assert.match(status.text, /continuableTaskFollowups=disabled/u)
-  assert.match(status.text, /taskResultTool=disabled; taskCancelTool=disabled/u)
+  assert.match(status.text, /taskResultTool=disabled; taskResultPersistence=disabled; taskListTool=disabled; taskWaitTool=disabled; callOmoAgentTool=disabled; taskCancelTool=disabled/u)
   assert.match(status.text, /goalTools=disabled/u)
-  assert.match(status.text, /goalUseReminder=disabled; agentUsageReminder=disabled; compactionResumeAdvisory=disabled/u)
-  assert.match(status.text, /runtimeFallback=disabled; teamTools=disabled; teamModeContext=disabled; teamStatusContext=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; toolResultPruning=disabled; manualContextPruning=disabled; searchToolResultPruning=disabled; generalToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; webSearchTool=disabled; lspTools=disabled; rootAgentsContext=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled/u)
-  assert.match(status.text, /goals=present; llm=present; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; storageDomain=absent; mcpResources=present/u)
+  assert.match(status.text, /goalUseReminder=disabled; agentUsageReminder=disabled; categorySkillReminder=disabled; compactionResumeAdvisory=disabled; pressureCompaction=disabled/u)
+  assert.match(status.text, /runtimeFallback=disabled; contextOverflowRecovery=disabled; pinnedRoutePreflight=disabled; agentPresetPreflight=disabled; thinkModeReasoning=disabled; teamTools=disabled; teamModeContext=disabled; teamStatusContext=disabled; teamTaskUseReminder=disabled; jobTools=enabled; imageQueryTool=disabled; readImageResizing=disabled; toolResultPruning=disabled; manualContextPruning=disabled; searchToolResultPruning=disabled; generalToolResultPruning=disabled; agentTerminalTools=disabled; planChecklist=disabled; planFormatAdvisory=disabled; modelCapabilitiesRefresh=disabled; webSearchCommand=disabled; webSearchTool=disabled; lspTools=disabled; rootAgentsContext=disabled; rootAgentsContextWatch=disabled; projectRootAgentsContext=disabled; projectRootAgentsContextWatch=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; projectRootCommands=disabled; projectCommandWatch=disabled; promptFileExpansion=disabled; rootReadmeContext=disabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled; notepadWriteGuard=disabled; editErrorRecovery=disabled; jsonErrorRecovery=disabled; delegateTaskErrorGuidance=disabled; bashFileReadGuidance=disabled; sessionSearch=enabled; sessionEventSearch=disabled; sessionEventTrace=disabled/u)
+  assert.match(status.text, /goals=present; llm=present; attachments=absent; web=present; agentTeams=present; agents=present; jobController=present; toolResultPruner=absent; terminals=absent; lsp=present; sessionQuery=present; sessions=present; storageDomain=absent; mcpResources=present; compaction=absent/u)
+  assert.match(status.text, /Project commands: enabled=disabled; automaticSlashCommands=disabled; explicitProjectRoot=disabled; watching=disabled/u)
   assert.match(status.text, /not a service health check/u)
   assert.deepEqual(calls, [], 'status must inspect presence only, without invoking Host business methods')
   assert.equal(command.handler({ rawInput: 'status extra' }).kind, 'error')
@@ -658,7 +909,7 @@ test('/omo status reports feature flags and service presence without calling bus
 
   const absent = makeContext()
   apply(absent.ctx, baseConfig)
-  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; web=absent; agentTeams=absent; agents=absent; jobController=absent; toolResultPruner=absent; terminals=absent; lsp=absent; sessionQuery=absent; sessions=absent; storageDomain=absent; mcpResources=absent/u)
+  assert.match(absent.commands.get('omo').handler({ rawInput: 'status' }).text, /goals=absent; llm=absent; attachments=absent; web=absent; agentTeams=absent; agents=absent; jobController=absent; toolResultPruner=absent; terminals=absent; lsp=absent; sessionQuery=absent; sessions=absent; storageDomain=absent; mcpResources=absent/u)
 })
 
 test('Agent terminal tools are opt-in and require a registered Agent-owned PTY backend', async () => {
@@ -779,7 +1030,10 @@ test('/omo status capabilities explicitly queries bounded live provider registri
       },
     },
   })
-  apply(fixture.ctx, baseConfig)
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{ name: 'review', provider: 'review-provider', model: 'review-model' }],
+  })
   const status = fixture.commands.get('omo').handler({ rawInput: 'status capabilities' })
   assert.equal(status.kind, 'success')
   assert.match(status.text, /live capability registry query/u)
@@ -831,6 +1085,198 @@ test('/omo status capabilities bounds provider IDs and output', () => {
   assert.equal(status.text.includes('\u202e'), false)
   assert.match(status.text, /provider-31/u)
   assert.doesNotMatch(status.text, /provider-32/u)
+})
+
+test('/omo status route checks one selected primary with normalized controls and no dispatch', async () => {
+  const calls = []
+  let streams = 0
+  const fixture = makeContext({ services: {
+    llm: {
+      resolveCallConfig: async (config, signal) => {
+        calls.push({ config, signal })
+        return config
+      },
+      stream: () => { streams += 1; throw new Error('status route must not stream a model call') },
+    },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{
+      name: 'review', provider: 'category-provider', model: 'category-model',
+      reasoningEffort: 'low', maxTokens: 1_024,
+      fallbackModels: [{ provider: 'backup-provider', model: 'backup-model' }],
+    }],
+    roleRoutes: [{ role: 'explore', category: 'review', provider: 'role-provider', model: 'role-model' }],
+  })
+  const command = fixture.commands.get('omo')
+  const callerSignal = new AbortController().signal
+
+  const category = await command.handler({ rawInput: 'status route category:review', signal: callerSignal })
+  assert.equal(category.kind, 'success')
+  assert.match(category.text, /accepted as a DSH-compatible call configuration/u)
+  assert.deepEqual(calls[0].config, {
+    provider: 'category-provider', model: 'category-model', reasoningEffort: 'low', maxTokens: 1_024,
+  })
+  assert.ok(calls[0].signal instanceof AbortSignal)
+  assert.notStrictEqual(calls[0].signal, callerSignal)
+
+  const role = await command.handler({ rawInput: 'status route role:explore', signal: callerSignal })
+  assert.equal(role.kind, 'success')
+  assert.match(role.text, /accepted as a DSH-compatible call configuration/u)
+  assert.deepEqual(calls[1].config, {
+    provider: 'role-provider', model: 'role-model', reasoningEffort: 'low', maxTokens: 1_024,
+  }, 'role pin keeps its provider/model while inheriting selected category controls')
+  assert.equal(calls.length, 2, 'one resolver call per selected primary; no fallback route is probed')
+  assert.ok(calls.every(({ signal }) => signal instanceof AbortSignal && !signal.aborted))
+  assert.equal(streams, 0)
+  assert.equal(fixture.starts.length, 0)
+  assert.equal(fixture.continuableStarts.length, 0)
+  assert.ok(category.text.length <= 1_024 && role.text.length <= 1_024)
+})
+
+test('fallback-only role guidance is conditional and primary status never probes its chain', async () => {
+  const baseline = makeContext()
+  apply(baseline.ctx, baseConfig)
+  assert.match(baseline.tools.get('dsh_omo_task').description, /fallbackModels require an explicit paired provider\/model pin/u)
+  assert.equal(baseline.tools.get('dsh_omo_task').parameters.properties.role.description, 'Specialist role matched to this task.')
+  const fixture = makeContext({ services: { llm: { resolveCallConfig() { assert.fail('primary status must not probe fallback-only candidates') } } } })
+  apply(fixture.ctx, { ...baseConfig, roleRoutes: [{ role: 'explore', fallbackModels: [{ provider: 'configured', model: 'explicit' }] }] })
+  const tool = fixture.tools.get('dsh_omo_task')
+  assert.match(tool.description, /five-second preflight deadline/u)
+  assert.match(tool.parameters.properties.role.description, /Fallback-only roles.*explore/u)
+  const status = await fixture.commands.get('omo').handler({ rawInput: 'status route role:explore' })
+  assert.match(status.text, /explicit fallback-only role chain with no primary/u)
+  assert.equal(fixture.starts.length, 0)
+})
+
+test('/omo status route skips unknown, inherited, disabled, and resolver-missing routes', async () => {
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: { resolveCallConfig: async config => { calls.push(config); return config } },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [
+      { name: 'review', provider: 'review-provider', model: 'review-model' },
+      { name: 'disabled', provider: 'disabled-provider', model: 'disabled-model', disable: true },
+    ],
+    roleRoutes: [
+      { role: 'quick', category: 'review' },
+      { role: 'architect', reasoningEffort: 'high' },
+    ],
+  })
+  const command = fixture.commands.get('omo')
+  for (const rawInput of [
+    'status route role:quick',
+    'status route role:architect',
+    'status route role:unknown-role',
+    'status route category:unknown-category',
+    'status route category:disabled',
+  ]) {
+    const result = await command.handler({ rawInput, signal: new AbortController().signal })
+    assert.equal(result.kind, 'success', rawInput)
+    assert.match(result.text, /not checked/u, rawInput)
+  }
+  assert.deepEqual(calls, [], 'unknown, disabled, and inherited routes do not invoke the resolver')
+  assert.equal(fixture.starts.length, 0)
+
+  const missing = makeContext({ services: { llm: {} } })
+  apply(missing.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{ name: 'review', provider: 'review-provider', model: 'review-model' }],
+  })
+  const unavailable = await missing.commands.get('omo').handler({
+    rawInput: 'status route category:review',
+    signal: new AbortController().signal,
+  })
+  assert.match(unavailable.text, /not checked \(DSH llm\.resolveCallConfig is unavailable\)/u)
+})
+
+test('/omo status route sanitizes resolver failures and bounds output', async () => {
+  const secret = 'private endpoint token must not be rendered'
+  const fixture = makeContext({ services: {
+    llm: {
+      resolveCallConfig: async () => {
+        const error = new TypeError(secret)
+        error.name = 'Secret provider detail'
+        throw error
+      },
+    },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{ name: 'review', provider: 'review-provider', model: 'review-model' }],
+  })
+  const result = await fixture.commands.get('omo').handler({
+    rawInput: 'status route category:review',
+    signal: new AbortController().signal,
+  })
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /rejected \(TypeError; details omitted\)/u)
+  assert.doesNotMatch(result.text, /private endpoint token|Secret provider detail/u)
+  assert.ok(result.text.length <= 1_024)
+  assert.equal(fixture.starts.length, 0)
+
+  const spoofedTimeout = makeContext({ services: {
+    llm: { resolveCallConfig: async () => { throw new Error('Manual route capability preflight timed out.') } },
+  } })
+  apply(spoofedTimeout.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{ name: 'review', provider: 'review-provider', model: 'review-model' }],
+  })
+  const rejected = await spoofedTimeout.commands.get('omo').handler({
+    rawInput: 'status route category:review',
+    signal: new AbortController().signal,
+  })
+  assert.match(rejected.text, /rejected \(Error; details omitted\)/u)
+  assert.doesNotMatch(rejected.text, /timed out after 5 seconds/u, 'provider details cannot impersonate the local deadline')
+})
+
+test('/omo status route handles caller cancellation and the five-second deadline', async t => {
+  await t.test('caller cancellation', async () => {
+    let resolverSignal
+    const fixture = makeContext({ services: {
+      llm: { resolveCallConfig: (_config, signal) => {
+        resolverSignal = signal
+        return new Promise(() => {})
+      } },
+    } })
+    apply(fixture.ctx, {
+      ...baseConfig,
+      categoryRoutes: [{ name: 'review', provider: 'review-provider', model: 'review-model' }],
+    })
+    const caller = new AbortController()
+    const pending = fixture.commands.get('omo').handler({ rawInput: 'status route category:review', signal: caller.signal })
+    await new Promise(resolve => setImmediate(resolve))
+    caller.abort(new Error('caller reason must not be rendered'))
+    const result = await pending
+    assert.match(result.text, /cancelled before a compatibility result/u)
+    assert.doesNotMatch(result.text, /caller reason must not be rendered/u)
+    assert.equal(resolverSignal.aborted, true)
+    assert.equal(fixture.starts.length, 0)
+  })
+
+  await t.test('five-second deadline', async () => {
+    let resolverSignal
+    const fixture = makeContext({ services: {
+      llm: { resolveCallConfig: (_config, signal) => {
+        resolverSignal = signal
+        return new Promise(() => {})
+      } },
+    } })
+    apply(fixture.ctx, {
+      ...baseConfig,
+      categoryRoutes: [{ name: 'review', provider: 'review-provider', model: 'review-model' }],
+    })
+    const result = await fixture.commands.get('omo').handler({
+      rawInput: 'status route category:review',
+      signal: new AbortController().signal,
+    })
+    assert.match(result.text, /timed out after 5 seconds/u)
+    assert.match(result.text, /may continue if it ignores cancellation/u)
+    assert.equal(resolverSignal.aborted, true)
+    assert.equal(fixture.starts.length, 0)
+  })
 })
 
 test('project-skill filters configure only the project provider and preserve bundled registrations', () => {
@@ -940,18 +1386,18 @@ test('disabledOmoCommands filters only local registrations and updates /omo help
   apply(fixture.ctx, {
     ...baseConfig,
     enableContinuableTasks: true,
-    disabledOmoCommands: ['refactor', 'ultrawork', 'ulw-execute', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'goal', 'omo-models'],
+    disabledOmoCommands: ['refactor', 'ultrawork', 'ulw-execute', 'hyperplan', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'omo-project-commands-refresh', 'goal', 'omo-models'],
   })
 
   assert.strictEqual(fixture.commands.get('refactor'), externalRefactor)
   assert.strictEqual(fixture.commands.get('native-command'), externalNative)
-  for (const name of ['ultrawork', 'ulw-execute', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh']) {
+  for (const name of ['ultrawork', 'ulw-execute', 'hyperplan', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'omo-project-commands-refresh']) {
     assert.equal(fixture.commands.has(name), false)
   }
   const help = fixture.commands.get('omo').handler({}).text
   const helpCommandList = help.match(/Commands: ([^.]+)\. Native Agent Teams/u)?.[1]
   assert.equal(helpCommandList, '/ulw, /architect, /review, /handoff, /remove-ai-slops')
-  const disabledHelpNames = /\/refactor|\/ultrawork|\/ulw-execute|\/omo-tasks|\/omo-interrupt|\/omo-skills-refresh|\/goal|\/omo-models/u
+  const disabledHelpNames = /\/refactor|\/ultrawork|\/ulw-execute|\/hyperplan|\/omo-tasks|\/omo-interrupt|\/omo-skills-refresh|\/omo-project-commands-refresh|\/goal|\/omo-models/u
   assert.doesNotMatch(helpCommandList, disabledHelpNames)
   assert.doesNotMatch(help, disabledHelpNames)
   const continuable = fixture.tools.get('dsh_omo_task_continuable')
@@ -1026,12 +1472,12 @@ test('disabledOmoCommands filters optional commands when their services are moun
   }
   const help = fixture.commands.get('omo').handler({}).text
   const helpCommandList = help.match(/Commands: ([^.]+)\. Native Agent Teams/u)?.[1]
-  assert.equal(helpCommandList, '/ulw, /ultrawork, /ulw-execute, /architect, /review, /handoff, /refactor, /remove-ai-slops, /omo-tasks, /omo-interrupt, /omo-skills-refresh')
+  assert.equal(helpCommandList, '/ulw, /ultrawork, /ulw-execute, /hyperplan, /architect, /review, /handoff, /refactor, /remove-ai-slops, /omo-tasks, /omo-interrupt, /omo-skills-refresh')
   assert.doesNotMatch(help, /\/goal|\/stop-continuation|\/omo-models/u)
 })
 
 test('rejects invalid disabledOmoCommands before plugin registration', () => {
-  for (const disabledOmoCommands of ['refactor', ['unknown'], ['/refactor'], ['refactor', 'refactor'], Array(17).fill('refactor')]) {
+  for (const disabledOmoCommands of ['refactor', ['unknown'], ['/refactor'], ['refactor', 'refactor'], Array(18).fill('refactor')]) {
     const fixture = makeContext()
     assert.throws(() => apply(fixture.ctx, { ...baseConfig, disabledOmoCommands }), /disabledOmoCommands/u)
     assert.equal(fixture.tools.size, 0)
@@ -1143,7 +1589,7 @@ test('mounts specialist controls and caps the untrusted worker body', async () =
   assert.match(fixture.sections[0].text, /ULTRAWORK/i)
   assert.match(fixture.sections[0].text, /\/omo-tasks lists direct children/u)
   assert.match(fixture.sections[0].text, /\/omo-interrupt rejects inactive/u)
-  assert.deepEqual([...fixture.commands.keys()], ['ulw', 'ultrawork', 'ulw-execute', 'architect', 'review', 'handoff', 'refactor', 'remove-ai-slops', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'omo'])
+  assert.deepEqual([...fixture.commands.keys()], ['ulw', 'ultrawork', 'ulw-execute', 'hyperplan', 'architect', 'review', 'handoff', 'refactor', 'remove-ai-slops', 'omo-tasks', 'omo-interrupt', 'omo-skills-refresh', 'omo'])
   assert.deepEqual([...fixture.skills.keys()], SKILLS.map(skill => skill.name))
   assert.deepEqual([...fixture.skillProviders.keys()], ['dsh-omo-project-skills'])
   assert.equal(fixture.commands.get('omo-skills-refresh').handler().kind, 'success')
@@ -1183,11 +1629,13 @@ test('mounts specialist controls and caps the untrusted worker body', async () =
   assert.deepEqual(fixture.disposals, ['child-1'])
 })
 
-test('mounts only opt-in read-only LSP navigation tools when the exact services are available', () => {
+test('mounts only opt-in DSH-supported read-only LSP tools when the exact services are available', () => {
   const disabled = makeContext()
   apply(disabled.ctx, baseConfig)
   assert.equal(disabled.tools.has('lsp_goto_definition'), false)
   assert.equal(disabled.tools.has('lsp_find_references'), false)
+  assert.equal(disabled.tools.has('lsp_goto_implementation'), false)
+  assert.equal(disabled.tools.has('lsp_hover'), false)
 
   const missing = makeContext()
   assert.throws(
@@ -1208,7 +1656,7 @@ test('mounts only opt-in read-only LSP navigation tools when the exact services 
   }
   const enabled = makeContext({ services, fs })
   apply(enabled.ctx, { ...baseConfig, enableLspTools: true })
-  assert.deepEqual([...enabled.tools.keys()].filter(tool => tool.startsWith('lsp_')), ['lsp_goto_definition', 'lsp_find_references'])
+  assert.deepEqual([...enabled.tools.keys()].filter(tool => tool.startsWith('lsp_')), ['lsp_goto_definition', 'lsp_find_references', 'lsp_goto_implementation', 'lsp_hover'])
   const status = enabled.commands.get('omo').handler({ rawInput: 'status' }).text
   assert.match(status, /lspTools=enabled/u)
   assert.match(status, /lsp=present/u)
@@ -1237,6 +1685,123 @@ test('mounts opt-in Agent-scoped root AGENTS prompt context only with DSH prereq
   apply(enabled.ctx, { ...baseConfig, enableRootAgentsContext: true })
   assert.equal(typeof enabled.events.get('agent/created'), 'function')
   assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled/u)
+
+  assert.throws(
+    () => apply(makeContext({ services, fs }).ctx, { ...baseConfig, enableRootAgentsContextWatch: true }),
+    /enableRootAgentsContextWatch requires enableRootAgentsContext/u,
+  )
+  assert.throws(
+    () => apply(makeContext({ services, fs }).ctx, {
+      ...baseConfig, enableRootAgentsContext: true, enableRootAgentsContextWatch: true,
+    }),
+    /enableRootAgentsContextWatch requires DSH fs\.watch/u,
+  )
+  const watched = makeContext({ services, fs: { ...fs, watch: async () => async () => {} } })
+  apply(watched.ctx, { ...baseConfig, enableRootAgentsContext: true, enableRootAgentsContextWatch: true })
+  assert.equal(typeof watched.events.get('agent/created'), 'function')
+})
+
+test('mounts only an explicitly configured project-root AGENTS snapshot when the Agent cwd is contained', () => {
+  const services = { agents: { get: () => undefined }, sessions: { get: () => undefined } }
+  const fs = {
+    resolve: async () => ({}), contains: () => true, lstat: async () => undefined,
+    stat: async () => undefined, readBytes: async () => new Uint8Array(),
+  }
+  const disabled = makeContext({ services, fs })
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('agent/created'), false)
+
+  assert.throws(
+    () => apply(makeContext({ services, fs }).ctx, { ...baseConfig, projectAgentsRoot: '/workspace/project' }),
+    /projectAgentsRoot requires enableProjectRootAgentsContext or enableProjectRootAgentsOnRead/u,
+  )
+  assert.throws(
+    () => apply(makeContext({ services, fs }).ctx, { ...baseConfig, enableProjectRootAgentsContext: true }),
+    /enableProjectRootAgentsContext requires projectAgentsRoot/u,
+  )
+  assert.throws(
+    () => apply(makeContext({ services, fs }).ctx, { ...baseConfig, enableProjectRootAgentsOnRead: true }),
+    /enableProjectRootAgentsOnRead requires projectAgentsRoot/u,
+  )
+  assert.throws(
+    () => apply(makeContext({ services, fs }).ctx, {
+      ...baseConfig, enableProjectRootAgentsContext: true, projectAgentsRoot: '/',
+    }),
+    /normalized absolute non-filesystem-root path/u,
+  )
+  assert.throws(
+    () => apply(makeContext({ services, fs }).ctx, {
+      ...baseConfig, enableProjectRootAgentsOnRead: true, projectAgentsRoot: '/',
+    }),
+    /normalized absolute non-filesystem-root path/u,
+  )
+  assert.throws(
+    () => apply(makeContext().ctx, {
+      ...baseConfig, enableProjectRootAgentsContext: true, projectAgentsRoot: '/workspace/project',
+    }),
+    /enableProjectRootAgentsContext requires DSH agents\.get/u,
+  )
+  assert.throws(
+    () => apply(makeContext().ctx, {
+      ...baseConfig, enableProjectRootAgentsOnRead: true, projectAgentsRoot: '/workspace/project',
+    }),
+    /enableProjectRootAgentsOnRead requires DSH agents\.get/u,
+  )
+
+  const enabled = makeContext({ services, fs })
+  apply(enabled.ctx, {
+    ...baseConfig, enableProjectRootAgentsContext: true, projectAgentsRoot: '/workspace/project',
+  })
+  assert.equal(typeof enabled.events.get('agent/created'), 'function')
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /projectRootAgentsContext=enabled; projectRootAgentsContextWatch=disabled/u)
+
+  assert.throws(
+    () => apply(makeContext({ services, fs }).ctx, { ...baseConfig, enableProjectRootAgentsContextWatch: true }),
+    /enableProjectRootAgentsContextWatch requires enableProjectRootAgentsContext/u,
+  )
+  assert.throws(
+    () => apply(makeContext({ services, fs }).ctx, {
+      ...baseConfig,
+      enableProjectRootAgentsContext: true,
+      enableProjectRootAgentsContextWatch: true,
+      projectAgentsRoot: '/workspace/project',
+    }),
+    /enableProjectRootAgentsContextWatch requires DSH fs\.watch/u,
+  )
+  const watched = makeContext({ services, fs: { ...fs, watch: async () => async () => {} } })
+  apply(watched.ctx, {
+    ...baseConfig,
+    enableProjectRootAgentsContext: true,
+    enableProjectRootAgentsContextWatch: true,
+    projectAgentsRoot: '/workspace/project',
+  })
+  assert.equal(typeof watched.events.get('agent/created'), 'function')
+  assert.match(watched.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /projectRootAgentsContext=enabled; projectRootAgentsContextWatch=enabled/u)
+})
+
+test('mounts the default-off explicit-project-root AGENTS-on-read adapter', () => {
+  const prerequisites = () => ({
+    services: { agents: { get: () => undefined }, sessions: { get: () => undefined } },
+    fs: {
+      resolve: async () => ({}), contains: () => true, lstat: async () => undefined,
+      stat: async () => undefined, readBytes: async () => new Uint8Array(),
+    },
+  })
+  const disabled = makeContext(prerequisites())
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('tools/post-execute'), false)
+
+  const enabled = makeContext(prerequisites())
+  apply(enabled.ctx, {
+    ...baseConfig,
+    enableProjectRootAgentsOnRead: true,
+    projectAgentsRoot: '/workspace/project',
+  })
+  assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
+  assert.equal(typeof enabled.events.get('agent/created'), 'function', 'the shared listener resets dedupe on clear/compact')
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /projectRootAgentsOnRead=enabled/u)
 })
 
 test('mounts opt-in directory AGENTS-on-read context and validates DSH prerequisites before registration', async () => {
@@ -1274,6 +1839,19 @@ test('mounts opt-in directory AGENTS-on-read context and validates DSH prerequis
     )
     assert.equal(fixture.events.size, 0, `${missingName} failure must not register hooks`)
     assert.equal(fixture.effects.length, 0, `${missingName} failure must not attach effects`)
+
+    const projectRootDeps = prerequisites()
+    const projectRootFixture = makeContext(projectRootDeps)
+    remove(projectRootDeps)
+    assert.throws(
+      () => apply(projectRootFixture.ctx, {
+        ...baseConfig, enableProjectRootAgentsOnRead: true, projectAgentsRoot: '/workspace/project',
+      }),
+      /enableProjectRootAgentsOnRead requires DSH agents\.get/u,
+      `project root ${missingName}`,
+    )
+    assert.equal(projectRootFixture.events.size, 0, `project root ${missingName} failure must not register hooks`)
+    assert.equal(projectRootFixture.effects.length, 0, `project root ${missingName} failure must not attach effects`)
   }
 
   const missingCordis = makeContext(prerequisites())
@@ -1283,6 +1861,15 @@ test('mounts opt-in directory AGENTS-on-read context and validates DSH prerequis
     /enableAgentsOnRead requires DSH agents\.get/u,
   )
   assert.equal(missingCordis.events.size, 0)
+  const missingProjectRootCordis = makeContext(prerequisites())
+  missingProjectRootCordis.ctx.on = undefined
+  assert.throws(
+    () => apply(missingProjectRootCordis.ctx, {
+      ...baseConfig, enableProjectRootAgentsOnRead: true, projectAgentsRoot: '/workspace/project',
+    }),
+    /enableProjectRootAgentsOnRead requires DSH agents\.get/u,
+  )
+  assert.equal(missingProjectRootCordis.events.size, 0)
 
   const missingEffect = makeContext(prerequisites())
   missingEffect.ctx.effect = undefined
@@ -1291,6 +1878,15 @@ test('mounts opt-in directory AGENTS-on-read context and validates DSH prerequis
     /enableAgentsOnRead requires DSH agents\.get/u,
   )
   assert.equal(missingEffect.events.size, 0)
+  const missingProjectRootEffect = makeContext(prerequisites())
+  missingProjectRootEffect.ctx.effect = undefined
+  assert.throws(
+    () => apply(missingProjectRootEffect.ctx, {
+      ...baseConfig, enableProjectRootAgentsOnRead: true, projectAgentsRoot: '/workspace/project',
+    }),
+    /enableProjectRootAgentsOnRead requires DSH agents\.get/u,
+  )
+  assert.equal(missingProjectRootEffect.events.size, 0)
 
   const enabled = makeContext(prerequisites())
   apply(enabled.ctx, { ...baseConfig, enableAgentsOnRead: true })
@@ -1349,7 +1945,7 @@ test('mounts opt-in directory AGENTS-on-read context and validates DSH prerequis
   const listener = combined.events.get('tools/post-execute')
   assert.equal(typeof listener, 'function')
   assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text,
-    /rootAgentsContext=enabled; agentsOnRead=enabled/u)
+    /rootAgentsContext=enabled; rootAgentsContextWatch=disabled; projectRootAgentsContext=disabled; projectRootAgentsContextWatch=disabled; agentsOnRead=enabled/u)
 
   const priorContext = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'prior' }] }
   const decision = { kind: 'accept', value: { body: 'native' }, content: [{ type: 'text', text: 'native' }], additionalContexts: [priorContext] }
@@ -1449,7 +2045,57 @@ test('mounts opt-in README-on-read injection only with DSH prerequisites and kee
   apply(disabled.ctx, baseConfig)
   assert.equal(disabled.events.has('tools/post-execute'), false, 'the default-off flag installs no post-execute hook')
   assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /readmeOnRead=disabled/u)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /projectRootReadmeOnRead=disabled/u)
   assert.match(disabled.commands.get('omo').handler().text, /README-on-read: disabled/u)
+
+  assert.throws(
+    () => apply(makeContext(prerequisites()).ctx, { ...baseConfig, enableProjectRootReadmeOnRead: true }),
+    /enableProjectRootReadmeOnRead requires projectReadmeRoot/u,
+  )
+  assert.throws(
+    () => apply(makeContext(prerequisites()).ctx, { ...baseConfig, projectReadmeRoot: '/workspace/project' }),
+    /projectReadmeRoot requires enableProjectRootReadmeOnRead/u,
+  )
+  assert.throws(
+    () => apply(makeContext(prerequisites()).ctx, {
+      ...baseConfig, enableProjectRootReadmeOnRead: true, projectReadmeRoot: '/',
+    }),
+    /projectReadmeRoot.*non-filesystem-root/u,
+  )
+  assert.throws(
+    () => apply(makeContext(prerequisites()).ctx, {
+      ...baseConfig, enableProjectRootReadmeOnRead: true, projectReadmeRoot: '/workspace/a\\b',
+    }),
+    /POSIX separators.*backslashes/u,
+  )
+  assert.throws(
+    () => apply(makeContext(prerequisites()).ctx, {
+      ...baseConfig, enableProjectRootAgentsOnRead: true, projectAgentsRoot: '/workspace/a\\b',
+    }),
+    /projectAgentsRoot must use POSIX separators/u,
+  )
+  const missingProjectReadmeDependency = makeContext(prerequisites())
+  missingProjectReadmeDependency.ctx.effect = undefined
+  assert.throws(
+    () => apply(missingProjectReadmeDependency.ctx, {
+      ...baseConfig, enableProjectRootReadmeOnRead: true, projectReadmeRoot: '/workspace/project',
+    }),
+    /enableProjectRootReadmeOnRead requires DSH agents\.get/u,
+  )
+  assert.equal(missingProjectReadmeDependency.events.size, 0)
+
+  const projectRootReadme = makeContext(prerequisites())
+  apply(projectRootReadme.ctx, {
+    ...baseConfig, enableProjectRootReadmeOnRead: true, projectReadmeRoot: '/workspace/project',
+  })
+  assert.equal(typeof projectRootReadme.events.get('tools/post-execute'), 'function')
+  assert.equal(typeof projectRootReadme.events.get('agent/created'), 'function')
+  assert.match(projectRootReadme.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /projectRootReadmeOnRead=enabled/u)
+  assert.match(projectRootReadme.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /readmeOnRead=disabled/u)
+  assert.match(projectRootReadme.commands.get('omo').handler().text,
+    /Project-root README-on-read: enabled/u)
 
   const missingCases = [
     ['agents service', deps => { deps.services.agents = undefined }],
@@ -1594,7 +2240,7 @@ test('mounts opt-in README-on-read injection only with DSH prerequisites and kee
   assert.deepEqual(includedRoot.readTargets, [{ targetKey: 'root-readme' }])
 })
 
-test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude rules-on-read independently', async () => {
+test('mounts opt-in OMO, Cursor, GitHub, project, and user Sisyphus rules-on-read independently', async () => {
   const calls = []
   const prerequisites = () => ({
     services: {
@@ -1615,6 +2261,20 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
   apply(disabled.ctx, baseConfig)
   assert.equal(disabled.events.has('tools/post-execute'), false, 'the default-off flag registers no post-execute hook')
   assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled/u)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /OMO rules: omoProjectRulesOnRead=disabled; projectRootOmoRulesOnRead=disabled/u)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /Claude rules: projectRootClaudeRulesOnRead=disabled/u)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /Cursor rules: projectRootCursorRulesOnRead=disabled/u)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /GitHub instructions: projectRootGitHubInstructionsOnRead=disabled/u)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /Sisyphus project rules on read: disabled \(exact session CWD only\)/u)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /Explicit-root Sisyphus rules: disabled/u)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /Sisyphus user rules: disabled \(explicit root only\)/u)
   assert.match(disabled.commands.get('omo').handler().text, /Claude rules after read\/write\/edit: disabled/u)
   assert.match(disabled.commands.get('omo').handler().text, /OpenCode user rules after file operations: disabled \(explicit roots only\)/u)
   assert.deepEqual(calls, [], 'disabled setup and status do not call filesystem or Service methods')
@@ -1626,12 +2286,96 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
   )
   assert.equal(rootsWithoutFlag.events.size, 0, 'user roots cannot activate the adapter implicitly')
 
+  const projectOmoRootWithoutFlag = makeContext(prerequisites())
+  assert.throws(
+    () => apply(projectOmoRootWithoutFlag.ctx, { ...baseConfig, projectOmoRulesRoot: '/repo' }),
+    /projectOmoRulesRoot requires enableProjectRootOmoRulesOnRead/u,
+  )
+  assert.equal(projectOmoRootWithoutFlag.events.size, 0, 'an explicit OMO project root cannot activate the adapter implicitly')
+
+  const projectOmoRootWithoutPath = makeContext(prerequisites())
+  assert.throws(
+    () => apply(projectOmoRootWithoutPath.ctx, { ...baseConfig, enableProjectRootOmoRulesOnRead: true }),
+    /enableProjectRootOmoRulesOnRead requires projectOmoRulesRoot/u,
+  )
+  assert.equal(projectOmoRootWithoutPath.events.size, 0)
+
+  const projectRootWithoutFlag = makeContext(prerequisites())
+  assert.throws(
+    () => apply(projectRootWithoutFlag.ctx, { ...baseConfig, projectClaudeRulesRoot: '/repo' }),
+    /projectClaudeRulesRoot requires enableProjectRootClaudeRulesOnRead/u,
+  )
+  assert.equal(projectRootWithoutFlag.events.size, 0, 'an explicit project root cannot activate the adapter implicitly')
+
+  const projectRootWithoutPath = makeContext(prerequisites())
+  assert.throws(
+    () => apply(projectRootWithoutPath.ctx, { ...baseConfig, enableProjectRootClaudeRulesOnRead: true }),
+    /enableProjectRootClaudeRulesOnRead requires projectClaudeRulesRoot/u,
+  )
+  assert.equal(projectRootWithoutPath.events.size, 0)
+
+  const cursorRootWithoutFlag = makeContext(prerequisites())
+  assert.throws(
+    () => apply(cursorRootWithoutFlag.ctx, { ...baseConfig, projectCursorRulesRoot: '/repo' }),
+    /projectCursorRulesRoot requires enableProjectRootCursorRulesOnRead/u,
+  )
+  assert.equal(cursorRootWithoutFlag.events.size, 0)
+
+  const cursorRootWithoutPath = makeContext(prerequisites())
+  assert.throws(
+    () => apply(cursorRootWithoutPath.ctx, { ...baseConfig, enableProjectRootCursorRulesOnRead: true }),
+    /enableProjectRootCursorRulesOnRead requires projectCursorRulesRoot/u,
+  )
+  assert.equal(cursorRootWithoutPath.events.size, 0)
+
+  const githubRootWithoutFlag = makeContext(prerequisites())
+  assert.throws(
+    () => apply(githubRootWithoutFlag.ctx, { ...baseConfig, projectGitHubInstructionsRoot: '/repo' }),
+    /projectGitHubInstructionsRoot requires enableProjectRootGitHubInstructionsOnRead/u,
+  )
+  assert.equal(githubRootWithoutFlag.events.size, 0)
+
+  const githubRootWithoutPath = makeContext(prerequisites())
+  assert.throws(
+    () => apply(githubRootWithoutPath.ctx, { ...baseConfig, enableProjectRootGitHubInstructionsOnRead: true }),
+    /enableProjectRootGitHubInstructionsOnRead requires projectGitHubInstructionsRoot/u,
+  )
+  assert.equal(githubRootWithoutPath.events.size, 0)
+
+  const sisyphusRootWithoutFlag = makeContext(prerequisites())
+  assert.throws(
+    () => apply(sisyphusRootWithoutFlag.ctx, { ...baseConfig, projectSisyphusRulesRoot: '/repo' }),
+    /projectSisyphusRulesRoot requires enableProjectRootSisyphusRulesOnRead/u,
+  )
+  assert.equal(sisyphusRootWithoutFlag.events.size, 0)
+
+  const sisyphusRootWithoutPath = makeContext(prerequisites())
+  assert.throws(
+    () => apply(sisyphusRootWithoutPath.ctx, { ...baseConfig, enableProjectRootSisyphusRulesOnRead: true }),
+    /enableProjectRootSisyphusRulesOnRead requires projectSisyphusRulesRoot/u,
+  )
+  assert.equal(sisyphusRootWithoutPath.events.size, 0)
+
   const openCodeRootsWithoutFlag = makeContext(prerequisites())
   assert.throws(
     () => apply(openCodeRootsWithoutFlag.ctx, { ...baseConfig, userOpenCodeRulesRoots: ['/Users/alice/.omo/rules'] }),
     /userOpenCodeRulesRoots requires enableOpenCodeRulesOnRead/u,
   )
   assert.equal(openCodeRootsWithoutFlag.events.size, 0, 'OpenCode user roots cannot activate the adapter implicitly')
+
+  const userSisyphusRootWithoutFlag = makeContext(prerequisites())
+  assert.throws(
+    () => apply(userSisyphusRootWithoutFlag.ctx, { ...baseConfig, userSisyphusRulesRoot: '/Users/alice/.sisyphus/rules' }),
+    /userSisyphusRulesRoot requires enableSisyphusUserRulesOnRead/u,
+  )
+  assert.equal(userSisyphusRootWithoutFlag.events.size, 0)
+
+  const userSisyphusRootWithoutPath = makeContext(prerequisites())
+  assert.throws(
+    () => apply(userSisyphusRootWithoutPath.ctx, { ...baseConfig, enableSisyphusUserRulesOnRead: true }),
+    /enableSisyphusUserRulesOnRead requires userSisyphusRulesRoot/u,
+  )
+  assert.equal(userSisyphusRootWithoutPath.events.size, 0)
 
   const missingCases = [
     ['agents service', deps => { deps.services.agents = undefined }],
@@ -1663,6 +2407,81 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
     assert.equal(fixture.sections.length, 0, `${missingName} failure must not partially register prompt sections`)
     assert.equal(fixture.effects.length, 0, `${missingName} failure must not attach effects`)
   }
+  for (const [missingName, remove] of missingCases) {
+    const deps = prerequisites()
+    const fixture = makeContext(deps)
+    remove(deps, fixture)
+    assert.throws(
+      () => apply(fixture.ctx, {
+        ...baseConfig,
+        enableProjectRootClaudeRulesOnRead: true,
+        projectClaudeRulesRoot: '/repo',
+      }),
+      /enableProjectRootClaudeRulesOnRead requires DSH agents\.get/u,
+      missingName,
+    )
+    assert.equal(fixture.events.size, 0, `${missingName} failure must not register project-root rules hooks`)
+  }
+  for (const [missingName, remove] of missingCases) {
+    const deps = prerequisites()
+    const fixture = makeContext(deps)
+    remove(deps, fixture)
+    assert.throws(
+      () => apply(fixture.ctx, {
+        ...baseConfig,
+        enableProjectRootCursorRulesOnRead: true,
+        projectCursorRulesRoot: '/repo',
+      }),
+      /enableProjectRootCursorRulesOnRead requires DSH agents\.get/u,
+      missingName,
+    )
+    assert.equal(fixture.events.size, 0, `${missingName} failure must not register project-root Cursor rules hooks`)
+  }
+  for (const [missingName, remove] of missingCases) {
+    const deps = prerequisites()
+    const fixture = makeContext(deps)
+    remove(deps, fixture)
+    assert.throws(
+      () => apply(fixture.ctx, {
+        ...baseConfig,
+        enableProjectRootGitHubInstructionsOnRead: true,
+        projectGitHubInstructionsRoot: '/repo',
+      }),
+      /enableProjectRootGitHubInstructionsOnRead requires DSH agents\.get/u,
+      missingName,
+    )
+    assert.equal(fixture.events.size, 0, `${missingName} failure must not register project-root GitHub hooks`)
+  }
+  for (const [missingName, remove] of missingCases) {
+    const deps = prerequisites()
+    const fixture = makeContext(deps)
+    remove(deps, fixture)
+    assert.throws(
+      () => apply(fixture.ctx, {
+        ...baseConfig,
+        enableProjectRootSisyphusRulesOnRead: true,
+        projectSisyphusRulesRoot: '/repo',
+      }),
+      /enableProjectRootSisyphusRulesOnRead requires DSH agents\.get/u,
+      missingName,
+    )
+    assert.equal(fixture.events.size, 0, `${missingName} failure must not register project-root Sisyphus hooks`)
+  }
+  for (const [missingName, remove] of missingCases) {
+    const deps = prerequisites()
+    const fixture = makeContext(deps)
+    remove(deps, fixture)
+    assert.throws(
+      () => apply(fixture.ctx, {
+        ...baseConfig,
+        enableSisyphusUserRulesOnRead: true,
+        userSisyphusRulesRoot: '/Users/alice/.sisyphus/rules',
+      }),
+      /enableSisyphusUserRulesOnRead requires DSH agents\.get/u,
+      missingName,
+    )
+    assert.equal(fixture.events.size, 0, `${missingName} failure must not register user Sisyphus hooks`)
+  }
 
   const missingOmoProjectRulesApi = prerequisites()
   delete missingOmoProjectRulesApi.fs.listDir
@@ -1672,6 +2491,19 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
     /enableOmoProjectRulesOnRead requires DSH agents\.get/u,
   )
   assert.equal(missingOmoProjectRulesFixture.events.size, 0)
+
+  const missingProjectOmoRulesApi = prerequisites()
+  delete missingProjectOmoRulesApi.fs.listDir
+  const missingProjectOmoRulesFixture = makeContext(missingProjectOmoRulesApi)
+  assert.throws(
+    () => apply(missingProjectOmoRulesFixture.ctx, {
+      ...baseConfig,
+      enableProjectRootOmoRulesOnRead: true,
+      projectOmoRulesRoot: '/repo',
+    }),
+    /enableProjectRootOmoRulesOnRead requires DSH agents\.get/u,
+  )
+  assert.equal(missingProjectOmoRulesFixture.events.size, 0)
 
   const missingCursorProjectRulesApi = prerequisites()
   delete missingCursorProjectRulesApi.fs.listDir
@@ -1697,6 +2529,18 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
   apply(githubCopilotWithoutDirectoryListingFixture.ctx, { ...baseConfig, enableGitHubCopilotInstructionsOnRead: true })
   assert.equal(typeof githubCopilotWithoutDirectoryListingFixture.events.get('tools/post-execute'), 'function')
 
+  const sisyphusProjectRulesWithoutDirectoryListing = prerequisites()
+  delete sisyphusProjectRulesWithoutDirectoryListing.fs.listDir
+  const sisyphusProjectRulesWithoutDirectoryListingFixture = makeContext(sisyphusProjectRulesWithoutDirectoryListing)
+  assert.throws(
+    () => apply(sisyphusProjectRulesWithoutDirectoryListingFixture.ctx, {
+      ...baseConfig,
+      enableSisyphusProjectRulesOnRead: true,
+    }),
+    /enableSisyphusProjectRulesOnRead requires DSH agents\.get/u,
+  )
+  assert.equal(sisyphusProjectRulesWithoutDirectoryListingFixture.events.size, 0)
+
   const omoProjectOnly = makeContext(prerequisites())
   apply(omoProjectOnly.ctx, { ...baseConfig, enableOmoProjectRulesOnRead: true })
   assert.equal(typeof omoProjectOnly.events.get('tools/post-execute'), 'function')
@@ -1716,6 +2560,22 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
   apply(githubCopilotOnly.ctx, { ...baseConfig, enableGitHubCopilotInstructionsOnRead: true })
   assert.equal(typeof githubCopilotOnly.events.get('tools/post-execute'), 'function')
   assert.match(githubCopilotOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=enabled; openCodeRulesOnRead=disabled/u)
+
+  const sisyphusProjectOnly = makeContext(prerequisites())
+  apply(sisyphusProjectOnly.ctx, { ...baseConfig, enableSisyphusProjectRulesOnRead: true })
+  assert.equal(typeof sisyphusProjectOnly.events.get('tools/post-execute'), 'function')
+  assert.match(sisyphusProjectOnly.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /Sisyphus project rules on read: enabled \(exact session CWD only\)/u)
+
+  const sisyphusProjectRootOnly = makeContext(prerequisites())
+  apply(sisyphusProjectRootOnly.ctx, {
+    ...baseConfig,
+    enableProjectRootSisyphusRulesOnRead: true,
+    projectSisyphusRulesRoot: '/repo',
+  })
+  assert.equal(typeof sisyphusProjectRootOnly.events.get('tools/post-execute'), 'function')
+  assert.match(sisyphusProjectRootOnly.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /Explicit-root Sisyphus rules: enabled/u)
 
   const cursorWiringCalls = []
   const cursorWiringAgent = { id: 'agent-cursor-wiring' }
@@ -1774,6 +2634,137 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
   assert.ok(cursorWiringCalls.some(call => call.method === 'listDir' && call.target === cursorWiringRules))
   assert.equal(cursorWiringCalls.some(call => call.method === 'lstat' && (call.path === '.claude' || call.path === '.omo')), false)
 
+  const sisyphusWiringCalls = []
+  const sisyphusWiringAgent = { id: 'agent-sisyphus-wiring' }
+  const sisyphusWiringCwd = { targetKey: 'sisyphus-wiring-cwd' }
+  const sisyphusWiringFile = { targetKey: 'sisyphus-wiring-file' }
+  const sisyphusWiringParent = { targetKey: 'sisyphus-wiring-parent' }
+  const sisyphusWiringRules = { targetKey: 'sisyphus-wiring-rules' }
+  const sisyphusWiringFixture = makeContext({
+    services: {
+      agents: { get: id => id === sisyphusWiringAgent.id ? sisyphusWiringAgent : undefined },
+      sessions: { get: id => id === sisyphusWiringAgent.id ? { header: { id, cwd: '/workspace' } } : undefined },
+    },
+    fs: {
+      resolve: async (value, options = {}) => {
+        sisyphusWiringCalls.push({ method: 'resolve', path: value, cwd: options.cwd })
+        if (value === '/workspace') return sisyphusWiringCwd
+        if (value === 'src/app.ts' && options.cwd === '/workspace') return sisyphusWiringFile
+        if (value === '.sisyphus' && options.cwd === '/workspace') return sisyphusWiringParent
+        if (value === '.sisyphus/rules' && options.cwd === '/workspace') return sisyphusWiringRules
+        return undefined
+      },
+      contains: (parent, child) => parent === child
+        || (parent === sisyphusWiringCwd && (child === sisyphusWiringFile
+          || child === sisyphusWiringParent || child === sisyphusWiringRules))
+        || (parent === sisyphusWiringParent && child === sisyphusWiringRules),
+      lstat: async (value, options = {}) => {
+        sisyphusWiringCalls.push({ method: 'lstat', path: value, cwd: options.cwd })
+        if (value === '.sisyphus' || value === '.sisyphus/rules') return { type: 'directory', version: 'v1' }
+        if (value === 'src/app.ts') return { type: 'file', version: 'v1' }
+        return undefined
+      },
+      stat: async target => target === sisyphusWiringCwd || target === sisyphusWiringParent
+        || target === sisyphusWiringRules
+        ? { type: 'directory', version: 'v1' }
+        : target === sisyphusWiringFile ? { type: 'file', version: 'v1' } : undefined,
+      readBytes: async () => new Uint8Array(),
+      listDir: async target => {
+        sisyphusWiringCalls.push({ method: 'listDir', target })
+        return []
+      },
+    },
+  })
+  apply(sisyphusWiringFixture.ctx, { ...baseConfig, enableSisyphusProjectRulesOnRead: true })
+  const sisyphusWiringDecision = { kind: 'accept' }
+  const sisyphusWiringResult = await sisyphusWiringFixture.events.get('tools/post-execute')(
+    {
+      name: 'read',
+      arguments: { file_path: 'src/app.ts' },
+      agent: { id: sisyphusWiringAgent.id },
+      signal: new AbortController().signal,
+    },
+    { isError: false },
+    async () => sisyphusWiringDecision,
+  )
+  assert.strictEqual(sisyphusWiringResult, sisyphusWiringDecision)
+  assert.ok(sisyphusWiringCalls.some(call => call.method === 'lstat' && call.path === '.sisyphus'))
+  assert.ok(sisyphusWiringCalls.some(call => call.method === 'lstat' && call.path === '.sisyphus/rules'))
+  assert.ok(sisyphusWiringCalls.some(call => call.method === 'listDir' && call.target === sisyphusWiringRules))
+  assert.equal(sisyphusWiringCalls.some(call => call.method === 'lstat' && call.path === '.claude'), false)
+
+  const projectSisyphusWiringCalls = []
+  const projectSisyphusWiringAgent = { id: 'agent-project-sisyphus-wiring' }
+  const projectSisyphusWiringRoot = { targetKey: 'project-sisyphus-wiring-root' }
+  const projectSisyphusWiringCwd = { targetKey: 'project-sisyphus-wiring-cwd' }
+  const projectSisyphusWiringFile = { targetKey: 'project-sisyphus-wiring-file' }
+  const projectSisyphusWiringParent = { targetKey: 'project-sisyphus-wiring-parent' }
+  const projectSisyphusWiringRules = { targetKey: 'project-sisyphus-wiring-rules' }
+  const projectSisyphusWiringFixture = makeContext({
+    services: {
+      agents: { get: id => id === projectSisyphusWiringAgent.id ? projectSisyphusWiringAgent : undefined },
+      sessions: { get: id => id === projectSisyphusWiringAgent.id
+        ? { header: { id, cwd: '/repo/apps/a' } }
+        : undefined },
+    },
+    fs: {
+      resolve: async (value, options = {}) => {
+        projectSisyphusWiringCalls.push({ method: 'resolve', path: value, cwd: options.cwd })
+        if (value === '/repo') return projectSisyphusWiringRoot
+        if (value === '/repo/apps/a' || (value === 'apps/a' && options.cwd === '/repo')) return projectSisyphusWiringCwd
+        if (value === 'src/app.ts' && options.cwd === '/repo/apps/a') return projectSisyphusWiringFile
+        if (value === '.sisyphus' && options.cwd === '/repo') return projectSisyphusWiringParent
+        if (value === '.sisyphus/rules' && options.cwd === '/repo') return projectSisyphusWiringRules
+        return undefined
+      },
+      contains: (parent, child) => parent === child
+        || (parent === projectSisyphusWiringRoot && (child === projectSisyphusWiringCwd
+          || child === projectSisyphusWiringParent || child === projectSisyphusWiringRules))
+        || (parent === projectSisyphusWiringCwd && child === projectSisyphusWiringFile)
+        || (parent === projectSisyphusWiringParent && child === projectSisyphusWiringRules),
+      lstat: async (value, options = {}) => {
+        projectSisyphusWiringCalls.push({ method: 'lstat', path: value, cwd: options.cwd })
+        if (value === '/repo' || value === '.sisyphus' || value === '.sisyphus/rules') {
+          return { type: 'directory', version: 'v1' }
+        }
+        if (value === 'src/app.ts') return { type: 'file', version: 'v1' }
+        return undefined
+      },
+      stat: async target => target === projectSisyphusWiringRoot || target === projectSisyphusWiringCwd
+        || target === projectSisyphusWiringParent || target === projectSisyphusWiringRules
+        ? { type: 'directory', version: 'v1' }
+        : target === projectSisyphusWiringFile ? { type: 'file', version: 'v1' } : undefined,
+      readBytes: async () => new Uint8Array(),
+      listDir: async target => {
+        projectSisyphusWiringCalls.push({ method: 'listDir', target })
+        return []
+      },
+    },
+  })
+  apply(projectSisyphusWiringFixture.ctx, {
+    ...baseConfig,
+    enableProjectRootSisyphusRulesOnRead: true,
+    projectSisyphusRulesRoot: '/repo',
+  })
+  const projectSisyphusWiringDecision = { kind: 'accept' }
+  const projectSisyphusWiringResult = await projectSisyphusWiringFixture.events.get('tools/post-execute')(
+    {
+      name: 'read',
+      arguments: { file_path: 'src/app.ts' },
+      agent: { id: projectSisyphusWiringAgent.id },
+      signal: new AbortController().signal,
+    },
+    { isError: false },
+    async () => projectSisyphusWiringDecision,
+  )
+  assert.strictEqual(projectSisyphusWiringResult, projectSisyphusWiringDecision)
+  assert.ok(projectSisyphusWiringCalls.some(call => call.method === 'lstat'
+    && call.path === '.sisyphus/rules' && call.cwd === '/repo'))
+  assert.ok(projectSisyphusWiringCalls.some(call => call.method === 'listDir'
+    && call.target === projectSisyphusWiringRules))
+  assert.equal(projectSisyphusWiringCalls.some(call => call.method === 'lstat'
+    && call.path === '.sisyphus' && call.cwd === '/repo/apps/a'), false)
+
   const githubWiringCalls = []
   const githubWiringAgent = { id: 'agent-github-instruction-wiring' }
   const githubWiringCwd = { targetKey: 'github-instruction-wiring-cwd' }
@@ -1830,6 +2821,80 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
   assert.ok(githubWiringCalls.some(call => call.method === 'lstat' && call.path === '.github/instructions'))
   assert.ok(githubWiringCalls.some(call => call.method === 'listDir' && call.target === githubWiringRoot))
   assert.equal(githubWiringCalls.some(call => call.method === 'lstat' && (call.path === '.omo' || call.path === '.claude' || call.path === '.cursor')), false)
+
+  const githubProjectRootWiringCalls = []
+  const githubProjectRootWiringAgent = { id: 'agent-github-project-root-wiring' }
+  const githubProjectRootWiringRoot = { targetKey: 'github-project-root-wiring-root' }
+  const githubProjectRootWiringCwd = { targetKey: 'github-project-root-wiring-cwd' }
+  const githubProjectRootWiringFile = { targetKey: 'github-project-root-wiring-file' }
+  const githubProjectRootWiringGithub = { targetKey: 'github-project-root-wiring-github' }
+  const githubProjectRootWiringInstructions = { targetKey: 'github-project-root-wiring-instructions' }
+  const githubProjectRootWiringFixture = makeContext({
+    services: {
+      agents: { get: id => id === githubProjectRootWiringAgent.id ? githubProjectRootWiringAgent : undefined },
+      sessions: { get: id => id === githubProjectRootWiringAgent.id ? { header: { id, cwd: '/workspace/nested' } } : undefined },
+    },
+    fs: {
+      resolve: async (value, options = {}) => {
+        githubProjectRootWiringCalls.push({ method: 'resolve', path: value, cwd: options.cwd })
+        if (value === '/workspace' && options.cwd === undefined) return githubProjectRootWiringRoot
+        if (value === '/workspace/nested') return githubProjectRootWiringCwd
+        if (value === 'nested' && options.cwd === '/workspace') return githubProjectRootWiringCwd
+        if (value === 'src/app.ts' && options.cwd === '/workspace/nested') return githubProjectRootWiringFile
+        if (value === '.github' && options.cwd === '/workspace') return githubProjectRootWiringGithub
+        if (value === '.github/instructions' && options.cwd === '/workspace') return githubProjectRootWiringInstructions
+        return undefined
+      },
+      contains: (parent, child) => parent === child
+        || (parent === githubProjectRootWiringRoot && (child === githubProjectRootWiringCwd
+          || child === githubProjectRootWiringGithub || child === githubProjectRootWiringInstructions))
+        || (parent === githubProjectRootWiringCwd && child === githubProjectRootWiringFile)
+        || (parent === githubProjectRootWiringGithub && child === githubProjectRootWiringInstructions),
+      lstat: async (value, options = {}) => {
+        githubProjectRootWiringCalls.push({ method: 'lstat', path: value, cwd: options.cwd })
+        if (value === '/workspace' && options.cwd === undefined) return { type: 'directory', version: 'v1' }
+        if ((value === '.github' || value === '.github/instructions') && options.cwd === '/workspace') {
+          return { type: 'directory', version: 'v1' }
+        }
+        if (value === 'src/app.ts' && options.cwd === '/workspace/nested') return { type: 'file', version: 'v1' }
+        return undefined
+      },
+      stat: async target => target === githubProjectRootWiringRoot || target === githubProjectRootWiringCwd
+        || target === githubProjectRootWiringGithub || target === githubProjectRootWiringInstructions
+        ? { type: 'directory', version: 'v1' }
+        : target === githubProjectRootWiringFile ? { type: 'file', version: 'v1' } : undefined,
+      readBytes: async () => new Uint8Array(),
+      listDir: async target => {
+        githubProjectRootWiringCalls.push({ method: 'listDir', target })
+        return []
+      },
+    },
+  })
+  apply(githubProjectRootWiringFixture.ctx, {
+    ...baseConfig,
+    enableProjectRootGitHubInstructionsOnRead: true,
+    projectGitHubInstructionsRoot: '/workspace',
+  })
+  const githubProjectRootWiringDecision = { kind: 'accept' }
+  const githubProjectRootWiringResult = await githubProjectRootWiringFixture.events.get('tools/post-execute')(
+    {
+      name: 'read',
+      arguments: { file_path: 'src/app.ts' },
+      agent: { id: githubProjectRootWiringAgent.id },
+      signal: new AbortController().signal,
+    },
+    { isError: false },
+    async () => githubProjectRootWiringDecision,
+  )
+  assert.strictEqual(githubProjectRootWiringResult, githubProjectRootWiringDecision)
+  assert.ok(githubProjectRootWiringCalls.some(call => call.method === 'lstat' && call.path === '/workspace'))
+  assert.ok(githubProjectRootWiringCalls.some(call => call.method === 'lstat'
+    && call.path === '.github/instructions' && call.cwd === '/workspace'))
+  assert.ok(githubProjectRootWiringCalls.some(call => call.method === 'listDir'
+    && call.target === githubProjectRootWiringInstructions))
+  assert.equal(githubProjectRootWiringCalls.some(call => call.method === 'lstat'
+    && call.path === '.github/instructions' && call.cwd === '/workspace/nested'), false,
+  'the explicit-root source does not require or use the CWD-only flag')
 
   const copilotWiringCalls = []
   const copilotWiringAgent = { id: 'agent-github-copilot-wiring' }
@@ -1899,22 +2964,79 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
   )
   assert.equal(missingOpenCodeFixture.events.size, 0)
 
+  const projectRootOnly = makeContext(prerequisites())
+  apply(projectRootOnly.ctx, {
+    ...baseConfig,
+    enableProjectRootClaudeRulesOnRead: true,
+    projectClaudeRulesRoot: '/workspace/project',
+  })
+  assert.equal(typeof projectRootOnly.events.get('tools/post-execute'), 'function')
+  assert.match(projectRootOnly.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /Claude rules: projectRootClaudeRulesOnRead=enabled/u)
+
+  const projectOmoRootOnly = makeContext(prerequisites())
+  apply(projectOmoRootOnly.ctx, {
+    ...baseConfig,
+    enableProjectRootOmoRulesOnRead: true,
+    projectOmoRulesRoot: '/workspace/project',
+  })
+  assert.equal(typeof projectOmoRootOnly.events.get('tools/post-execute'), 'function')
+  assert.match(projectOmoRootOnly.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /OMO rules: omoProjectRulesOnRead=disabled; projectRootOmoRulesOnRead=enabled/u)
+
+  const projectCursorRootOnly = makeContext(prerequisites())
+  apply(projectCursorRootOnly.ctx, {
+    ...baseConfig,
+    enableProjectRootCursorRulesOnRead: true,
+    projectCursorRulesRoot: '/workspace/project',
+  })
+  assert.equal(typeof projectCursorRootOnly.events.get('tools/post-execute'), 'function')
+  assert.match(projectCursorRootOnly.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /Cursor rules: projectRootCursorRulesOnRead=enabled/u)
+
+  const projectGitHubRootOnly = makeContext(prerequisites())
+  apply(projectGitHubRootOnly.ctx, {
+    ...baseConfig,
+    enableProjectRootGitHubInstructionsOnRead: true,
+    projectGitHubInstructionsRoot: '/workspace/project',
+  })
+  assert.equal(typeof projectGitHubRootOnly.events.get('tools/post-execute'), 'function')
+  assert.match(projectGitHubRootOnly.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /GitHub instructions: projectRootGitHubInstructionsOnRead=enabled/u)
+
   const enabled = makeContext(prerequisites())
   apply(enabled.ctx, {
     ...baseConfig,
     enableClaudeRulesOnRead: true,
+    enableProjectRootClaudeRulesOnRead: true,
+    projectClaudeRulesRoot: '/workspace/project',
     enableOmoProjectRulesOnRead: true,
+    enableProjectRootOmoRulesOnRead: true,
+    projectOmoRulesRoot: '/workspace/project',
     enableCursorProjectRulesOnRead: true,
+    enableProjectRootCursorRulesOnRead: true,
+    projectCursorRulesRoot: '/workspace/project',
     enableGitHubProjectInstructionsOnRead: true,
+    enableProjectRootGitHubInstructionsOnRead: true,
+    projectGitHubInstructionsRoot: '/workspace/project',
     enableGitHubCopilotInstructionsOnRead: true,
     userClaudeRulesRoots: ['/Users/alice/.claude/rules'],
     enableOpenCodeRulesOnRead: true,
     userOpenCodeRulesRoots: ['/Users/alice/.opencode/rules', '/Users/alice/.omo/rules'],
+    enableSisyphusUserRulesOnRead: true,
+    userSisyphusRulesRoot: '/Users/alice/.sisyphus/rules',
   })
   assert.equal(typeof enabled.events.get('tools/post-execute'), 'function')
   assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /claudeRulesOnRead=enabled; omoProjectRulesOnRead=enabled; cursorProjectRulesOnRead=enabled; githubProjectInstructionsOnRead=enabled; githubCopilotInstructionsOnRead=enabled; openCodeRulesOnRead=enabled/u)
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /OMO rules: omoProjectRulesOnRead=enabled; projectRootOmoRulesOnRead=enabled/u)
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /Claude rules: projectRootClaudeRulesOnRead=enabled/u)
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /Cursor rules: projectRootCursorRulesOnRead=enabled/u)
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /GitHub instructions: projectRootGitHubInstructionsOnRead=enabled/u)
   assert.match(enabled.commands.get('omo').handler().text, /Claude rules after read\/write\/edit: enabled/u)
   assert.match(enabled.commands.get('omo').handler().text, /OpenCode user rules after file operations: enabled \(explicit roots only\)/u)
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text,
+    /Sisyphus user rules: enabled \(explicit root only\)/u)
   assert.deepEqual(calls, [], 'enabled registration/status do not perform filesystem or Service operations')
 
   const openCodeOnlyCalls = []
@@ -1975,6 +3097,63 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
   assert.ok(openCodeOnlyCalls.some(call => call.method === 'listDir' && call.target === userRulesTarget))
   assert.equal(openCodeOnlyCalls.some(call => call.method === 'lstat' && typeof call.path === 'string' && call.path.startsWith('.claude')), false)
 
+  const sisyphusUserCalls = []
+  const sisyphusUserAgent = { id: 'agent-sisyphus-user-only' }
+  const sisyphusUserCwdTarget = { targetKey: 'sisyphus-user-only-cwd' }
+  const sisyphusUserSourceTarget = { targetKey: 'sisyphus-user-only-source' }
+  const sisyphusUserRulesTarget = { targetKey: 'sisyphus-user-only-rules' }
+  const sisyphusUserFixture = makeContext({
+    services: {
+      agents: { get: id => id === sisyphusUserAgent.id ? sisyphusUserAgent : undefined },
+      sessions: { get: id => id === sisyphusUserAgent.id ? { header: { id, cwd: '/workspace' } } : undefined },
+    },
+    fs: {
+      resolve: async (value, options = {}) => {
+        sisyphusUserCalls.push({ method: 'resolve', path: value, cwd: options.cwd })
+        if (value === '/workspace') return sisyphusUserCwdTarget
+        if (value === 'src/app.ts' && options.cwd === '/workspace') return sisyphusUserSourceTarget
+        if (value === '/Users/alice/.sisyphus/rules') return sisyphusUserRulesTarget
+        if (value === '.' && options.cwd === '/Users/alice/.sisyphus/rules') return sisyphusUserRulesTarget
+        return undefined
+      },
+      contains: (parent, child) => parent === child || (parent === sisyphusUserCwdTarget && child === sisyphusUserSourceTarget),
+      lstat: async (value, options = {}) => {
+        sisyphusUserCalls.push({ method: 'lstat', path: value, cwd: options.cwd })
+        if (value === '/Users/alice/.sisyphus/rules' || (value === '.' && options.cwd === '/Users/alice/.sisyphus/rules')) {
+          return { type: 'directory', version: 'v1' }
+        }
+        return undefined
+      },
+      stat: async target => target === sisyphusUserCwdTarget || target === sisyphusUserRulesTarget
+        ? { type: 'directory', version: 'v1' }
+        : target === sisyphusUserSourceTarget ? { type: 'file', version: 'v1' } : undefined,
+      readBytes: async () => new Uint8Array(),
+      listDir: async target => {
+        sisyphusUserCalls.push({ method: 'listDir', target })
+        return []
+      },
+    },
+  })
+  apply(sisyphusUserFixture.ctx, {
+    ...baseConfig,
+    enableSisyphusUserRulesOnRead: true,
+    userSisyphusRulesRoot: '/Users/alice/.sisyphus/rules',
+  })
+  const sisyphusUserListener = sisyphusUserFixture.events.get('tools/post-execute')
+  const sisyphusUserDecision = { kind: 'accept' }
+  const sisyphusUserResult = await sisyphusUserListener(
+    {
+      name: 'read',
+      arguments: { file_path: 'src/app.ts' },
+      agent: { id: sisyphusUserAgent.id },
+      signal: new AbortController().signal,
+    },
+    { isError: false },
+    async () => sisyphusUserDecision,
+  )
+  assert.strictEqual(sisyphusUserResult, sisyphusUserDecision)
+  assert.ok(sisyphusUserCalls.some(call => call.method === 'listDir' && call.target === sisyphusUserRulesTarget))
+
   const readmeOnReadOnly = makeContext(prerequisites())
   apply(readmeOnReadOnly.ctx, { ...baseConfig, enableReadmeOnRead: true })
   assert.equal(typeof readmeOnReadOnly.events.get('tools/post-execute'), 'function')
@@ -1983,7 +3162,7 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
   const rootSnapshotsOnly = makeContext(prerequisites())
   apply(rootSnapshotsOnly.ctx, { ...baseConfig, enableRootReadmeContext: true, enableRootAgentsContext: true })
   assert.equal(rootSnapshotsOnly.events.has('tools/post-execute'), false)
-  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
+  assert.match(rootSnapshotsOnly.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; rootAgentsContextWatch=disabled; projectRootAgentsContext=disabled; projectRootAgentsContextWatch=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; projectRootCommands=disabled; projectCommandWatch=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=disabled; claudeRulesOnRead=disabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
 
   const combined = makeContext(prerequisites())
   apply(combined.ctx, {
@@ -1994,7 +3173,7 @@ test('mounts opt-in cwd OMO, Cursor, GitHub Instructions, Copilot, and Claude ru
     enableRootAgentsContext: true,
   })
   assert.equal(typeof combined.events.get('tools/post-execute'), 'function', 'independent on-read and root-context flags can be combined')
-  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
+  assert.match(combined.commands.get('omo').handler({ rawInput: 'status' }).text, /rootAgentsContext=enabled; rootAgentsContextWatch=disabled; projectRootAgentsContext=disabled; projectRootAgentsContextWatch=disabled; agentsOnRead=disabled; projectAgentFiles=disabled; projectCommands=disabled; projectRootCommands=disabled; projectCommandWatch=disabled; promptFileExpansion=disabled; rootReadmeContext=enabled; readmeOnRead=enabled; claudeRulesOnRead=enabled; omoProjectRulesOnRead=disabled; cursorProjectRulesOnRead=disabled; githubProjectInstructionsOnRead=disabled; githubCopilotInstructionsOnRead=disabled; openCodeRulesOnRead=disabled; writeExistingFileGuard=disabled/u)
   assert.deepEqual(calls, [], 'combined registration/status remain free of runtime filesystem and Service calls')
 })
 
@@ -2475,6 +3654,120 @@ test('mounts the default-off root-Agent usage reminder only with exact DSH prere
   assert.equal(afterDispose.additionalContexts, undefined, 'plugin disposal stops further reminders')
 })
 
+test('mounts the default-off category-skill reminder only with categories and exact DSH prerequisites', async () => {
+  const disabled = makeContext()
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.events.has('tools/post-execute'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /categorySkillReminder=disabled/u)
+
+  const categorySkillConfig = {
+    ...baseConfig,
+    enableCategorySkillReminder: true,
+    categoryRoutes: [{ name: 'review', provider: 'provider-a', model: 'model-a', skills: ['code-review'] }],
+  }
+  const noCategories = makeContext()
+  apply(noCategories.ctx, { ...categorySkillConfig, categoryRoutes: [] })
+  assert.equal(noCategories.events.has('tools/post-execute'), false, 'no category defaults need no reminder listener')
+
+  const missingAgents = makeContext()
+  assert.throws(
+    () => apply(missingAgents.ctx, categorySkillConfig),
+    /enableCategorySkillReminder requires DSH agents\.get and agents\.roots/u,
+  )
+  assert.equal(missingAgents.tools.size, 0)
+
+  const missingRoots = makeContext({ services: { agents: { get: () => undefined } } })
+  assert.throws(
+    () => apply(missingRoots.ctx, categorySkillConfig),
+    /enableCategorySkillReminder requires DSH agents\.get and agents\.roots/u,
+  )
+  assert.equal(missingRoots.tools.size, 0)
+
+  const agents = { get: () => undefined, roots: () => [] }
+  const missingToolLookup = makeContext({ services: { agents } })
+  missingToolLookup.ctx.tools.get = undefined
+  assert.throws(
+    () => apply(missingToolLookup.ctx, categorySkillConfig),
+    /enableCategorySkillReminder requires DSH tools\.get/u,
+  )
+  assert.equal(missingToolLookup.tools.size, 0)
+
+  const missingEvents = makeContext({ services: { agents } })
+  missingEvents.ctx.on = undefined
+  assert.throws(
+    () => apply(missingEvents.ctx, categorySkillConfig),
+    /enableCategorySkillReminder requires Cordis ctx\.on and ctx\.effect/u,
+  )
+  assert.equal(missingEvents.tools.size, 0)
+
+  const missingEffects = makeContext({ services: { agents } })
+  missingEffects.ctx.effect = undefined
+  assert.throws(
+    () => apply(missingEffects.ctx, categorySkillConfig),
+    /enableCategorySkillReminder requires Cordis ctx\.on and ctx\.effect/u,
+  )
+  assert.equal(missingEffects.tools.size, 0)
+
+  const liveAgents = new Map()
+  const roots = []
+  const liveAgentService = { get: id => liveAgents.get(id), roots: () => roots }
+  let agent
+  let skillCalls = 0
+  const skillsService = {
+    get() { skillCalls += 1; throw new Error('no skill lookup should occur in the reminder') },
+    list() { skillCalls += 1; throw new Error('no skill discovery should occur in the reminder') },
+  }
+  const fixture = makeContext({
+    services: { agents: liveAgentService, skills: skillsService },
+    getTool: (name, scope) => scope === agent && ['dsh_omo_task', 'dsh_omo_call_agent'].includes(name)
+      ? { name, parameters: { category: { type: 'string', enum: ['review'] } } }
+      : undefined,
+  })
+  apply(fixture.ctx, categorySkillConfig)
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /categorySkillReminder=enabled/u)
+  assert.match(fixture.commands.get('omo').handler().text, /Category-skill reminder: enabled/u)
+  agent = { id: 'category-root' }
+  liveAgents.set(agent.id, agent)
+  roots.push(agent)
+  const listener = fixture.events.get('tools/post-execute')
+  const preExecute = fixture.events.get('tools/pre-execute')
+  assert.equal(typeof listener, 'function')
+  assert.equal(typeof preExecute, 'function')
+  const signal = new AbortController().signal
+  for (const name of ['read', 'edit']) {
+    const decision = await listener({ name, agent, arguments: { private: 'raw args' }, signal }, { isError: false }, async () => ({ kind: 'accept', content: [] }))
+    assert.equal(decision.additionalContexts, undefined)
+  }
+  const third = await listener({ name: 'glob', agent, arguments: { pattern: 'secret' }, signal }, {
+    isError: false, content: [{ type: 'text', text: 'secret output' }],
+  }, async () => ({ kind: 'accept', content: [] }))
+  const hint = third.additionalContexts?.[0]?.content?.[0]?.text
+  assert.match(hint, /`review`: `code-review`/u)
+  assert.doesNotMatch(hint, /raw args|secret/u)
+
+  const preAgent = { id: 'category-preflight-root' }
+  agent = preAgent
+  liveAgents.set(preAgent.id, preAgent)
+  roots.push(preAgent)
+  let preNextCalls = 0
+  const preflight = await preExecute({ name: 'dsh_omo_task', agent: preAgent, signal }, async () => {
+    preNextCalls += 1
+    return { kind: 'deny', reason: 'preflight denied' }
+  })
+  assert.equal(preNextCalls, 1, 'pre-execute must participate once in the Cordis waterfall')
+  assert.deepEqual(preflight, { kind: 'deny', reason: 'preflight denied' })
+  for (const name of ['read', 'edit', 'glob']) {
+    const decision = await listener({ name, agent: preAgent, signal }, { isError: false }, async () => ({ kind: 'accept', content: [] }))
+    assert.equal(decision.additionalContexts, undefined, 'a denied task attempt suppresses the later hint')
+  }
+  assert.equal(skillCalls, 0)
+  const reminderEffect = fixture.effects.find(effect => effect.label === 'dsh-omo category-skill reminder')
+  assert.equal(typeof reminderEffect?.dispose, 'function')
+  await reminderEffect.dispose()
+  const afterDispose = await listener({ name: 'glob', agent, signal }, { isError: false }, async () => ({ kind: 'accept', content: [] }))
+  assert.equal(afterDispose.additionalContexts, undefined)
+})
+
 test('mounts the native Goal command only with Goals and opt-in Agent Teams tools only with the Host service', async () => {
   const goalCalls = []
   const goals = {
@@ -2512,7 +3805,7 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   const disabledFixture = makeContext()
   apply(disabledFixture.ctx, baseConfig)
   assert.equal(disabledFixture.events.has('tools/post-execute'), false, 'the Goal-use and Team task reminders are default-off')
-  assert.equal(disabledFixture.events.has('agent/disposed'), false, 'no reminder cleanup listener is installed when disabled')
+  assert.equal(disabledFixture.eventListeners.has('agent/disposed'), true, 'one-shot launcher installs its exact disposal fence independently of reminders')
   assert.equal([...disabledFixture.tools.keys()].some(toolName => toolName.startsWith('team_')), false)
   assert.equal(disabledFixture.commands.has('goal'), false)
   assert.equal(disabledFixture.commands.has('stop-continuation'), false)
@@ -2691,6 +3984,34 @@ test('mounts the native Goal command only with Goals and opt-in Agent Teams tool
   assert.ok(sessionEventSearchEffect)
   await sessionEventSearchEffect.dispose()
   assert.equal(enabledSessionEventSearchFixture.tools.has('session_event_search'), false)
+
+  const unavailableSessionEventTraceFixture = makeContext()
+  assert.throws(
+    () => apply(unavailableSessionEventTraceFixture.ctx, { ...baseConfig, enableSessionEventTrace: true }),
+    /enableSessionEventTrace requires DSH sessionQuery\.traceEvent/u,
+  )
+  assert.equal(unavailableSessionEventTraceFixture.tools.size, 0)
+
+  const noTraceEvent = makeContext({ services: { sessionQuery: { searchEvents() {} } } })
+  assert.throws(
+    () => apply(noTraceEvent.ctx, { ...baseConfig, enableSessionEventTrace: true }),
+    /requires DSH sessionQuery\.traceEvent/u,
+  )
+  assert.equal(noTraceEvent.tools.size, 0)
+
+  const sessionEventTraceService = { traceEvent: async () => ({}) }
+  const defaultOffSessionEventTraceFixture = makeContext({ services: { sessionQuery: sessionEventTraceService } })
+  apply(defaultOffSessionEventTraceFixture.ctx, baseConfig)
+  assert.equal(defaultOffSessionEventTraceFixture.tools.has('dsh_omo_session_trace_event'), false)
+
+  const enabledSessionEventTraceFixture = makeContext({ services: { sessionQuery: sessionEventTraceService } })
+  apply(enabledSessionEventTraceFixture.ctx, { ...baseConfig, enableSessionEventTrace: true })
+  assert.ok(enabledSessionEventTraceFixture.tools.has('dsh_omo_session_trace_event'))
+  assert.match(enabledSessionEventTraceFixture.commands.get('omo').handler().text, /Session event trace: enabled/u)
+  const sessionEventTraceEffect = enabledSessionEventTraceFixture.effects.find(effect => effect.label === 'dsh-omo current-session event provenance tool')
+  assert.ok(sessionEventTraceEffect)
+  await sessionEventTraceEffect.dispose()
+  assert.equal(enabledSessionEventTraceFixture.tools.has('dsh_omo_session_trace_event'), false)
 
   const unavailableSessionReadFixture = makeContext()
   assert.throws(
@@ -3333,7 +4654,7 @@ test('/omo web-search is opt-in, human-only, bounded, and never auto-fetches ret
 
   const command = fixture.commands.get('omo')
   assert.match(command.description, /human-invoked DSH web\.search/u)
-  assert.equal(command.input.hint, '[status|status capabilities|web-search <query>]')
+  assert.equal(command.input.hint, '[status|status capabilities|status route role:<name>|status route category:<name>|web-search <query>]')
   const controller = new AbortController()
   const result = await command.handler({ rawInput: 'web-search  safe   query  ', signal: controller.signal })
   assert.equal(result.kind, 'success')
@@ -3407,11 +4728,209 @@ test('model-facing DSH web search is separately opt-in, bounded, and disposable'
   assert.equal(fixture.tools.has('dsh_omo_web_search'), false, 'the exact registration disposer is run on effect cleanup')
 })
 
+test('disabledSkills accepts ASCII case through Config JSON apply without linking aliases', () => {
+  for (const [input, selected, other] of [
+    ['SeCuRiTy-ReViEw', 'security-review', 'security-research'],
+    ['SECURITY-RESEARCH', 'security-research', 'security-review'],
+  ]) {
+    const config = JSON.parse(JSON.stringify(Config({ disabledSkills: [input] })))
+    const fixture = makeContext()
+    apply(fixture.ctx, config)
+    assert.deepEqual(fixture.skills.get(selected).invocation, { modelInvocable: false, userInvocable: false })
+    assert.deepEqual(fixture.skills.get(other).invocation, { modelInvocable: true, userInvocable: true })
+  }
+  const fixture = makeContext()
+  apply(fixture.ctx, JSON.parse(JSON.stringify(Config({ disabledSkills: ['A'.repeat(257)] }))))
+  for (const invalid of ['', ' bad', 'bad ', 'a/b', 'a\\b', 'a_b', 'a--b', 'K', 'İ']) {
+    assert.throws(() => apply(makeContext().ctx, JSON.parse(JSON.stringify(Config({ disabledSkills: [invalid] })))), /disabledSkills/u, invalid)
+  }
+  for (const field of ['enabledProjectSkills', 'disabledProjectSkills', 'disabledOmoBundledSkills']) {
+    assert.throws(() => apply(makeContext().ctx, { ...baseConfig, [field]: ['SECURITY-REVIEW'] }))
+  }
+})
+
 test('disabledSkills turns off both model and user invocation for bundled skills', () => {
   const fixture = makeContext()
   apply(fixture.ctx, { ...baseConfig, disabledSkills: ['omo-research'] })
   assert.deepEqual(fixture.skills.get('omo-research').invocation, { modelInvocable: false, userInvocable: false })
   assert.deepEqual(fixture.skills.get('omo-code-review').invocation, { modelInvocable: true, userInvocable: true })
+})
+
+test('registers security-review as a per-name controllable alias without changing legacy skills', () => {
+  const enabled = makeContext()
+  apply(enabled.ctx, baseConfig)
+  const review = enabled.skills.get('security-review')
+  assert.equal(review.content, enabled.skills.get('security-research').content)
+  assert.deepEqual(review.invocation, { modelInvocable: true, userInvocable: true })
+  assert.ok(enabled.skills.has('omo-security-review'))
+
+  for (const disabledName of ['security-review', 'security-research']) {
+    const otherName = disabledName === 'security-review' ? 'security-research' : 'security-review'
+    const disabled = makeContext()
+    apply(disabled.ctx, { ...baseConfig, disabledSkills: [disabledName] })
+    assert.deepEqual(disabled.skills.get(disabledName).invocation, { modelInvocable: false, userInvocable: false })
+    assert.deepEqual(disabled.skills.get(otherName).invocation, { modelInvocable: true, userInvocable: true })
+
+    const hidden = makeContext()
+    apply(hidden.ctx, { ...baseConfig, disabledOmoBundledSkills: [disabledName] })
+    assert.equal(hidden.skills.has(disabledName), false)
+    assert.equal(hidden.skills.has(otherName), true)
+    assert.equal(hidden.skills.has('omo-security-review'), true)
+  }
+})
+
+test('model-facing task waiting is opt-in and requires result tracking', () => {
+  const disabled = makeContext()
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.tools.has('dsh_omo_task_wait'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /taskWaitTool=disabled/u)
+
+  const withoutResultCache = makeContext()
+  assert.throws(
+    () => apply(withoutResultCache.ctx, { ...baseConfig, enableTaskWaitTool: true }),
+    /enableTaskWaitTool requires enableTaskResultTool/u,
+  )
+  assert.equal(withoutResultCache.tools.size, 0, 'missing result tracking fails before Tool registration')
+
+})
+
+test('task-result persistence is opt-in, requires result tracking and storageDomain, and closes its domain', async () => {
+  const disabled = makeContext()
+  apply(disabled.ctx, baseConfig)
+  assert.equal(disabled.tools.has('dsh_omo_task_result'), false)
+  assert.match(disabled.commands.get('omo').handler({ rawInput: 'status' }).text, /taskResultPersistence=disabled/u)
+
+  const withoutResultTool = makeContext()
+  assert.throws(
+    () => apply(withoutResultTool.ctx, { ...baseConfig, enableTaskResultPersistence: true }),
+    /enableTaskResultPersistence requires enableTaskResultTool/u,
+  )
+  const withoutStorage = makeContext()
+  assert.throws(
+    () => apply(withoutStorage.ctx, { ...baseConfig, enableTaskResultTool: true, enableTaskResultPersistence: true }),
+    /enableTaskResultPersistence requires DSH storageDomain\.open/u,
+  )
+  assert.equal(withoutStorage.tools.size, 0)
+
+  const rows = new Map()
+  let opened = false
+  let closed = false
+  const storageDomain = {
+    async open(spec) {
+      assert.equal(spec.name, 'dsh-omo-task-results')
+      opened = true
+      const table = {
+        get: key => rows.get(key),
+        entries: () => rows.entries(),
+        async put(key, value) { rows.set(key, spec.tables.results.valueSchema.parse(value)) },
+        async delete(key) { return rows.delete(key) },
+        get size() { return rows.size },
+      }
+      return {
+        table: name => { assert.equal(name, 'results'); return table },
+        async close() { closed = true },
+      }
+    },
+  }
+  const enabled = makeContext({ services: { storageDomain } })
+  apply(enabled.ctx, { ...baseConfig, enableTaskResultTool: true, enableTaskResultPersistence: true })
+  assert.match(enabled.tools.get('dsh_omo_task_result').description, /Terminal snapshots may persist/u)
+  assert.match(enabled.tools.get('dsh_omo_task_list').description, /running work is not persisted or resumed/u)
+  assert.match(enabled.tools.get('dsh_omo_task').description, /configured storage backend/u)
+  assert.match(enabled.commands.get('omo').handler({ rawInput: 'status' }).text, /taskResultPersistence=enabled/u)
+  const parent = { id: 'parent-persistent-task-result', followup() {} }
+  const start = await enabled.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'Persist a terminal excerpt.' },
+    { agent: parent, signal: new AbortController().signal },
+  )
+  assert.equal(start.resultTracked, true)
+  for (let attempt = 0; attempt < 10 && rows.size === 0; attempt += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.equal(opened, true)
+  assert.equal(rows.size, 1)
+  const cleanup = enabled.effects.find(effect => effect.label === 'dsh-omo task result cache')
+  assert.ok(cleanup)
+  await cleanup.dispose()
+  assert.equal(closed, true)
+})
+
+test('model-facing task wait joins only its tracked child and caller cancellation does not stop that child', async () => {
+  let settle
+  const fixture = makeContext()
+  fixture.ctx.subagents.start = async (provider, request) => {
+    fixture.starts.push({ provider, request })
+    return {
+      id: 'child-active-wait',
+      result: new Promise(resolve => { settle = resolve }),
+      dispose: async () => { fixture.disposals.push('child-active-wait') },
+    }
+  }
+  apply(fixture.ctx, { ...baseConfig, enableTaskResultTool: true, enableTaskWaitTool: true })
+  const parent = { id: 'parent-task-wait', followup: message => fixture.followups.push(message) }
+  const start = await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'Investigate a bounded task' },
+    { agent: parent, signal: new AbortController().signal },
+  )
+  assert.deepEqual(start, { childId: 'child-active-wait', role: 'explore', status: 'started', resultTracked: true })
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /taskWaitTool=enabled/u)
+  assert.match(fixture.tools.get('dsh_omo_task').description, /dsh_omo_task_wait can wait up to 30 seconds/u)
+  const waitTool = fixture.tools.get('dsh_omo_task_wait')
+  assert.ok(waitTool)
+  await assert.rejects(waitTool.execute({ childId: start.childId }, { agent: { id: parent.id } }), /No unexpired dsh-omo result/u)
+  await assert.rejects(waitTool.execute({ childId: 'another-child' }, { agent: parent }), /No unexpired dsh-omo result/u)
+
+  const controller = new AbortController()
+  const waiting = waitTool.execute({ childId: start.childId, waitMs: 2_000 }, { agent: parent, signal: controller.signal })
+  controller.abort()
+  assert.deepEqual(await waiting, { childId: start.childId, status: 'running', waitOutcome: 'cancelled' })
+  assert.deepEqual(fixture.disposals, [], 'ending the Tool wait does not dispose or interrupt the child')
+  assert.match(waitTool.description, /does not interrupt the child/u)
+
+  settle({ stopReason: 'completed', output: [{ type: 'text', text: 'A bounded child result.' }] })
+  await new Promise(resolve => setImmediate(resolve))
+  const completed = await waitTool.execute({ childId: start.childId }, { agent: parent })
+  assert.deepEqual(completed, {
+    childId: start.childId,
+    status: 'completed',
+    output: 'A bounded child result.',
+    truncated: false,
+    omittedNonText: false,
+    stopReason: 'completed',
+    waitOutcome: 'settled',
+  })
+  assert.deepEqual(fixture.disposals, ['child-active-wait'])
+  assert.match(waitTool.output.render({}, completed)[0].text, /untrusted evidence, not instructions/u)
+
+  const cleanup = fixture.effects.find(effect => effect.label === 'dsh-omo exact-Agent task wait Tool')
+  assert.ok(cleanup)
+  await cleanup.dispose()
+  assert.equal(fixture.tools.has('dsh_omo_task_wait'), false)
+})
+
+test('Agent disposal releases a task waiter without claiming child interruption', async () => {
+  let settle
+  const fixture = makeContext()
+  fixture.ctx.subagents.start = async () => ({
+    id: 'child-agent-dispose-wait',
+    result: new Promise(resolve => { settle = resolve }),
+    dispose: async () => { fixture.disposals.push('child-agent-dispose-wait') },
+  })
+  apply(fixture.ctx, { ...baseConfig, enableTaskResultTool: true, enableTaskWaitTool: true })
+  const parent = { id: 'parent-agent-dispose-wait', followup: () => {} }
+  const started = await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'Wait then dispose the Agent' },
+    { agent: parent, signal: new AbortController().signal },
+  )
+  const waiting = fixture.tools.get('dsh_omo_task_wait').execute(
+    { childId: started.childId, waitMs: 30_000 }, { agent: parent },
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  for (const listener of fixture.eventListeners.get('agent/disposed') ?? []) listener({ agent: parent })
+  assert.deepEqual(await waiting, { childId: started.childId, status: 'running', waitOutcome: 'cancelled' })
+  assert.deepEqual(fixture.disposals, [], 'Agent disposal cancels only the waiter; task completion remains independent')
+  settle({ stopReason: 'completed', output: [{ type: 'text', text: 'Later completion.' }] })
+  await new Promise(resolve => setImmediate(resolve))
 })
 
 test('model-facing task cancellation is opt-in and exact-Agent scoped', async () => {
@@ -3613,6 +5132,121 @@ test('persistent memory close failures are logged without backend details or unl
   assert.equal(warnings.some(message => message.includes('secret backend path')), false)
 })
 
+test('cancelled one-shot startup disposes late activation before releasing capacity', async () => {
+  const fixture = makeContext({ getProvider: () => ({
+    name: 'spawn', capabilities: { depthLimit: true, agentOptions: true },
+  }) })
+  let accept
+  let releaseDispose
+  let disposalStarted = false
+  let startEntered
+  const entered = new Promise(resolve => { startEntered = resolve })
+  fixture.ctx.subagents.startActivation = () => {
+    startEntered()
+    return new Promise(resolve => { accept = resolve })
+  }
+  apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1 })
+  const parent = { id: 'late-parent', followup: message => fixture.followups.push(message) }
+  const controller = new AbortController()
+  const tool = fixture.tools.get('dsh_omo_task')
+  const pending = tool.execute({ role: 'quick', task: 'late after cancellation' }, { agent: parent, signal: controller.signal })
+  const observed = pending.then(value => ({ value }), error => ({ error }))
+  await entered
+  controller.abort(new Error('caller cancelled'))
+  accept({
+    childId: 'late-child',
+    result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'late private result' }] }),
+    dispose: () => { disposalStarted = true; return new Promise(resolve => { releaseDispose = resolve }) },
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  try {
+    assert.equal(disposalStarted, true)
+    assert.deepEqual(fixture.followups, [], 'cancelled startup must not publish the late child result')
+    await assert.rejects(tool.execute({ role: 'quick', task: 'capacity remains reserved' }, { agent: parent }), /worker limit reached/u)
+  } finally {
+    releaseDispose?.()
+  }
+  const result = await observed
+  assert.ok(result.error, 'cancelled startup must not return a started descriptor')
+  assert.match(result.error.message, /cancel/u)
+})
+
+test('failed disposal of a cancelled late activation keeps worker capacity reserved', async () => {
+  const fixture = makeContext({ getProvider: () => ({ name: 'spawn', capabilities: { depthLimit: true } }) })
+  let accept
+  let entered
+  const started = new Promise(resolve => { entered = resolve })
+  fixture.ctx.subagents.startActivation = () => { entered(); return new Promise(resolve => { accept = resolve }) }
+  const warnings = []
+  fixture.ctx.logger.warn = text => warnings.push(text)
+  apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1 })
+  const parent = { id: 'failed-late-parent', followup: message => fixture.followups.push(message) }
+  const controller = new AbortController()
+  const tool = fixture.tools.get('dsh_omo_task')
+  const pending = tool.execute({ role: 'quick', task: 'late cleanup fails' }, { agent: parent, signal: controller.signal })
+  const observed = pending.then(value => ({ value }), error => ({ error }))
+  await started
+  controller.abort()
+  accept({ childId: 'late-failed', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose: async () => { const error = new Error('private backend details'); error.name = 'secret-name\nforged-log'; throw error } })
+  const result = await observed
+  assert.match(result.error?.message ?? '', /Disposal failed; this plugin instance retains the worker capacity/u)
+  assert.doesNotMatch(result.error.message, /private backend details/u)
+  assert.ok(warnings.some(message => message === 'dsh-omo could not dispose a late specialist activation'))
+  assert.doesNotMatch(warnings.join('\n'), /secret-name|forged-log|private backend details/u)
+  assert.deepEqual(fixture.followups, [])
+  await assert.rejects(tool.execute({ role: 'quick', task: 'must not over-admit' }, { agent: parent }), /worker limit reached/u)
+})
+
+for (const outcome of ['completed', 'failed']) {
+  test(`agent disposal suppresses late one-shot ${outcome} results without an agents lookup`, async () => {
+    let finish, reject
+    const fixture = makeContext()
+    fixture.ctx.subagents.start = async () => ({
+      id: 'no-agents-child',
+      result: new Promise((resolve, rejectPromise) => { finish = resolve; reject = rejectPromise }),
+      dispose: async () => {},
+    })
+    apply(fixture.ctx, { ...baseConfig, enableTaskResultTool: true })
+    const parent = { id: 'parent-without-agents', followup: message => fixture.followups.push(message) }
+    await fixture.tools.get('dsh_omo_task').execute(
+      { role: 'quick', task: 'keep result private after parent disposal' },
+      { agent: parent, signal: new AbortController().signal },
+    )
+    for (const listener of fixture.eventListeners.get('agent/disposed') ?? []) listener({ agent: parent })
+    if (outcome === 'completed') finish({ stopReason: 'completed', output: [{ type: 'text', text: 'stale private result' }] })
+    else reject(new Error('private failure'))
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(fixture.followups, [])
+    await assert.rejects(
+      fixture.tools.get('dsh_omo_task_result').execute({ childId: 'no-agents-child' }, { agent: parent }),
+      /No unexpired dsh-omo result/u,
+    )
+  })
+}
+
+test('legacy one-shot also disposes a late activation after caller cancellation', async () => {
+  const fixture = makeContext()
+  let accept
+  let entered
+  const started = new Promise(resolve => { entered = resolve })
+  fixture.ctx.subagents.start = () => { entered(); return new Promise(resolve => { accept = resolve }) }
+  apply(fixture.ctx, baseConfig)
+  const parent = { id: 'legacy-late-parent', followup: message => fixture.followups.push(message) }
+  const controller = new AbortController()
+  const pending = fixture.tools.get('dsh_omo_task').execute(
+    { role: 'quick', task: 'legacy late after cancellation' }, { agent: parent, signal: controller.signal },
+  )
+  const observed = pending.then(value => ({ value }), error => ({ error }))
+  await started
+  controller.abort()
+  let disposals = 0
+  accept({ id: 'legacy-late-child', result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'private' }] }), dispose: async () => { disposals += 1 } })
+  const result = await observed
+  assert.ok(result.error)
+  assert.equal(disposals, 1)
+  assert.deepEqual(fixture.followups, [])
+})
+
 test('uses the current Host startActivation request and preserves the caller-owned result relay', async () => {
   const activationSpecs = []
   const fixture = makeContext({
@@ -3720,6 +5354,433 @@ test('passes registered custom agent presets only as request.agentPreset on curr
   assert.equal(Object.hasOwn(spec.request, 'toolFilter'), false)
   assert.ok(spec.request.prompt[0].text.includes('Use the selected trusted preset.'))
   assert.ok(spec.request.prompt[0].text.includes('Review this change.'))
+})
+
+test('opt-in agent-preset preflight resolves the selected preset before current Host activation', async () => {
+  const events = []
+  const fixture = makeContext({
+    services: {
+      agentPresets: {
+        resolve: async id => { events.push(`resolve:${id}`); return { id } },
+      },
+    },
+    getProvider: () => ({
+      name: 'spawn',
+      capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true },
+    }),
+  })
+  fixture.ctx.subagents.startActivation = async spec => {
+    events.push('activate')
+    return {
+      childId: 'child-preset-preflight',
+      result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'Preflighted result.' }] }),
+      dispose: async () => {},
+    }
+  }
+  const presetConfig = {
+    ...baseConfig,
+    userAgents: [{ name: 'preset-auditor', agentPreset: 'trusted-reviewer-v2' }],
+  }
+  const baseline = makeContext({ getProvider: () => ({
+    name: 'spawn',
+    capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true },
+  }) })
+  apply(baseline.ctx, presetConfig)
+  apply(fixture.ctx, { ...presetConfig, enableAgentPresetPreflight: true })
+  const baselineTool = baseline.tools.get('dsh_omo_task')
+  const preflightTool = fixture.tools.get('dsh_omo_task')
+  assert.equal(preflightTool.name, baselineTool.name)
+  const preflightHint = ' Preset preflights separately fail busy at 64 unsettled Host calls.'
+  assert.ok(preflightTool.description.includes(preflightHint))
+  assert.equal(preflightTool.description.replace(preflightHint, ''), baselineTool.description)
+  assert.deepEqual(preflightTool.parameters, baselineTool.parameters)
+  assert.deepEqual(preflightTool.output.schema, baselineTool.output.schema)
+
+  const status = fixture.commands.get('omo').handler({ rawInput: 'status' })
+  assert.match(status.text, /agentPresetPreflight=enabled/u)
+  assert.deepEqual(events, [], 'status must not resolve preset business state')
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'preset-auditor', task: 'Review this change.' },
+    { agent: { id: 'parent-preset-preflight', followup() {} }, signal: new AbortController().signal },
+  )
+  assert.deepEqual(events, ['resolve:trusted-reviewer-v2', 'activate'])
+})
+
+test('agent-preset preflight rejects unresolved and failed compositions before child activation', async () => {
+  const cases = [
+    {
+      name: 'unknown preset',
+      resolve: async () => { throw new Error('private registry diagnostic') },
+      message: /could not be resolved before child activation/u,
+      hidden: 'private registry diagnostic',
+    },
+    {
+      name: 'failed composition',
+      resolve: async id => ({ id, broken: 'private activation diagnostic' }),
+      message: /composition has a DSH activation failure/u,
+      hidden: 'private activation diagnostic',
+    },
+    {
+      name: 'mismatched identity',
+      resolve: async () => ({ id: 'different-preset' }),
+      message: /did not resolve to the requested identity/u,
+    },
+    {
+      name: 'malformed metadata getter',
+      resolve: async id => Object.defineProperty({ id }, 'broken', {
+        get() { throw new Error('private metadata diagnostic') },
+      }),
+      message: /resolved to invalid DSH metadata/u,
+      hidden: 'private metadata diagnostic',
+    },
+  ]
+  for (const scenario of cases) {
+    let activationCalls = 0
+    const fixture = makeContext({
+      services: { agentPresets: { resolve: scenario.resolve } },
+      getProvider: () => ({
+        name: 'spawn',
+        capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true },
+      }),
+    })
+    fixture.ctx.subagents.startActivation = async () => { activationCalls += 1 }
+    apply(fixture.ctx, {
+      ...baseConfig,
+      enableAgentPresetPreflight: true,
+      userAgents: [{ name: 'preset-auditor', agentPreset: 'trusted-reviewer-v2' }],
+    })
+    await assert.rejects(
+      fixture.tools.get('dsh_omo_task').execute(
+        { role: 'preset-auditor', task: 'Review this change.' },
+        { agent: { id: `parent-${scenario.name}`, followup() {} }, signal: new AbortController().signal },
+      ),
+      error => {
+        assert.match(error.message, scenario.message)
+        if (scenario.hidden) assert.doesNotMatch(error.message, new RegExp(scenario.hidden, 'u'))
+        return true
+      },
+    )
+    assert.equal(activationCalls, 0)
+  }
+})
+
+test('agent-preset preflight is caller-cancellable and requires the optional resolver when enabled', async () => {
+  let started
+  const startedPromise = new Promise(resolve => { started = resolve })
+  let activationCalls = 0
+  const fixture = makeContext({
+    services: { agentPresets: { resolve: () => { started(); return new Promise(() => {}) } } },
+    getProvider: () => ({
+      name: 'spawn',
+      capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true },
+    }),
+  })
+  fixture.ctx.subagents.startActivation = async () => { activationCalls += 1 }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableAgentPresetPreflight: true,
+    userAgents: [{ name: 'preset-auditor', agentPreset: 'trusted-reviewer-v2' }],
+  })
+  const controller = new AbortController()
+  const pending = fixture.tools.get('dsh_omo_task').execute(
+    { role: 'preset-auditor', task: 'Review this change.' },
+    { agent: { id: 'parent-preset-preflight-cancel', followup() {} }, signal: controller.signal },
+  )
+  await startedPromise
+  controller.abort(new Error('caller cancelled preset preflight'))
+  await assert.rejects(pending, /caller cancelled preset preflight/u)
+  assert.equal(activationCalls, 0)
+
+  const missingResolver = makeContext()
+  assert.throws(
+    () => apply(missingResolver.ctx, { ...baseConfig, enableAgentPresetPreflight: true }),
+    /enableAgentPresetPreflight requires DSH agentPresets\.resolve/u,
+  )
+  assert.equal(missingResolver.tools.size, 0)
+})
+
+test('agent-preset preflight leases 64 unsettled Host promises per plugin instance', async () => {
+  const hosts = []
+  let activations = 0
+  const provider = () => ({
+    name: 'spawn',
+    capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true },
+  })
+  const config = {
+    ...baseConfig,
+    maxConcurrent: 1,
+    enableAgentPresetPreflight: true,
+    userAgents: [{ name: 'preset-auditor', agentPreset: 'trusted-reviewer-v2' }],
+  }
+  const fixture = makeContext({
+    services: { agentPresets: { resolve: id => new Promise((resolve, reject) => {
+      hosts.push({ id, resolve, reject })
+    }) } },
+    getProvider: provider,
+  })
+  fixture.ctx.subagents.startActivation = async () => { activations += 1 }
+  apply(fixture.ctx, config)
+  const execute = caller => fixture.tools.get('dsh_omo_task').execute(
+    { role: 'preset-auditor', task: 'Review this change.' },
+    { agent: { id: 'parent-preset-leases', followup() {} }, signal: caller.signal },
+  )
+  const turn = () => new Promise(resolve => setImmediate(resolve))
+  const promptly = async promise => {
+    let timer
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('local request did not settle promptly')), 1000) }),
+      ])
+    } finally { clearTimeout(timer) }
+  }
+  const callers = []
+  const outcomes = []
+  const launch = () => {
+    const caller = new AbortController()
+    callers.push(caller)
+    const outcome = execute(caller).then(value => ({ value }), error => ({ error }))
+    outcomes.push(outcome)
+    return { caller, outcome }
+  }
+  try {
+    for (let i = 0; i < 64; i += 1) {
+      const { caller, outcome } = launch()
+      await turn()
+      assert.equal(hosts.length, i + 1, 'each one-shot request reaches Host')
+      const reason = new Error(`caller cancelled ${i}`)
+      caller.abort(reason)
+      assert.strictEqual((await promptly(outcome)).error, reason)
+      assert.equal(activations, 0, 'cancelled requests never create children')
+    }
+
+    const overflow = launch()
+    await turn()
+    assert.equal(hosts.length, 64, 'the 65th request must not enter Host')
+    const busy = await promptly(overflow.outcome)
+    assert.match(busy.error?.message ?? '', /busy/iu)
+    assert.equal(activations, 0)
+
+    let otherCalls = 0
+    const other = makeContext({
+      services: { agentPresets: { resolve: async id => { otherCalls += 1; return { id } } } },
+      getProvider: provider,
+    })
+    apply(other.ctx, config)
+    await promptly(other.tools.get('dsh_omo_task').execute(
+      { role: 'preset-auditor', task: 'Use the independent instance.' },
+      { agent: { id: 'other-preset-parent', followup() {} }, signal: new AbortController().signal },
+    ))
+    assert.equal(otherCalls, 1, 'another plugin instance has independent capacity')
+    assert.equal(other.starts.length, 1)
+
+    hosts[0].resolve({ id: hosts[0].id })
+    await turn()
+    const afterResolve = launch()
+    await turn()
+    assert.equal(hosts.length, 65, 'late resolve releases one lease')
+    afterResolve.caller.abort(new Error('cancel after late resolve'))
+    assert.ok((await promptly(afterResolve.outcome)).error)
+
+    hosts[1].reject(new Error('private late preset Host failure'))
+    await turn()
+    const afterReject = launch()
+    await turn()
+    assert.equal(hosts.length, 66, 'late reject releases one lease')
+    hosts[65].reject(new Error('private current preset Host failure'))
+    const failure = await promptly(afterReject.outcome)
+    assert.match(failure.error?.message ?? '', /could not be resolved before child activation/u)
+    assert.doesNotMatch(failure.error.message, /private (late|current) preset Host failure/u)
+    assert.equal(activations, 0)
+    await turn() // A late Host rejection must not become an unhandled rejection.
+  } finally {
+    for (const caller of callers) caller.abort(new Error('test cleanup'))
+    for (const host of hosts) host.resolve({ id: host.id })
+    await Promise.all(outcomes)
+    await turn()
+  }
+})
+
+test('agent-preset preflight times out at five seconds while retaining Host leases until late settlement', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const hosts = []
+  let activations = 0
+  const fixture = makeContext({
+    services: { agentPresets: { resolve: id => new Promise((resolve, reject) => { hosts.push({ id, resolve, reject }) }) } },
+    getProvider: () => ({ name: 'spawn', capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true } }),
+  })
+  fixture.ctx.subagents.startActivation = async () => { activations += 1 }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 1,
+    enableAgentPresetPreflight: true,
+    userAgents: [{ name: 'preset-auditor', agentPreset: 'trusted-reviewer-v2' }],
+  })
+  const turn = () => new Promise(resolve => setImmediate(resolve))
+  const outcomes = []
+  const launch = () => {
+    const caller = new AbortController()
+    const outcome = fixture.tools.get('dsh_omo_task').execute(
+      { role: 'preset-auditor', task: 'Review this change.' },
+      { agent: { id: 'parent-preset-timeout', followup() {} }, signal: caller.signal },
+    ).then(value => ({ value }), error => ({ error }))
+    outcomes.push(outcome)
+    return { caller, outcome }
+  }
+  try {
+    for (let i = 0; i < 64; i += 1) {
+      const { outcome } = launch()
+      await turn()
+      assert.equal(hosts.length, i + 1)
+      if (i === 0) {
+        let settled = false
+        void outcome.then(() => { settled = true })
+        t.mock.timers.tick(4999)
+        await turn()
+        assert.equal(settled, false, 'the default timeout must not fire early')
+        t.mock.timers.tick(1)
+      } else {
+        t.mock.timers.tick(5000)
+      }
+      assert.equal((await outcome).error?.message, 'Specialist "preset-auditor" agentPreset resolution preflight timed out.')
+    }
+    const overflow = launch()
+    assert.equal((await overflow.outcome).error?.message, 'Agent preset preflight is busy (64 unsettled Host calls).')
+    assert.equal(hosts.length, 64)
+    assert.equal(activations, 0)
+
+    hosts[0].resolve({ id: hosts[0].id })
+    await turn()
+    const afterResolve = launch()
+    await turn()
+    assert.equal(hosts.length, 65, 'late resolution releases a lease')
+    const reason = new Error('caller signal after late resolve')
+    afterResolve.caller.abort(reason)
+    assert.strictEqual((await afterResolve.outcome).error, reason)
+
+    hosts[1].reject(new Error('private late Host rejection'))
+    await turn()
+    const afterReject = launch()
+    await turn()
+    assert.equal(hosts.length, 66, 'late rejection releases a lease')
+    hosts[65].reject(new Error('private current Host rejection'))
+    assert.equal((await afterReject.outcome).error?.message, 'Specialist "preset-auditor" agentPreset could not be resolved before child activation.')
+    assert.equal(activations, 0)
+    await turn()
+  } finally {
+    for (const host of hosts) host.resolve({ id: host.id })
+    await Promise.all(outcomes)
+    await turn()
+  }
+})
+
+test('agent-preset Host throws and busy-named errors are sanitized and allow retries', async () => {
+  const busyNamed = new Error('private busy diagnostic')
+  busyNamed.name = 'PresetPreflightBusyError'
+  const failures = [
+    () => { throw new Error('private synchronous diagnostic') },
+    () => Promise.reject(new Error('private')),
+    () => Promise.reject(busyNamed),
+    () => { throw busyNamed },
+  ]
+  let calls = 0
+  const fixture = makeContext({
+    services: { agentPresets: { resolve: id => {
+      const failure = failures[calls++]
+      return failure ? failure() : Promise.resolve({ id })
+    } } },
+    getProvider: () => ({ name: 'spawn', capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true } }),
+  })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 1,
+    enableAgentPresetPreflight: true,
+    userAgents: [{ name: 'preset-auditor', agentPreset: 'trusted-reviewer-v2' }],
+  })
+  const execute = signal => fixture.tools.get('dsh_omo_task').execute(
+    { role: 'preset-auditor', task: 'Review this change.' },
+    { agent: { id: 'parent-preset-host-errors', followup() {} }, signal },
+  )
+  for (let i = 0; i < failures.length; i += 1) {
+    await assert.rejects(execute(new AbortController().signal), error => {
+      assert.equal(error.message, 'Specialist "preset-auditor" agentPreset could not be resolved before child activation.')
+      return true
+    })
+    assert.equal(calls, i + 1)
+    assert.equal(fixture.starts.length, 0)
+  }
+  await execute(new AbortController().signal)
+  assert.equal(calls, failures.length + 1)
+  assert.equal(fixture.starts.length, 1, 'a later request can activate')
+})
+
+test('agent-preset preflight covers legacy one-shot and continuable launch paths', async () => {
+  const legacyEvents = []
+  const legacy = makeContext({
+    services: { agentPresets: { resolve: async id => { legacyEvents.push(`resolve:${id}`); return { id } } } },
+  })
+  const legacyStart = legacy.ctx.subagents.start
+  legacy.ctx.subagents.start = async (...args) => { legacyEvents.push('start'); return await legacyStart(...args) }
+  apply(legacy.ctx, {
+    ...baseConfig,
+    enableAgentPresetPreflight: true,
+    roleRoutes: [{ role: 'reviewer', agentPreset: 'trusted-reviewer-v2' }],
+  })
+  await legacy.tools.get('dsh_omo_task').execute(
+    { role: 'reviewer', task: 'Run a bounded review.' },
+    { agent: { id: 'parent-legacy-preflight', followup() {} }, signal: new AbortController().signal },
+  )
+  assert.deepEqual(legacyEvents, ['resolve:trusted-reviewer-v2', 'start'])
+
+  const continuableEvents = []
+  const continuable = makeContext({
+    services: { agentPresets: { resolve: async id => { continuableEvents.push(`resolve:${id}`); return { id } } } },
+  })
+  const startContinuable = continuable.ctx.subagents.startContinuable
+  continuable.ctx.subagents.startContinuable = async spec => {
+    continuableEvents.push('startContinuable')
+    return await startContinuable(spec)
+  }
+  apply(continuable.ctx, {
+    ...baseConfig,
+    enableAgentPresetPreflight: true,
+    enableContinuableTasks: true,
+    roleRoutes: [{ role: 'reviewer', agentPreset: 'trusted-reviewer-v2' }],
+  })
+  await continuable.tools.get('dsh_omo_task_continuable').execute(
+    { role: 'reviewer', task: 'Continue a bounded review.' },
+    { agent: { id: 'parent-continuable-preflight' }, signal: new AbortController().signal },
+  )
+  assert.deepEqual(continuableEvents, ['resolve:trusted-reviewer-v2', 'startContinuable'])
+})
+
+test('continuable launch rechecks caller cancellation after prompt construction with a selected preset', async () => {
+  let resolverCalls = 0
+  const fixture = makeContext({
+    services: { agentPresets: { resolve: async id => { resolverCalls += 1; return { id } } } },
+  })
+  let startCalls = 0
+  const startContinuable = fixture.ctx.subagents.startContinuable
+  fixture.ctx.subagents.startContinuable = async spec => {
+    startCalls += 1
+    return await startContinuable(spec)
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    enableAgentPresetPreflight: true,
+    roleRoutes: [{ role: 'reviewer', agentPreset: 'trusted-reviewer-v2' }],
+  })
+
+  const controller = new AbortController()
+  const pending = fixture.tools.get('dsh_omo_task_continuable').execute(
+    { role: 'reviewer', task: 'Do not launch after late cancellation.' },
+    { agent: { id: 'parent-continuable-late-cancel' }, signal: controller.signal },
+  )
+  queueMicrotask(() => controller.abort(new Error('caller cancelled during prompt construction')))
+  await assert.rejects(pending, /caller cancelled during prompt construction/u)
+  assert.equal(resolverCalls, 0, 'cancellation during prompt construction should precede and suppress preset resolution')
+  assert.equal(startCalls, 0)
 })
 
 test('rejects a registered custom preset before activation when the provider lacks capability', async () => {
@@ -3920,7 +5981,7 @@ test('leaves configured prompt-file references literal and performs no reads by 
   )
   assert.match(activationSpec.request.prompt[0].text, /file:\/\/prompts\/role\.md/u)
   assert.deepEqual(reads, [])
-  assert.equal(agentLookups, 0)
+  assert.equal(agentLookups, 7, 'preflight, admission, startup, and result publication recheck the exact live parent without filesystem reads')
   assert.equal(sessionLookups, 0)
 })
 
@@ -4043,6 +6104,184 @@ test('releases current-API launch reservations after failure and rejects pre-can
   assert.equal(canceledCalls, 0, 'cancellation before publication does not call startActivation')
 })
 
+test('dedicated call-agent Tool is default-off, role-scoped, and shares one-shot result ownership', async () => {
+  const inactive = makeContext()
+  apply(inactive.ctx, baseConfig)
+  assert.equal(inactive.tools.has('dsh_omo_call_agent'), false)
+
+  const activationSpecs = []
+  let settleResult
+  const result = new Promise(resolve => { settleResult = resolve })
+  const fixture = makeContext({
+    getProvider: () => ({ name: 'spawn', capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true } }),
+  })
+  const hostCatalogCalls = []
+  fixture.ctx.subagents.listChildren = async (...args) => {
+    hostCatalogCalls.push({ method: 'listChildren', args })
+    return [{ id: 'host-catalog-child', createdAt: 0, mode: 'subagent', label: 'host-visible-only' }]
+  }
+  fixture.ctx.subagents.listDescendants = async (...args) => {
+    hostCatalogCalls.push({ method: 'listDescendants', args })
+    return [
+      { kind: 'child', id: 'child-call-agent', activity: 'inactive', hasChildren: false, parentId: 'parent-call-agent', depth: 1, mode: 'one-shot' },
+      { kind: 'child', id: 'untracked-call-agent', activity: 'running', hasChildren: false, parentId: 'parent-call-agent', depth: 1, mode: 'one-shot' },
+      { kind: 'child', id: 'child-call-agent', activity: 'running', hasChildren: false, parentId: 'child-call-agent', depth: 2, mode: 'one-shot' }
+    ]
+  }
+  fixture.ctx.subagents.startActivation = async spec => {
+    activationSpecs.push(spec)
+    return {
+      childId: 'child-call-agent',
+      result,
+      dispose: async () => { fixture.disposals.push('child-call-agent') },
+    }
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableCallOmoAgentTool: true,
+    enableTaskResultTool: true,
+    enableTaskWaitTool: true,
+    enableTaskCancelTool: true,
+    categoryRoutes: [{ name: 'research', provider: 'category-provider', model: 'category-model' }],
+    roleRoutes: [{ role: 'explore', provider: 'route-provider', model: 'route-model' }],
+  })
+
+  const tool = fixture.tools.get('dsh_omo_call_agent')
+  assert.ok(tool)
+  assert.deepEqual(tool.parameters.properties.role.enum, ['explore', 'librarian'])
+  assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ['category', 'role', 'task'])
+  assert.deepEqual(tool.parameters.properties.category.enum, ['research'])
+  assert.equal(tool.parameters.properties.session_id, undefined)
+  assert.equal(tool.parameters.properties.run_in_background, undefined)
+  assert.match(tool.description, /session_id and run_in_background are not supported/u)
+  const statusText = fixture.commands.get('omo').handler({ rawInput: 'status' }).text
+  assert.match(statusText, /callOmoAgentTool=enabled/u)
+  assert.match(statusText, /taskResultTool=enabled; taskResultPersistence=disabled; taskListTool=enabled/u)
+
+  const parent = { id: 'parent-call-agent', followup: message => fixture.followups.push(message) }
+  const signal = new AbortController().signal
+  await assert.rejects(tool.execute({ role: 'security', task: 'not allowed' }, { agent: parent, signal }), /invalid arguments|only supports active built-in/u)
+  await assert.rejects(tool.execute({ role: 'explore', task: 'not allowed', session_id: 'existing-child' }, { agent: parent, signal }), /does not resume a session/u)
+  await assert.rejects(tool.execute({ role: 'explore', task: 'not allowed', run_in_background: true }, { agent: parent, signal }), /does not resume a session/u)
+  assert.equal(activationSpecs.length, 0)
+
+  const started = await tool.execute({ role: 'explore', task: 'Research the current Host API', category: 'research' }, { agent: parent, signal })
+  assert.deepEqual(started, { childId: 'child-call-agent', role: 'explore', status: 'started', resultTracked: true })
+  assert.equal(activationSpecs.length, 1)
+  assert.strictEqual(activationSpecs[0].request.parent, parent)
+  assert.equal(activationSpecs[0].provider, 'spawn')
+  assert.deepEqual(activationSpecs[0].request.agentOptions, { provider: 'route-provider', model: 'route-model' })
+  assert.equal(activationSpecs[0].delivery, 'caller')
+
+  const taskListTool = fixture.tools.get('dsh_omo_task_list')
+  assert.ok(taskListTool)
+  const runningChildren = await taskListTool.execute({}, { agent: parent })
+  assert.deepEqual(runningChildren, { children: [{ childId: 'child-call-agent', status: 'running' }] })
+  assert.deepEqual(Object.keys(runningChildren.children[0]).sort(), ['childId', 'status'])
+  assert.deepEqual(hostCatalogCalls, [], 'default task listing remains local-only')
+  const residentChildren = await taskListTool.execute({ includeResidency: true }, { agent: parent, signal })
+  assert.deepEqual(residentChildren, {
+    children: [{ childId: 'child-call-agent', status: 'running', residentActivity: 'inactive' }],
+    residencyAvailable: true,
+  })
+  assert.equal(hostCatalogCalls.length, 1)
+  assert.equal(hostCatalogCalls[0].method, 'listDescendants')
+  assert.equal(hostCatalogCalls[0].args[0], parent.id)
+  assert.ok(hostCatalogCalls[0].args[1] instanceof AbortSignal)
+  assert.deepEqual(await taskListTool.execute({}, { agent: { id: parent.id } }), { children: [] })
+
+  const cancelTool = fixture.tools.get('dsh_omo_task_cancel')
+  assert.deepEqual(await cancelTool.execute({ childId: 'child-call-agent' }, { agent: parent, signal }), {
+    childId: 'child-call-agent', status: 'interrupt-requested',
+  })
+  assert.strictEqual(fixture.interrupts[0].authority.agent, parent)
+  const resultTool = fixture.tools.get('dsh_omo_task_result')
+  await assert.rejects(resultTool.execute({ childId: 'child-call-agent' }, { agent: { id: parent.id } }), /No unexpired dsh-omo result/u)
+  const waitPending = fixture.tools.get('dsh_omo_task_wait').execute(
+    { childId: 'child-call-agent', waitMs: 1_000 },
+    { agent: parent, signal: new AbortController().signal },
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  settleResult({ stopReason: 'completed', output: [{ type: 'text', text: 'Explore result.' }] })
+  assert.deepEqual(await waitPending, {
+    childId: 'child-call-agent', status: 'completed', output: 'Explore result.', truncated: false,
+    omittedNonText: false, stopReason: 'completed', waitOutcome: 'settled',
+  })
+  assert.deepEqual(await resultTool.execute({ childId: 'child-call-agent' }, { agent: parent }), {
+    childId: 'child-call-agent', status: 'completed', output: 'Explore result.', truncated: false, omittedNonText: false, stopReason: 'completed',
+  })
+  assert.deepEqual(await taskListTool.execute({}, { agent: parent }), {
+    children: [{ childId: 'child-call-agent', status: 'completed' }],
+  })
+  assert.deepEqual(await taskListTool.execute({ includeResidency: true }, { agent: parent, signal }), {
+    children: [{ childId: 'child-call-agent', status: 'completed' }],
+  })
+  assert.equal(hostCatalogCalls.length, 1, 'only the explicit running-child residency request queries Host descendants')
+})
+
+test('dedicated call-agent Tool reflects disabled active roles and disappears when both are disabled', async () => {
+  const onlyLibrarian = makeContext()
+  apply(onlyLibrarian.ctx, { ...baseConfig, enableCallOmoAgentTool: true, disabledOmoRoles: ['explore'] })
+  const tool = onlyLibrarian.tools.get('dsh_omo_call_agent')
+  assert.ok(tool)
+  assert.deepEqual(tool.parameters.properties.role.enum, ['librarian'])
+  await assert.rejects(tool.execute({ role: 'explore', task: 'not available' }, { agent: { id: 'parent-disabled-role' } }), /invalid arguments|only supports active built-in/u)
+  assert.equal(onlyLibrarian.starts.length, 0)
+
+  const none = makeContext()
+  apply(none.ctx, { ...baseConfig, enableCallOmoAgentTool: true, disabledOmoRoles: ['explore', 'librarian'] })
+  assert.equal(none.tools.has('dsh_omo_call_agent'), false)
+  assert.match(none.commands.get('omo').handler({ rawInput: 'status' }).text, /callOmoAgentTool=disabled/u)
+})
+
+test('dedicated call-agent Tool shares concurrency and fail-closed launch preflights', async () => {
+  const activationSpecs = []
+  let settleResult
+  const fixture = makeContext({
+    getProvider: () => ({ name: 'spawn', capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true } }),
+  })
+  fixture.ctx.subagents.startActivation = async spec => {
+    activationSpecs.push(spec)
+    return {
+      childId: 'child-call-agent-capacity',
+      result: new Promise(resolve => { settleResult = resolve }),
+      dispose: async () => {},
+    }
+  }
+  apply(fixture.ctx, { ...baseConfig, enableCallOmoAgentTool: true, maxConcurrent: 1 })
+  const tool = fixture.tools.get('dsh_omo_call_agent')
+  const parent = { id: 'parent-call-agent-capacity', followup: () => {} }
+  await tool.execute({ role: 'explore', task: 'Hold one slot' }, { agent: parent, signal: new AbortController().signal })
+  await assert.rejects(tool.execute({ role: 'librarian', task: 'Exceed the slot cap' }, { agent: parent, signal: new AbortController().signal }), /one-shot worker limit reached/u)
+  assert.equal(activationSpecs.length, 1)
+  settleResult({ stopReason: 'completed', output: [] })
+  await new Promise(resolve => setImmediate(resolve))
+
+  let canceledStarts = 0
+  const canceled = makeContext({
+    getProvider: () => ({ name: 'spawn', capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true } }),
+  })
+  canceled.ctx.subagents.startActivation = async () => { canceledStarts += 1; throw new Error('must not start') }
+  apply(canceled.ctx, { ...baseConfig, enableCallOmoAgentTool: true })
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(canceled.tools.get('dsh_omo_call_agent').execute(
+    { role: 'explore', task: 'Respect cancellation' },
+    { agent: { id: 'parent-call-agent-canceled' }, signal: controller.signal },
+  ), /abort|cancel/u)
+  assert.equal(canceledStarts, 0)
+
+  let unsupportedStarts = 0
+  const unsupported = makeContext({ getProvider: () => ({ name: 'spawn', capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: false } }) })
+  unsupported.ctx.subagents.startActivation = async () => { unsupportedStarts += 1; throw new Error('must not start') }
+  apply(unsupported.ctx, { ...baseConfig, enableCallOmoAgentTool: true })
+  await assert.rejects(unsupported.tools.get('dsh_omo_call_agent').execute(
+    { role: 'librarian', task: 'Respect provider capabilities' },
+    { agent: { id: 'parent-call-agent-unsupported' }, signal: new AbortController().signal },
+  ), /does not support the configured maxDepth/u)
+  assert.equal(unsupportedStarts, 0)
+})
+
 test('fails closed when current startActivation cannot enforce filters or requested capabilities', async () => {
   const currentProvider = capabilities => () => ({ name: 'spawn', capabilities })
   const filtered = makeContext({ getProvider: currentProvider({ depthLimit: true, agentOptions: true }) })
@@ -4089,17 +6328,32 @@ test('fails closed when current startActivation cannot enforce filters or reques
 })
 
 test('rejects current-API persona and continuable configurations before registration', () => {
+  const personaFileReads = []
+  const personaFs = makeProjectAgentFs({ onRead: filePath => personaFileReads.push(filePath) })
+  const currentParent = { id: 'parent-current-persona' }
+  let currentActivations = 0
   const current = makeContext({
+    fs: personaFs.fs,
+    services: {
+      agents: { get: id => id === currentParent.id ? currentParent : undefined },
+      sessions: { get: id => id === currentParent.id ? { header: { id, cwd: personaFs.cwd } } : undefined },
+    },
     getProvider: () => ({ capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true } }),
   })
-  current.ctx.subagents.startActivation = async () => {}
+  current.ctx.subagents.startActivation = async () => { currentActivations += 1 }
   current.ctx.subagents.startContinuable = undefined
 
   assert.throws(
-    () => apply(current.ctx, { ...baseConfig, userAgents: [{ name: 'custom-reviewer', prompt: 'Review carefully.' }] }),
+    () => apply(current.ctx, {
+      ...baseConfig,
+      enablePromptFileExpansion: true,
+      userAgents: [{ name: 'custom-reviewer', prompt: 'file://.claude/agents/repo-auditor.md' }],
+    }),
     /userAgents with prompt personas require a per-request persona/u,
   )
   assert.equal(current.tools.size, 0)
+  assert.deepEqual(personaFileReads, [], 'persona files must not be expanded into task or system prompt text')
+  assert.equal(currentActivations, 0, 'a missing persona contract must fail before child activation')
 
   const currentPreset = makeContext({
     getProvider: () => ({ capabilities: { agentOptions: true, agentPreset: true, outputSchema: true, depthLimit: true } }),
@@ -4742,6 +6996,38 @@ test('requires exact Agent, Session, Commands, and filesystem APIs when project 
   assert.equal(fixture.commands.size, 0)
 })
 
+test('project-command watching requires the project-command adapter opt-in', () => {
+  const fixture = makeContext()
+  assert.throws(() => apply(fixture.ctx, { ...baseConfig, enableProjectCommandWatch: true }), /enableProjectCommandWatch requires enableProjectCommands/u)
+  assert.equal(fixture.tools.size, 0)
+  assert.equal(fixture.commands.size, 0)
+})
+
+test('project-root command discovery requires both the base adapter and one explicit root', () => {
+  const disabledBase = makeContext()
+  assert.throws(() => apply(disabledBase.ctx, {
+    ...baseConfig,
+    enableProjectRootCommands: true,
+    projectCommandsRoot: '/workspace/project',
+  }), /enableProjectRootCommands requires enableProjectCommands/u)
+  assert.equal(disabledBase.commands.size, 0)
+
+  const missingRoot = makeContext()
+  assert.throws(() => apply(missingRoot.ctx, {
+    ...baseConfig,
+    enableProjectCommands: true,
+    enableProjectRootCommands: true,
+  }), /enableProjectRootCommands requires projectCommandsRoot/u)
+  assert.equal(missingRoot.commands.size, 0)
+
+  const unpairedRoot = makeContext()
+  assert.throws(() => apply(unpairedRoot.ctx, {
+    ...baseConfig,
+    projectCommandsRoot: '/workspace/project',
+  }), /projectCommandsRoot requires enableProjectRootCommands/u)
+  assert.equal(unpairedRoot.commands.size, 0)
+})
+
 test('rejects reserved run_code in category and role filters before registering tools', () => {
   const invalidConfigs = [
     { categoryRoutes: [{ name: 'allow-run-code', provider: 'p', model: 'm', tools: { run_code: true } }] },
@@ -4844,6 +7130,514 @@ test('forwards bounded role promptAppend to one-shot and continuable task prompt
 
   await oneShot.execute({ role: 'explore', task: 'Explore without appended guidance' }, { agent: parent, signal })
   assert.doesNotMatch(fixture.starts[1].request.prompt[0].text, /Additional role guidance/u)
+})
+
+test('one-shot task skill loading is opt-in and leaves the default prompt unchanged', async t => {
+  let skillReads = 0
+  let sessionReads = 0
+  const fixture = makeContext({
+    skillGet: async () => { skillReads += 1; throw new Error('must not load skills') },
+    services: { sessions: { get() { sessionReads += 1; return undefined } } },
+  })
+  apply(fixture.ctx, baseConfig)
+  const task = 'Explore the narrow regression'
+  const parent = { id: 'parent-agent' }
+  const signal = new AbortController().signal
+
+  await fixture.tools.get('dsh_omo_task').execute({ role: 'explore', task }, { agent: parent, signal })
+
+  assert.equal(fixture.starts[0].request.prompt[0].text, buildWorkerPrompt('explore', task))
+  assert.equal(skillReads, 0)
+  assert.equal(sessionReads, 0)
+  const tool = fixture.tools.get('dsh_omo_task')
+  const schema = tool.parameters.properties.load_skills
+  assert.equal(schema.type, 'array')
+  assert.match(schema.description, /max 4/u)
+  assert.equal(schema.required, undefined)
+
+  const beforeProperties = { ...tool.parameters.properties }
+  delete beforeProperties.load_skills
+  const before = {
+    name: tool.name,
+    description: tool.description,
+    parameters: { ...tool.parameters, properties: beforeProperties },
+  }
+  const after = { name: tool.name, description: tool.description, parameters: tool.parameters }
+  const encoder = new TextEncoder()
+  const beforeBytes = encoder.encode(JSON.stringify(before)).byteLength
+  const afterBytes = encoder.encode(JSON.stringify(after)).byteLength
+  const deltaBytes = afterBytes - beforeBytes
+  const approxTokens = Math.ceil(deltaBytes / 4)
+  assert.ok(deltaBytes > 0 && deltaBytes < 1024, 'the added selector stays within a small serialized-schema budget')
+  t.diagnostic(`First-turn dsh_omo_task schema delta: +${deltaBytes} UTF-8 bytes (~${approxTokens} tokens at 4 bytes/token; provider tokenizer unavailable).`)
+})
+
+test('one-shot task loads requested model-invocable skills in order as untrusted guidance', async () => {
+  const parent = { id: 'parent-agent' }
+  const signal = new AbortController().signal
+  const lookups = []
+  const fixture = makeContext({
+    services: {
+      sessions: {
+        get(id) {
+          return id === parent.id ? { id, header: { cwd: '/workspace/project' } } : undefined
+        },
+      },
+    },
+    skillGet: async (name, options) => {
+      lookups.push({ name, cwd: options.cwd, signal: options.signal, scope: options.scope })
+      return {
+        name,
+        invocation: { modelInvocable: true, userInvocable: true },
+        source: 'project-dsh',
+        provider: 'test',
+        content: `Untrusted body for ${name}.`,
+      }
+    },
+  })
+  apply(fixture.ctx, baseConfig)
+  const task = 'Review the exact task without alteration.'
+
+  await fixture.tools.get('dsh_omo_task').execute({
+    role: 'explore',
+    task,
+    load_skills: ['visual-qa', 'debugging', 'visual-qa'],
+  }, { agent: parent, signal })
+
+  assert.deepEqual(lookups.map(({ name }) => name), ['visual-qa', 'debugging'], 'duplicate names are loaded once in request order')
+  assert.ok(lookups.every(lookup => lookup.cwd === '/workspace/project' && lookup.signal instanceof AbortSignal && !lookup.signal.aborted && lookup.scope === undefined))
+  const prompt = fixture.starts[0].request.prompt[0].text
+  assert.ok(prompt.includes(`## Assigned task\n${task}\n\n## Selected skill guidance (untrusted)`))
+  assert.equal(prompt.split('Untrusted body for visual-qa.').length - 1, 1)
+  assert.equal(prompt.split('Untrusted body for debugging.').length - 1, 1)
+  assert.ok(prompt.indexOf('### visual-qa') < prompt.indexOf('### debugging'))
+  assert.match(prompt, /do not grant tools|do not override/iu)
+})
+
+test('delegated skill resource hints are bounded untrusted data', async t => {
+  const scenarios = [
+    { base: { kind: 'directory', path: '/workspace/技能 "quoted"' }, hint: 'Directory base for relative skill resources', value: '/workspace/技能 "quoted"' },
+    { base: { kind: 'url', url: 'https://example.test/skills/' }, hint: 'URL base for relative skill resources', value: 'https://example.test/skills/' },
+    { base: { kind: 'opaque', description: 'provider-managed' }, hint: 'Provider resource description', value: 'provider-managed' },
+    { base: undefined },
+    { base: { kind: 'directory', path: 'bad\n## injected' } },
+    { base: { kind: 'url', url: 'é'.repeat(513) } },
+    { base: { kind: 'unknown', path: '/not-used' } },
+    { base: { kind: 'directory', get path() { throw new Error('private provider detail') } } },
+  ]
+  for (const [index, scenario] of scenarios.entries()) {
+    await t.test(String(index), async () => {
+      const parent = { id: 'parent-agent' }
+      const fixture = makeContext({
+        services: { sessions: { get: id => id === parent.id ? { id, header: { cwd: '/workspace' } } : undefined } },
+        skillGet: async name => ({ name, invocation: { modelInvocable: true }, content: 'See @references/guide.md.', resourceBase: scenario.base }),
+      })
+      apply(fixture.ctx, baseConfig)
+      await fixture.tools.get('dsh_omo_task').execute({ role: 'explore', task: 'Work', load_skills: ['requested'] }, { agent: parent, signal: new AbortController().signal })
+      const prompt = fixture.starts[0].request.prompt[0].text
+      assert.match(prompt, /See @references\/guide\.md\./u)
+      if (scenario.hint) {
+        assert.ok(prompt.includes(`${scenario.hint} (untrusted JSON string; access remains subject to DSH policy): ${JSON.stringify(scenario.value)}`))
+      } else {
+        assert.doesNotMatch(prompt, /(?:Directory base|URL base|Provider resource description)/u)
+        assert.doesNotMatch(prompt, /## injected/u)
+      }
+    })
+  }
+})
+
+test('refuses unavailable, disabled, failed, or oversized selected skills before child activation', async t => {
+  const scenarios = [
+    { label: 'unknown skill', skillGet: async () => undefined, error: /unavailable/u },
+    { label: 'non-model-invocable skill', skillGet: async name => ({ name, invocation: { modelInvocable: false }, content: 'body' }), error: /not model-invocable/u },
+    { label: 'lookup failure', skillGet: async () => { throw new Error('private provider detail') }, error: /Could not load requested skill/u },
+    { label: 'per-skill body cap', skillGet: async name => ({ name, invocation: { modelInvocable: true }, content: 'x'.repeat(8 * 1024 + 1) }), error: /body limit/u },
+    { label: 'UTF-8 body cap', skillGet: async name => ({ name, invocation: { modelInvocable: true }, content: 'é'.repeat(4 * 1024 + 1) }), error: /body limit/u },
+    { label: 'aggregate body cap', skillGet: async name => ({ name, invocation: { modelInvocable: true }, content: 'x'.repeat(7 * 1024) }), names: ['alpha', 'beta', 'gamma', 'delta'], error: /aggregate limit/u },
+  ]
+  for (const scenario of scenarios) {
+    await t.test(scenario.label, async () => {
+      const parent = { id: 'parent-agent' }
+      const fixture = makeContext({
+        services: { sessions: { get: id => id === parent.id ? { id, header: { cwd: '/workspace/project' } } : undefined } },
+        skillGet: scenario.skillGet,
+      })
+      apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1 })
+      const tool = fixture.tools.get('dsh_omo_task')
+      await assert.rejects(tool.execute({ role: 'explore', task: 'Task', load_skills: scenario.names ?? ['requested'] }, {
+        agent: parent,
+        signal: new AbortController().signal,
+      }), scenario.error)
+      assert.equal(fixture.starts.length, 0, 'invalid skill requests never start a child')
+
+      await tool.execute({ role: 'explore', task: 'Task without selected skills' }, {
+        agent: parent,
+        signal: new AbortController().signal,
+      })
+      assert.equal(fixture.starts.length, 1, 'a failed skill lookup releases the one-shot capacity reservation')
+    })
+  }
+})
+
+test('rejects invalid skill selectors and cancellation before child activation', async t => {
+  await t.test('invalid name count is rejected before skill lookup', async () => {
+    let reads = 0
+    const fixture = makeContext({ skillGet: async () => { reads += 1 } })
+    apply(fixture.ctx, baseConfig)
+    await assert.rejects(fixture.tools.get('dsh_omo_task').execute({
+      role: 'explore', task: 'Task', load_skills: ['a', 'b', 'c', 'd', 'e'],
+    }, { agent: { id: 'parent-agent' }, signal: new AbortController().signal }), /at most 4/u)
+    assert.equal(reads, 0)
+    assert.equal(fixture.starts.length, 0)
+  })
+
+  await t.test('caller cancellation during skill lookup prevents activation', async () => {
+    const controller = new AbortController()
+    const cancellation = new Error('caller cancelled skill lookup')
+    const parent = { id: 'parent-agent' }
+    let hostOptions, abortCalled = false, hostAbortedBefore
+    const fixture = makeContext({
+      services: { sessions: { get: id => id === parent.id ? { id, header: { cwd: '/workspace/project' } } : undefined } },
+      skillGet: async (name, options) => {
+        hostOptions = options
+        hostAbortedBefore = options.signal.aborted
+        controller.abort(cancellation)
+        abortCalled = true
+        return { name, invocation: { modelInvocable: true }, content: 'body' }
+      },
+    })
+    apply(fixture.ctx, baseConfig)
+    await assert.rejects(fixture.tools.get('dsh_omo_task').execute({
+      role: 'explore', task: 'Task', load_skills: ['requested'],
+    }, { agent: parent, signal: controller.signal }), error => error === cancellation)
+    assert.equal(abortCalled, true, 'the Host lookup called abort')
+    assert.equal(controller.signal.aborted, true)
+    assert.equal(hostOptions.cwd, '/workspace/project')
+    assert.ok(hostOptions.signal instanceof AbortSignal)
+    assert.equal(hostAbortedBefore, false)
+    assert.equal(hostOptions.signal.aborted, true, 'caller cancellation propagates to the Host signal')
+    assert.equal(fixture.starts.length, 0)
+  })
+})
+
+// Bound each observation instead of waiting for a misbehaving provider to settle.
+async function observeSkillCall(promise) {
+  let timer
+  try {
+    return await Promise.race([
+      promise.then(value => ({ value }), error => ({ error })),
+      new Promise(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), 100) }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+test('cancelled pending skill lookups release launch capacity and ignore late settlements', async t => {
+  for (const lateOutcome of ['resolve', 'reject']) {
+    await t.test(`late ${lateOutcome}`, async () => {
+      let settle
+      let lookupStarted
+      const started = new Promise(resolve => { lookupStarted = resolve })
+      const parent = { id: 'parent-agent', followup: (...args) => relays.push(args) }
+      const relays = []
+      const fixture = makeContext({
+        services: { sessions: { get: id => ({ id, header: { cwd: '/workspace/project' } }) } },
+        skillGet: () => new Promise((resolve, reject) => {
+          settle = lateOutcome === 'resolve'
+            ? () => resolve({ name: 'requested', invocation: { modelInvocable: true }, content: 'late body' })
+            : () => reject(new Error('late provider rejection'))
+          lookupStarted()
+        }),
+      })
+      apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1 })
+      const tool = fixture.tools.get('dsh_omo_task')
+      const controller = new AbortController()
+      const pending = tool.execute({ role: 'explore', task: 'Cancelled task', load_skills: ['requested'] }, { agent: parent, signal: controller.signal })
+      const observed = observeSkillCall(pending)
+      await started
+      controller.abort()
+      let relayCount
+      try {
+        const outcome = await observed
+        assert.ok(outcome.error instanceof Error, 'cancellation must promptly reject while skills.get is still pending')
+        assert.equal(fixture.starts.length, 0)
+        const plain = await observeSkillCall(tool.execute({ role: 'explore', task: 'No skills' }, { agent: parent, signal: new AbortController().signal }))
+        assert.ok(!plain.timedOut && !plain.error, `global capacity should be reusable: ${plain.error}`)
+        assert.equal(fixture.starts.length, 1)
+        await new Promise(resolve => setImmediate(resolve))
+        relayCount = relays.length
+      } finally {
+        settle()
+        await observeSkillCall(pending)
+        await new Promise(resolve => setImmediate(resolve))
+      }
+      assert.equal(fixture.starts.length, 1, 'late skill settlement never starts a child')
+      assert.equal(relays.length, relayCount, 'late skill settlement never relays a result')
+    })
+  }
+})
+
+test('plugin unload ends a pending skill lookup without waiting for an uncooperative Host', async () => {
+  let rejectLookup, entered, hostSignal
+  const started = new Promise(resolve => { entered = resolve })
+  const fixture = makeContext({
+    services: { sessions: { get: id => ({ id, header: { cwd: '/workspace/project' } }) } },
+    skillGet: (_name, options) => new Promise((_, reject) => { hostSignal = options.signal; rejectLookup = reject; entered() }),
+  })
+  apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1 })
+  const caller = new AbortController()
+  const pending = fixture.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'Unload during lookup', load_skills: ['requested'] },
+    { agent: { id: 'parent-agent' }, signal: caller.signal },
+  )
+  const observed = observeSkillCall(pending)
+  await started
+  try {
+    const effect = fixture.effects.find(item => item.label === 'dsh-omo background workers')
+    assert.ok(effect)
+    await effect.dispose()
+    const result = await observed
+    assert.match(result.error?.message ?? '', /shutting down/u)
+    assert.equal(caller.signal.aborted, false, 'plugin unload must not mutate the caller signal')
+    assert.equal(hostSignal.aborted, true, 'plugin unload must propagate cancellation to the Host lookup')
+    assert.equal(fixture.starts.length, 0)
+  } finally {
+    rejectLookup(new Error('late private provider rejection'))
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.equal(fixture.starts.length, 0)
+})
+
+test('cancelled pending skill lookups retain a separate instance-wide 64 in-flight cap', async () => {
+  const lookups = []
+  const parent = { id: 'parent-agent' }
+  const fixture = makeContext({
+    services: { sessions: { get: id => ({ id, header: { cwd: '/workspace/project' } }) } },
+    skillGet: name => new Promise((resolve, reject) => lookups.push({ name, resolve, reject })),
+  })
+  apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1 })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const calls = []
+  try {
+    for (let i = 0; i < 64; i += 1) {
+      const controller = new AbortController()
+      const call = tool.execute({ role: 'explore', task: `Cancelled ${i}`, load_skills: ['requested'] }, { agent: parent, signal: controller.signal })
+      calls.push(call)
+      const observed = observeSkillCall(call)
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(lookups.length, i + 1, 'each lookup entered the provider before cancellation')
+      controller.abort()
+      const outcome = await observed
+      assert.ok(outcome.error instanceof Error, `cancelled request ${i + 1} must promptly reject`)
+    }
+    assert.equal(lookups.length, 64)
+    const overflowController = new AbortController()
+    const overflow = tool.execute({ role: 'explore', task: 'Overflow', load_skills: ['requested'] }, { agent: parent, signal: overflowController.signal })
+    calls.push(overflow)
+    const busy = await observeSkillCall(overflow)
+    overflowController.abort()
+    assert.ok(busy.error instanceof Error, 'the 65th lookup must be rejected promptly')
+    assert.match(busy.error.message, /busy/iu)
+    assert.equal(lookups.length, 64, 'the rejected lookup must not enter skills.get')
+    const other = makeContext({
+      services: { sessions: { get: id => ({ id, header: { cwd: '/workspace/project' } }) } },
+      skillGet: async name => ({ name, invocation: { modelInvocable: true }, content: 'other instance' }),
+    })
+    apply(other.ctx, { ...baseConfig, maxConcurrent: 1 })
+    const independent = await observeSkillCall(other.tools.get('dsh_omo_task').execute(
+      { role: 'explore', task: 'Independent instance', load_skills: ['requested'] },
+      { agent: parent, signal: new AbortController().signal },
+    ))
+    assert.ok(!independent.timedOut && !independent.error, 'another plugin instance has its own lookup budget')
+    assert.equal(other.starts.length, 1)
+    const plain = await observeSkillCall(tool.execute({ role: 'explore', task: 'No skills' }, { agent: parent, signal: new AbortController().signal }))
+    assert.ok(!plain.timedOut && !plain.error, 'the separate lookup cap must not consume global launch capacity')
+    assert.equal(fixture.starts.length, 1)
+    lookups[0].resolve({ name: 'requested', invocation: { modelInvocable: true }, content: 'late body' })
+    await new Promise(resolve => setImmediate(resolve))
+    const controller = new AbortController()
+    const replacement = tool.execute({ role: 'explore', task: 'Replacement', load_skills: ['requested'] }, { agent: parent, signal: controller.signal })
+    calls.push(replacement)
+    const observed = observeSkillCall(replacement)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(lookups.length, 65, 'settling one underlying lookup releases its slot')
+    controller.abort()
+    assert.ok((await observed).error instanceof Error)
+    assert.equal(fixture.starts.length, 1)
+  } finally {
+    for (const lookup of lookups) lookup.reject(new Error('late cleanup rejection'))
+    await Promise.all(calls.map(observeSkillCall))
+    await new Promise(resolve => setImmediate(resolve))
+  }
+})
+
+test('one-shot category skill defaults precede and deduplicate explicit skill selectors', async () => {
+  const parent = { id: 'parent-agent' }
+  const signal = new AbortController().signal
+  const lookups = []
+  const fixture = makeContext({
+    services: {
+      sessions: {
+        get(id) {
+          return id === parent.id ? { id, header: { cwd: '/workspace/project' } } : undefined
+        },
+      },
+    },
+    skillGet: async (name, options) => {
+      lookups.push({ name, cwd: options.cwd, signal: options.signal, scope: options.scope })
+      return { name, invocation: { modelInvocable: true }, content: `Category skill body: ${name}` }
+    },
+  })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [
+      { name: 'research', provider: 'research-provider', model: 'research-model', skills: ['debugging', 'git-master'] },
+      { name: 'review', provider: 'review-provider', model: 'review-model', skills: ['visual-qa', 'review-work'] },
+    ],
+    roleRoutes: [{ role: 'explore', category: 'research' }],
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+
+  await tool.execute({
+    role: 'explore', task: 'Use the role default category',
+  }, { agent: parent, signal })
+  await tool.execute({
+    role: 'explore', category: 'review', task: 'Use the explicit category',
+    load_skills: ['review-work', 'security-research', 'review-work'],
+  }, { agent: parent, signal })
+
+  assert.deepEqual(lookups.map(({ name }) => name), [
+    'debugging', 'git-master',
+    'visual-qa', 'review-work', 'security-research',
+  ])
+  assert.ok(lookups.every(lookup => lookup.cwd === '/workspace/project' && lookup.signal instanceof AbortSignal && !lookup.signal.aborted && lookup.scope === undefined))
+  const defaultPrompt = fixture.starts[0].request.prompt[0].text
+  const explicitPrompt = fixture.starts[1].request.prompt[0].text
+  assert.ok(defaultPrompt.indexOf('### debugging') < defaultPrompt.indexOf('### git-master'))
+  assert.equal(defaultPrompt.split('Category skill body: git-master').length - 1, 1)
+  assert.doesNotMatch(defaultPrompt, /Category skill body: security-research/u)
+  assert.ok(explicitPrompt.indexOf('### visual-qa') < explicitPrompt.indexOf('### review-work'))
+  assert.ok(explicitPrompt.indexOf('### review-work') < explicitPrompt.indexOf('### security-research'))
+  assert.doesNotMatch(explicitPrompt, /Category skill body: git-master/u, 'explicit category replaces the role-default category skills')
+})
+
+test('category defaults also apply to the dedicated call-agent one-shot Tool', async () => {
+  const parent = { id: 'parent-agent' }
+  const signal = new AbortController().signal
+  const lookups = []
+  const fixture = makeContext({
+    services: {
+      sessions: {
+        get(id) {
+          return id === parent.id ? { id, header: { cwd: '/workspace/project' } } : undefined
+        },
+      },
+    },
+    skillGet: async (name, options) => {
+      lookups.push({ name, cwd: options.cwd, signal: options.signal })
+      return { name, invocation: { modelInvocable: true }, content: `Category skill body: ${name}` }
+    },
+  })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableCallOmoAgentTool: true,
+    categoryRoutes: [{ name: 'research', provider: 'p', model: 'm', skills: ['debugging'] }],
+    roleRoutes: [{ role: 'explore', category: 'research' }],
+  })
+  const tool = fixture.tools.get('dsh_omo_call_agent')
+  await tool.execute({ role: 'explore', task: 'Use the configured category skill' }, { agent: parent, signal })
+
+  assert.equal(lookups.length, 1)
+  assert.equal(lookups[0].name, 'debugging')
+  assert.equal(lookups[0].cwd, '/workspace/project')
+  assert.ok(lookups[0].signal instanceof AbortSignal)
+  assert.equal(lookups[0].signal.aborted, false)
+  assert.ok(fixture.starts[0].request.prompt[0].text.includes('Category skill body: debugging'))
+})
+
+test('rejects combined category and per-call skill overflow before lookup and releases its reservation', async () => {
+  let reads = 0
+  const fixture = makeContext({ skillGet: async () => { reads += 1; return undefined } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 1,
+    categoryRoutes: [
+      { name: 'heavy', provider: 'p', model: 'm', skills: ['debugging', 'git-master', 'review-work'] },
+      { name: 'plain', provider: 'p', model: 'm' },
+    ],
+    roleRoutes: [{ role: 'explore', category: 'heavy' }],
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: { id: 'parent-agent' }, signal: new AbortController().signal }
+
+  await assert.rejects(tool.execute({ role: 'explore', task: 'Overflow', load_skills: ['visual-qa', 'security-research'] }, exec), /4-skill combined limit/u)
+  assert.equal(reads, 0, 'combined count overflow is rejected before skill lookup')
+  assert.equal(fixture.starts.length, 0)
+  await tool.execute({ role: 'explore', category: 'plain', task: 'Reservation was released' }, exec)
+  assert.equal(fixture.starts.length, 1)
+})
+
+test('unavailable category skill defaults fail closed and release one-shot capacity', async () => {
+  let reads = 0
+  const parent = { id: 'parent-agent' }
+  const fixture = makeContext({
+    services: { sessions: { get: id => id === parent.id ? { id, header: { cwd: '/workspace/project' } } : undefined } },
+    skillGet: async () => { reads += 1; return undefined },
+  })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 1,
+    categoryRoutes: [
+      { name: 'research', provider: 'p', model: 'm', skills: ['debugging'] },
+      { name: 'plain', provider: 'p', model: 'm' },
+    ],
+    roleRoutes: [{ role: 'explore', category: 'research' }],
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: parent, signal: new AbortController().signal }
+
+  await assert.rejects(tool.execute({ role: 'explore', task: 'Unavailable default' }, exec), /unavailable in the parent workspace/u)
+  assert.equal(reads, 1)
+  assert.equal(fixture.starts.length, 0)
+  await tool.execute({ role: 'explore', category: 'plain', task: 'Reservation was released' }, exec)
+  assert.equal(fixture.starts.length, 1)
+})
+
+test('refuses requested skills when the child has an explicit agentPreset scope', async () => {
+  let reads = 0
+  const fixture = makeContext({ skillGet: async () => { reads += 1; return undefined } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 1,
+    categoryRoutes: [
+      { name: 'research', provider: 'p', model: 'm', skills: ['debugging'] },
+      { name: 'plain', provider: 'p', model: 'm' },
+    ],
+    roleRoutes: [{ role: 'explore', agentPreset: 'scoped-reviewer-v1' }],
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: { id: 'parent-agent' }, signal: new AbortController().signal }
+
+  await assert.rejects(tool.execute({ role: 'explore', category: 'research', task: 'Use configured skill' }, exec), /agentPreset.*preset scope/u)
+  assert.equal(reads, 0)
+  assert.equal(fixture.starts.length, 0)
+  await tool.execute({ role: 'explore', category: 'plain', task: 'No skill request' }, exec)
+  assert.equal(fixture.starts.length, 1, 'preset-scope rejection releases its one-shot reservation')
+})
+
+test('continuable task mode rejects configured category skill defaults instead of silently dropping them', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    categoryRoutes: [{ name: 'research', provider: 'p', model: 'm', skills: ['debugging'] }],
+  })
+  const tool = fixture.tools.get('dsh_omo_task_continuable')
+  await assert.rejects(tool.execute({
+    role: 'explore', category: 'research', task: 'Use the category default',
+  }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal }), /only by dsh_omo_task one-shot launches/u)
+  assert.equal(fixture.continuableStarts.length, 0)
 })
 
 test('composes the selected category promptAppend with additive role guidance in both task modes', async () => {
@@ -4957,6 +7751,529 @@ test('resolves category routes for one-shot and continuable delegation with role
   assert.equal(fixture.starts.length, 2, 'invalid category is rejected before child start and reservation')
 })
 
+test('ordinary pinned routes keep capability preflight disabled by default', async () => {
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: { resolveCallConfig: async config => { calls.push(config); return config } },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{ name: 'review', provider: 'primary-provider', model: 'primary-model' }],
+  })
+
+  await fixture.tools.get('dsh_omo_task').execute({
+    role: 'quick', category: 'review', task: 'Use the explicit category route without preflight by default.',
+  }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal })
+
+  assert.deepEqual(calls, [])
+  assert.deepEqual(fixture.starts[0].request.agentOptions, {
+    provider: 'primary-provider', model: 'primary-model',
+  })
+})
+
+test('role/category route aliases require explicit opt-in', () => {
+  const fixture = makeContext()
+  assert.throws(() => apply(fixture.ctx, {
+    ...baseConfig,
+    roleCategoryRouteAliases: [{
+      from: { provider: 'legacy', model: 'model-v1' },
+      to: { provider: 'current', model: 'model-v2' },
+    }],
+  }), /requires enableRoleCategoryRouteAliases/u)
+})
+
+test('role/category route aliases map primary and fallback pairs before preflight, status, and spawn', async () => {
+  const calls = []
+  const attempts = new Map()
+  const fixture = makeContext({ services: {
+    llm: {
+      resolveCallConfig: async config => {
+        calls.push({ ...config })
+        const count = (attempts.get(config.provider) ?? 0) + 1
+        attempts.set(config.provider, count)
+        if (count === 1 && ['current-category', 'current-role'].includes(config.provider)) {
+          throw new Error('use configured fallback')
+        }
+        return config
+      },
+    },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableRoleCategoryRouteAliases: true,
+    enablePinnedRoutePreflight: true,
+    roleCategoryRouteAliases: [
+      { from: { provider: 'legacy-category', model: 'primary-v1' }, to: { provider: 'current-category', model: 'primary-v2' }, reasoningEffort: 'high' },
+      { from: { provider: 'legacy-category-backup', model: 'backup-v1' }, to: { provider: 'current-category-backup', model: 'backup-v2' }, reasoningEffort: 'low' },
+      { from: { provider: 'legacy-role', model: 'role-v1' }, to: { provider: 'current-role', model: 'role-v2' }, reasoningEffort: 'high' },
+      { from: { provider: 'legacy-role-backup', model: 'role-backup-v1' }, to: { provider: 'current-role-backup', model: 'role-backup-v2' }, reasoningEffort: 'medium' },
+    ],
+    categoryRoutes: [{
+      name: 'review', provider: 'legacy-category', model: 'primary-v1',
+      fallbackModels: [{ provider: 'legacy-category-backup', model: 'backup-v1' }],
+    }],
+    roleRoutes: [{
+      role: 'explore', category: 'review', provider: 'legacy-role', model: 'role-v1',
+      reasoningEffort: 'low',
+      fallbackModels: [{ provider: 'legacy-role-backup', model: 'role-backup-v1' }],
+    }],
+  })
+
+  const parent = { id: 'parent-agent', followup() {} }
+  const signal = new AbortController().signal
+  const task = fixture.tools.get('dsh_omo_task')
+  await task.execute({ role: 'quick', category: 'review', task: 'Use the aliased category fallback.' }, { agent: parent, signal })
+  await task.execute({ role: 'explore', category: 'review', task: 'Use the aliased role fallback.' }, { agent: parent, signal })
+
+  assert.deepEqual(calls, [
+    { provider: 'current-category', model: 'primary-v2', reasoningEffort: 'high' },
+    { provider: 'current-category-backup', model: 'backup-v2', reasoningEffort: 'low' },
+    { provider: 'current-role', model: 'role-v2', reasoningEffort: 'low' },
+    { provider: 'current-role-backup', model: 'role-backup-v2', reasoningEffort: 'low' },
+  ])
+  assert.deepEqual(fixture.starts.map(start => start.request.agentOptions), [
+    { provider: 'current-category-backup', model: 'backup-v2', reasoningEffort: 'low' },
+    { provider: 'current-role-backup', model: 'role-backup-v2', reasoningEffort: 'low' },
+  ])
+
+  const roleStatus = await fixture.commands.get('omo').handler({ rawInput: 'status route role:explore' })
+  assert.equal(roleStatus.kind, 'success')
+  assert.match(roleStatus.text, /Configured route alias .*legacy-role.*current-role/u)
+  assert.match(roleStatus.text, /default reasoningEffort "high"/u)
+  assert.deepEqual(calls.at(-1), { provider: 'current-role', model: 'role-v2', reasoningEffort: 'low' })
+  const categoryStatus = await fixture.commands.get('omo').handler({ rawInput: 'status route category:review' })
+  assert.equal(categoryStatus.kind, 'success')
+  assert.match(categoryStatus.text, /default reasoningEffort "high"/u)
+  assert.deepEqual(calls.at(-1), { provider: 'current-category', model: 'primary-v2', reasoningEffort: 'high' })
+})
+
+test('alias reasoning defaults apply only after explicit category settings on unpreflighted launches', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableRoleCategoryRouteAliases: true,
+    roleCategoryRouteAliases: [{
+      from: { provider: 'legacy-primary', model: 'legacy-model' },
+      to: { provider: 'current-primary', model: 'current-model' },
+      reasoningEffort: 'high',
+    }],
+    categoryRoutes: [
+      { name: 'defaulted', provider: 'legacy-primary', model: 'legacy-model' },
+      { name: 'explicit', provider: 'legacy-primary', model: 'legacy-model', reasoningEffort: 'low' },
+    ],
+  })
+  const task = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal }
+  await task.execute({ role: 'quick', category: 'defaulted', task: 'Use the alias reasoning default.' }, exec)
+  await task.execute({ role: 'quick', category: 'explicit', task: 'Use the explicit category setting.' }, exec)
+  assert.deepEqual(fixture.starts.map(start => start.request.agentOptions), [
+    { provider: 'current-primary', model: 'current-model', reasoningEffort: 'high' },
+    { provider: 'current-primary', model: 'current-model', reasoningEffort: 'low' },
+  ])
+})
+
+test('explicit fallback reasoning overrides its route-alias reasoning default', async () => {
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: {
+      resolveCallConfig: async config => {
+        calls.push({ ...config })
+        if (config.provider === 'current-primary') throw new Error('use fallback')
+        return config
+      },
+    },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableRoleCategoryRouteAliases: true,
+    roleCategoryRouteAliases: [
+      {
+        from: { provider: 'legacy-primary', model: 'primary-v1' },
+        to: { provider: 'current-primary', model: 'primary-v2' },
+        reasoningEffort: 'high',
+      },
+      {
+        from: { provider: 'legacy-backup', model: 'backup-v1' },
+        to: { provider: 'current-backup', model: 'backup-v2' },
+        reasoningEffort: 'low',
+      },
+    ],
+    roleRoutes: [{
+      role: 'explore', provider: 'legacy-primary', model: 'primary-v1',
+      fallbackModels: [{ provider: 'legacy-backup', model: 'backup-v1', reasoningEffort: 'medium' }],
+    }],
+  })
+  const task = fixture.tools.get('dsh_omo_task')
+  await task.execute({ role: 'explore', task: 'Use the explicit fallback reasoning.' }, {
+    agent: { id: 'parent-agent', followup() {} },
+    signal: new AbortController().signal,
+  })
+  assert.deepEqual(calls, [
+    { provider: 'current-primary', model: 'primary-v2', reasoningEffort: 'high' },
+    { provider: 'current-backup', model: 'backup-v2', reasoningEffort: 'medium' },
+  ])
+  assert.deepEqual(fixture.starts[0].request.agentOptions, {
+    provider: 'current-backup', model: 'backup-v2', reasoningEffort: 'medium',
+  })
+})
+
+test('role/category route aliases reserve concurrency against the effective target pair', async () => {
+  const fixture = makeContext()
+  const pendingResults = []
+  const starts = []
+  fixture.ctx.subagents.start = async (provider, request) => {
+    starts.push({ provider, request })
+    let resolveResult
+    const result = new Promise(resolve => { resolveResult = resolve })
+    pendingResults.push(resolveResult)
+    return { id: `child-aliased-route-${starts.length}`, result, dispose: async () => {} }
+  }
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 4,
+    modelConcurrency: { 'target-provider/target-model': 1 },
+    enableRoleCategoryRouteAliases: true,
+    roleCategoryRouteAliases: [{
+      from: { provider: 'legacy-provider', model: 'legacy-model' },
+      to: { provider: 'target-provider', model: 'target-model' },
+    }],
+    roleRoutes: [{ role: 'explore', provider: 'legacy-provider', model: 'legacy-model' }],
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal }
+
+  await tool.execute({ role: 'explore', task: 'first target capacity slot' }, exec)
+  await assert.rejects(
+    tool.execute({ role: 'explore', task: 'target capacity is full' }, exec),
+    /model concurrency limit reached for "target-provider\/target-model"/u,
+  )
+  assert.equal(starts.length, 1)
+  assert.deepEqual(starts[0].request.agentOptions, { provider: 'target-provider', model: 'target-model' })
+
+  pendingResults[0]({ stopReason: 'completed', output: [] })
+  await new Promise(resolve => setImmediate(resolve))
+})
+
+test('role/category aliases do not rewrite the profile-wide runtimeFallback route table', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableRoleCategoryRouteAliases: true,
+    roleCategoryRouteAliases: [{
+      from: { provider: 'legacy-primary', model: 'legacy-model' },
+      to: { provider: 'current-primary', model: 'current-model' },
+    }],
+    roleRoutes: [{ role: 'explore', provider: 'legacy-primary', model: 'legacy-model' }],
+    runtimeFallback: {
+      enabled: true,
+      retryOnStatuses: [503],
+      cooldownSeconds: 0,
+      chains: [{
+        provider: 'legacy-primary', model: 'legacy-model',
+        fallbacks: [{ provider: 'fallback-provider', model: 'fallback-model' }],
+      }],
+    },
+  })
+  const onRequest = fixture.events.get('agent/request')
+  const onRequestError = fixture.events.get('agent/request-error')
+  assert.equal(typeof onRequest, 'function')
+  assert.equal(typeof onRequestError, 'function')
+  const agent = { id: 'unrelated-agent' }
+  const signal = new AbortController().signal
+  const sourceRoute = { provider: 'legacy-primary', model: 'legacy-model' }
+
+  assert.deepEqual(await onRequest({ agent, turn: 1, step: 1, signal }, async () => sourceRoute), sourceRoute)
+  assert.deepEqual(await onRequestError({
+    agent,
+    turn: 1,
+    step: 1,
+    provider: 'legacy-primary',
+    failure: { status: 503, code: 'HTTP_503' },
+    signal,
+  }, async () => undefined), { kind: 'retry' })
+  assert.deepEqual(await onRequest({ agent, turn: 1, step: 1, signal }, async () => sourceRoute), {
+    provider: 'fallback-provider', model: 'fallback-model',
+  })
+})
+
+test('opt-in preflights only the selected pinned role/category route without changing it', async () => {
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: {
+      resolveCallConfig: async (config, signal) => {
+        calls.push({ config, signal })
+        return { ...config, reasoningEffort: 'materialized-default', maxTokens: 9999 }
+      },
+    },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enablePinnedRoutePreflight: true,
+    enableContinuableTasks: true,
+    categoryRoutes: [
+      {
+        name: 'review', provider: 'category-provider', model: 'category-model', reasoningEffort: 'low',
+        fallbackModels: [{ provider: 'category-backup', model: 'category-backup-model' }],
+      },
+      { name: 'simple', provider: 'simple-provider', model: 'simple-model', reasoningEffort: 'medium' },
+    ],
+    roleRoutes: [{ role: 'explore', category: 'review', provider: 'role-provider', model: 'role-model', reasoningEffort: 'high' }],
+  })
+  const parent = { id: 'parent-agent', followup() {} }
+  const signal = new AbortController().signal
+
+  await fixture.tools.get('dsh_omo_task').execute({
+    role: 'explore', category: 'review', task: 'The role-pinned route should override its category.',
+  }, { agent: parent, signal })
+  await fixture.tools.get('dsh_omo_task_continuable').execute({
+    role: 'quick', category: 'simple', task: 'The category route should preflight before continuation.',
+  }, { agent: parent, signal })
+
+  assert.deepEqual(calls.map(({ config }) => config), [
+    { provider: 'role-provider', model: 'role-model', reasoningEffort: 'high' },
+    { provider: 'simple-provider', model: 'simple-model', reasoningEffort: 'medium' },
+  ])
+  assert.ok(calls.every(({ signal: preflightSignal }) => preflightSignal instanceof AbortSignal && !preflightSignal.aborted))
+  assert.ok(calls.every(({ signal: preflightSignal }) => preflightSignal !== signal), 'preflight uses a caller-cancelled deadline signal')
+  assert.deepEqual(fixture.starts[0].request.agentOptions, {
+    provider: 'role-provider', model: 'role-model', reasoningEffort: 'high',
+  })
+  assert.deepEqual(fixture.continuableStarts[0].request.agentOptions, {
+    provider: 'simple-provider', model: 'simple-model', reasoningEffort: 'medium',
+  })
+})
+
+test('opt-in pinned-route preflight leaves inherited parent routes untouched', async () => {
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: { resolveCallConfig: async config => { calls.push(config); return config } },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enablePinnedRoutePreflight: true,
+    roleRoutes: [{ role: 'quick', reasoningEffort: 'low' }],
+  })
+
+  await fixture.tools.get('dsh_omo_task').execute({
+    role: 'quick', task: 'Retain the parent route and do not resolve an unpinned model.',
+  }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal })
+
+  assert.deepEqual(calls, [])
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { reasoningEffort: 'low' })
+})
+
+test('pinned-route preflight sanitizes rejection and releases the worker reservation', async () => {
+  let calls = 0
+  const fixture = makeContext({ services: {
+    llm: {
+      resolveCallConfig: async config => {
+        calls += 1
+        if (calls === 1) throw new Error('private provider detail')
+        return config
+      },
+    },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 1,
+    enablePinnedRoutePreflight: true,
+    roleRoutes: [{ role: 'explore', provider: 'primary-provider', model: 'primary-model' }],
+  })
+  const execute = () => fixture.tools.get('dsh_omo_task').execute({
+    role: 'explore', task: 'Validate the route before starting a child.',
+  }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal })
+
+  await assert.rejects(execute(), error => {
+    assert.match(error.message, /primary route failed DSH capability preflight/u)
+    assert.doesNotMatch(error.message, /private provider detail/u)
+    return true
+  })
+  assert.equal(fixture.starts.length, 0)
+  await execute()
+  assert.equal(fixture.starts.length, 1, 'a rejected preflight releases the reserved worker slot')
+  assert.equal(calls, 2)
+})
+
+test('pinned-route preflight requires the DSH resolver only when selected', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enablePinnedRoutePreflight: true,
+    roleRoutes: [{ role: 'explore', provider: 'primary-provider', model: 'primary-model' }],
+  })
+
+  await assert.rejects(fixture.tools.get('dsh_omo_task').execute({
+    role: 'explore', task: 'Do not start without the resolver.',
+  }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal }), /requires the DSH llm\.resolveCallConfig service/u)
+  assert.equal(fixture.starts.length, 0)
+})
+
+test('pinned-route preflight aborts on caller cancellation and its five-second deadline', async t => {
+  await t.test('caller cancellation', async () => {
+    let resolverSignal
+    const fixture = makeContext({ services: {
+      llm: { resolveCallConfig: (_config, signal) => {
+        resolverSignal = signal
+        return new Promise(() => {})
+      } },
+    } })
+    apply(fixture.ctx, {
+      ...baseConfig,
+      enablePinnedRoutePreflight: true,
+      roleRoutes: [{ role: 'explore', provider: 'primary-provider', model: 'primary-model' }],
+    })
+    const caller = new AbortController()
+    const pending = fixture.tools.get('dsh_omo_task').execute({
+      role: 'explore', task: 'Cancel while route validation is pending.',
+    }, { agent: { id: 'parent-agent', followup() {} }, signal: caller.signal })
+    await new Promise(resolve => setImmediate(resolve))
+    caller.abort(new Error('caller cancelled'))
+
+    await assert.rejects(pending, /caller cancelled/u)
+    assert.equal(resolverSignal.aborted, true)
+    assert.equal(fixture.starts.length, 0)
+  })
+
+  await t.test('timeout', async () => {
+    let resolverSignal
+    const fixture = makeContext({ services: {
+      llm: { resolveCallConfig: (_config, signal) => {
+        resolverSignal = signal
+        return new Promise(() => {})
+      } },
+    } })
+    apply(fixture.ctx, {
+      ...baseConfig,
+      enablePinnedRoutePreflight: true,
+      roleRoutes: [{ role: 'explore', provider: 'primary-provider', model: 'primary-model' }],
+    })
+
+    await assert.rejects(fixture.tools.get('dsh_omo_task').execute({
+      role: 'explore', task: 'Do not start if route validation times out.',
+    }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal }), /primary route failed DSH capability preflight/u)
+    assert.equal(resolverSignal.aborted, true)
+    assert.equal(fixture.starts.length, 0)
+  })
+})
+
+test('cancelled one-shot pinned preflights retain Host leases until settlement', async () => {
+  const hosts = []
+  const fixture = makeContext({ services: {
+    llm: { resolveCallConfig: (config, signal) => new Promise((resolve, reject) => {
+      hosts.push({ config, signal, resolve, reject })
+    }) },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 1,
+    enablePinnedRoutePreflight: true,
+    roleRoutes: [{ role: 'explore', provider: 'primary-provider', model: 'primary-model' }],
+  })
+  const execute = caller => fixture.tools.get('dsh_omo_task').execute({
+    role: 'explore', task: 'Validate the pinned route before starting a child.',
+  }, { agent: { id: 'parent-agent', followup() {} }, signal: caller.signal })
+  const turn = () => new Promise(resolve => setImmediate(resolve))
+  const promptly = async promise => {
+    let timer
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('local request did not settle promptly')), 1000) }),
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  const callers = []
+  const outcomes = []
+  try {
+    for (let i = 0; i < 64; i += 1) {
+      const caller = new AbortController()
+      callers.push(caller)
+      const outcome = execute(caller).then(value => ({ value }), error => ({ error }))
+      outcomes.push(outcome)
+      await turn()
+      assert.equal(hosts.length, i + 1, 'each uncancelled Host call acquires a lease')
+      const reason = new Error(`caller cancelled ${i}`)
+      caller.abort(reason)
+      assert.strictEqual((await promptly(outcome)).error, reason)
+      assert.equal(hosts[i].signal.aborted, true)
+      assert.equal(fixture.starts.length, 0)
+    }
+
+    const saturatedCaller = new AbortController()
+    callers.push(saturatedCaller)
+    const saturated = execute(saturatedCaller).then(value => ({ value }), error => ({ error }))
+    outcomes.push(saturated)
+    await turn()
+    assert.equal(hosts.length, 64, 'the 65th request must fail without querying Host')
+    const saturation = await promptly(saturated)
+    assert.ok(saturation.error instanceof Error, 'saturation rejects the local request')
+    assert.doesNotMatch(saturation.error.message, /private (late|current) Host failure/u)
+    assert.equal(fixture.starts.length, 0)
+
+    const command = fixture.commands.get('omo')
+    const statusCaller = new AbortController()
+    callers.push(statusCaller)
+    const statusInput = { rawInput: 'status route role:explore', signal: statusCaller.signal }
+    const busy = await promptly(command.handler(statusInput))
+    assert.equal(busy.kind, 'success')
+    assert.match(busy.text, /not checked \(route preflight capacity is busy\)/u)
+    assert.ok(busy.text.length <= 1_024, 'capacity response stays concise')
+    assert.equal(hosts.length, 64, 'status shares the task gate and must not query Host when full')
+    assert.equal(fixture.starts.length, 0)
+
+    hosts[0].reject(new Error('private late Host failure'))
+    await turn()
+    const statusOutcome = command.handler(statusInput).then(value => ({ value }), error => ({ error }))
+    outcomes.push(statusOutcome)
+    await turn()
+    assert.equal(hosts.length, 65, 'settling a task Host promise admits status')
+    assert.deepEqual(hosts[64].config, { provider: 'primary-provider', model: 'primary-model' })
+    assert.ok(hosts[64].signal instanceof AbortSignal && !hosts[64].signal.aborted)
+    hosts[64].resolve(hosts[64].config)
+    const status = await promptly(statusOutcome)
+    assert.equal(status.value?.kind, 'success')
+    assert.match(status.value.text, /accepted as a DSH-compatible call configuration/u)
+    assert.equal(fixture.starts.length, 0, 'status does not dispatch a child')
+    await turn()
+
+    let otherCalls = 0
+    const other = makeContext({ services: {
+      llm: { resolveCallConfig: async config => { otherCalls += 1; return config } },
+    } })
+    apply(other.ctx, {
+      ...baseConfig,
+      maxConcurrent: 1,
+      enablePinnedRoutePreflight: true,
+      roleRoutes: [{ role: 'explore', provider: 'primary-provider', model: 'primary-model' }],
+    })
+    await promptly(other.tools.get('dsh_omo_task').execute({
+      role: 'explore', task: 'A separate plugin instance has its own Host lease pool.',
+    }, { agent: { id: 'other-parent', followup() {} }, signal: new AbortController().signal }))
+    assert.equal(otherCalls, 1, 'saturation does not consume another instance’s leases')
+    assert.equal(other.starts.length, 1)
+
+    const resumedCaller = new AbortController()
+    callers.push(resumedCaller)
+    const resumed = execute(resumedCaller).then(value => ({ value }), error => ({ error }))
+    outcomes.push(resumed)
+    await turn()
+    assert.equal(hosts.length, 66, 'settling the status Host promise restores its shared lease')
+    hosts[65].reject(new Error('private current Host failure'))
+    const failure = await promptly(resumed)
+    assert.match(failure.error?.message ?? '', /primary route failed DSH capability preflight/u)
+    assert.doesNotMatch(failure.error.message, /private (late|current) Host failure/u)
+    assert.equal(fixture.starts.length, 0)
+    await turn() // Late Host rejections must be observed, not unhandled.
+  } finally {
+    for (const caller of callers) caller.abort(new Error('test cleanup'))
+    for (const host of hosts) host.resolve(host.config)
+    await Promise.all(outcomes)
+    await turn()
+  }
+})
+
 test('preflights a configured category primary route and uses only resolver-materialized reasoning', async () => {
   const calls = []
   const fixture = makeContext({ services: {
@@ -4969,6 +8286,7 @@ test('preflights a configured category primary route and uses only resolver-mate
   } })
   apply(fixture.ctx, {
     ...baseConfig,
+    enablePinnedRoutePreflight: true,
     categoryRoutes: [{
       name: 'primary', provider: 'primary-provider', model: 'primary-model',
       fallbackModels: [{ provider: 'backup-provider', model: 'backup-model' }],
@@ -4978,9 +8296,12 @@ test('preflights a configured category primary route and uses only resolver-mate
   await fixture.tools.get('dsh_omo_task').execute({
     role: 'quick', category: 'primary', task: 'Use the first valid route.',
   }, { agent: { id: 'parent-agent', followup() {} }, signal })
-  assert.deepEqual(calls, [{
-    config: { provider: 'primary-provider', model: 'primary-model' }, signal,
-  }])
+  assert.deepEqual(calls.map(({ config }) => config), [
+    { provider: 'primary-provider', model: 'primary-model' },
+  ])
+  assert.equal(calls.length, 1)
+  assert.ok(calls[0].signal instanceof AbortSignal && !calls[0].signal.aborted)
+  assert.notStrictEqual(calls[0].signal, signal, 'fallback candidate preflight uses a derived deadline signal')
   assert.deepEqual(fixture.starts[0].request.agentOptions, {
     provider: 'primary-provider', model: 'primary-model', reasoningEffort: 'medium',
   })
@@ -5042,7 +8363,8 @@ test('selects the first valid category fallback for one-shot and continuable chi
     ['durable-primary', 'durable-model', 'high', undefined],
     ['durable-fallback', 'durable-backup', 'high', undefined],
   ])
-  assert.ok(calls.every(call => call.signal === signal), 'the exact caller signal is forwarded to every preflight')
+  assert.ok(calls.every(({ signal: preflightSignal }) => preflightSignal instanceof AbortSignal && !preflightSignal.aborted))
+  assert.ok(calls.every(({ signal: preflightSignal }) => preflightSignal !== signal), 'each candidate gets a derived deadline signal')
   assert.strictEqual(fixture.starts[0].request.signal, signal)
   assert.strictEqual(fixture.continuableStarts[0].signal, signal)
   assert.strictEqual(fixture.starts[1].request.signal, signal)
@@ -5136,7 +8458,8 @@ test('preflights no-category role fallback chains with role settings over candid
     { provider: 'role-first', model: 'first-model', reasoningEffort: 'medium', maxTokens: 1024 },
     { provider: 'role-last', model: 'last-model', reasoningEffort: 'medium', maxTokens: 512 }
   ])
-  assert.ok(calls.every(call => call.signal === signal))
+  assert.ok(calls.every(({ signal: preflightSignal }) => preflightSignal instanceof AbortSignal && !preflightSignal.aborted))
+  assert.ok(calls.every(({ signal: preflightSignal }) => preflightSignal !== signal))
   assert.deepEqual(fixture.starts[0].request.agentOptions, {
     provider: 'role-last', model: 'last-model', reasoningEffort: 'medium', maxTokens: 512,
   })
@@ -5340,8 +8663,8 @@ test('role fallback chains fail closed on missing, rejected, and cancelled prefl
   await t.test('caller cancellation', async () => {
     const calls = []
     const fixture = makeContext({ services: {
-      llm: { resolveCallConfig: config => {
-        calls.push(config)
+      llm: { resolveCallConfig: (config, signal) => {
+        calls.push({ config, signal })
         if (config.provider === 'role-primary') return Promise.reject(new Error('primary unsupported'))
         return new Promise(() => {})
       } },
@@ -5354,8 +8677,12 @@ test('role fallback chains fail closed on missing, rejected, and cancelled prefl
     )
     await new Promise(resolve => setImmediate(resolve))
     assert.equal(calls.length, 2)
+    assert.notStrictEqual(calls[1].signal, controller.signal)
+    assert.equal(calls[1].signal.aborted, false)
     controller.abort(new Error('role preflight cancelled'))
     await assert.rejects(pending, /role preflight cancelled/u)
+    assert.equal(calls[1].signal.aborted, true, 'caller cancellation aborts the in-flight candidate signal')
+    assert.equal(calls.length, 2, 'cancellation must not continue to later fallbacks')
     assert.equal(fixture.starts.length, 0)
   })
 })
@@ -5427,6 +8754,67 @@ test('fails closed on missing or rejected category fallback capability resolutio
   })
 })
 
+test('a timed-out fallback candidate is skipped and a valid backup starts', async () => {
+  const calls = []
+  const fixture = makeContext({ services: {
+    llm: { resolveCallConfig: (config, signal) => {
+      calls.push({ config, signal })
+      if (config.provider === 'primary-provider') return new Promise(() => {})
+      return { ...config, reasoningEffort: 'materialized-backup-effort' }
+    } },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{
+      name: 'chain', provider: 'primary-provider', model: 'primary-model',
+      fallbackModels: [{ provider: 'backup-provider', model: 'backup-model' }],
+    }],
+  })
+
+  await fixture.tools.get('dsh_omo_task').execute({
+    role: 'quick', category: 'chain', task: 'Skip the primary if its capability query hangs.',
+  }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal })
+
+  assert.deepEqual(calls.map(({ config }) => config.provider), ['primary-provider', 'backup-provider'])
+  assert.equal(calls[0].signal.aborted, true, 'timed-out primary resolver receives an abort')
+  assert.equal(calls[1].signal.aborted, false)
+  assert.deepEqual(fixture.starts[0].request.agentOptions, {
+    provider: 'backup-provider', model: 'backup-model', reasoningEffort: 'materialized-backup-effort',
+  })
+})
+
+test('all timed-out fallback candidates fail closed and release the worker reservation', async () => {
+  let calls = 0
+  const resolverSignals = []
+  const fixture = makeContext({ services: {
+    llm: { resolveCallConfig: (config, signal) => {
+      calls += 1
+      resolverSignals.push(signal)
+      if (calls <= 2) return new Promise(() => {})
+      return config
+    } },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 1,
+    categoryRoutes: [{
+      name: 'chain', provider: 'primary-provider', model: 'primary-model',
+      fallbackModels: [{ provider: 'backup-provider', model: 'backup-model' }],
+    }],
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal }
+
+  await assert.rejects(tool.execute({ role: 'quick', category: 'chain', task: 'Reject when every candidate hangs.' }, exec), /2 candidates checked/u)
+  assert.equal(fixture.starts.length, 0)
+  assert.equal(resolverSignals.length, 2)
+  assert.ok(resolverSignals.every(signal => signal.aborted), 'each timed-out resolver signal is aborted')
+
+  await tool.execute({ role: 'quick', category: 'chain', task: 'Retry after the worker reservation is released.' }, exec)
+  assert.equal(calls, 3)
+  assert.equal(fixture.starts.length, 1)
+})
+
 test('cancellation stops category fallback probing before any child starts', async () => {
   const controller = new AbortController()
   const calls = []
@@ -5448,7 +8836,8 @@ test('cancellation stops category fallback probing before any child starts', asy
     role: 'quick', category: 'chain', task: 'Cancel capability resolution.',
   }, { agent: { id: 'parent-agent', followup() {} }, signal: controller.signal }), /parent cancelled/u)
   assert.equal(calls.length, 1)
-  assert.equal(calls[0].signal, controller.signal)
+  assert.notStrictEqual(calls[0].signal, controller.signal)
+  assert.equal(calls[0].signal.aborted, true, 'the derived preflight signal follows immediate caller cancellation')
   assert.equal(fixture.starts.length, 0)
 })
 
@@ -5648,7 +9037,7 @@ test('omits an empty deny list as a no-op', async () => {
   assert.equal(Object.hasOwn(fixture.starts[0].request, 'toolFilter'), false)
 })
 
-test('validates bounded role fallback chains only for explicit provider/model pins', () => {
+test('validates bounded role fallback chains with or without explicit primary pins', () => {
   const valid = makeContext()
   apply(valid.ctx, {
     ...baseConfig,
@@ -5662,12 +9051,14 @@ test('validates bounded role fallback chains only for explicit provider/model pi
   for (const roleRoute of [
     { role: 'explore', fallbackModels: [{ provider: 'backup', model: 'backup-model' }] },
     { role: 'explore', reasoningEffort: 'high', fallbackModels: [{ provider: 'backup', model: 'backup-model' }] },
-    { role: 'explore', fallbackModels: [] },
   ]) {
     const fixture = makeContext()
-    assert.throws(() => apply(fixture.ctx, { ...baseConfig, roleRoutes: [roleRoute] }), /fallbackModels require an explicit provider\/model pin/u)
-    assert.equal(fixture.tools.size, 0)
+    apply(fixture.ctx, { ...baseConfig, roleRoutes: [roleRoute] })
+    assert.ok(fixture.tools.has('dsh_omo_task'))
   }
+  const empty = makeContext()
+  assert.throws(() => apply(empty.ctx, { ...baseConfig, roleRoutes: [{ role: 'explore', fallbackModels: [] }] }), /fallback-only chain must be non-empty/u)
+  assert.equal(empty.tools.size, 0)
 
   const duplicatePrimary = makeContext()
   assert.throws(() => apply(duplicatePrimary.ctx, {
@@ -6423,6 +9814,243 @@ test('route caps do not infer the inherited model or conflate the DSH subagent p
   await new Promise(resolve => setImmediate(resolve))
 })
 
+test('malformed current activation consumes a rejected result without an unhandled rejection', async () => {
+  // Node's test runner treats unhandled rejections as test failures even with a
+  // listener installed, so isolate the deliberately broken Host in a subprocess.
+  if (!process.env.OMO_MALFORMED_RESULT_CHILD) {
+    const env = { ...process.env, OMO_MALFORMED_RESULT_CHILD: '1' }
+    delete env.NODE_TEST_CONTEXT
+    const child = spawnSync(process.execPath, [
+      '--test', '--test-name-pattern=^malformed current activation consumes a rejected result', import.meta.filename,
+    ], { encoding: 'utf8', env, timeout: 10_000 })
+    assert.equal(child.status, 0, `isolated test failed: ${child.error ?? ''}\n${child.stdout}\n${child.stderr}`)
+    assert.match(child.stdout, /malformed current activation consumes a rejected result/u)
+    return
+  }
+  const fixture = makeContext({ getProvider: () => ({ capabilities: { depthLimit: true } }) })
+  fixture.ctx.subagents.startActivation = async () => ({
+    childId: '', result: Promise.reject(new Error('background-sensitive-result')), dispose: async () => {},
+  })
+  apply(fixture.ctx, baseConfig)
+  await assert.rejects(fixture.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'malformed activation' },
+    { agent: { id: 'parent' }, signal: new AbortController().signal },
+  ), /invalid subagent activation/u)
+  await new Promise(resolve => setImmediate(resolve))
+})
+
+test('malformed legacy run consumes a rejected result without an unhandled rejection', async () => {
+  if (!process.env.OMO_MALFORMED_LEGACY_CHILD) {
+    const env = { ...process.env, OMO_MALFORMED_LEGACY_CHILD: '1' }
+    delete env.NODE_TEST_CONTEXT
+    const child = spawnSync(process.execPath, [
+      '--unhandled-rejections=strict', '--test', '--test-name-pattern=^malformed legacy run consumes a rejected result', import.meta.filename,
+    ], { encoding: 'utf8', env, timeout: 10_000 })
+    assert.equal(child.status, 0, `isolated test failed: ${child.error ?? ''}\n${child.stdout}\n${child.stderr}`)
+    assert.match(child.stdout, /malformed legacy run consumes a rejected result/u)
+    return
+  }
+  const fixture = makeContext()
+  const warnings = []
+  fixture.ctx.logger.warn = message => warnings.push(String(message))
+  fixture.ctx.subagents.start = async () => ({
+    get id() { throw new Error('private-legacy-id') },
+    result: Promise.reject(new Error('private-legacy-result')), dispose: async () => {},
+  })
+  apply(fixture.ctx, baseConfig)
+  let failure
+  try {
+    await fixture.tools.get('dsh_omo_task').execute(
+      { role: 'explore', task: 'malformed legacy run' },
+      { agent: { id: 'parent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal },
+    )
+  } catch (error) { failure = error }
+  assert.ok(failure, 'malformed legacy run must reject')
+  assert.match(String(failure), /invalid subagent (?:run|activation)/u)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.doesNotMatch(`${failure.stack}\n${warnings.join('\n')}\n${JSON.stringify(fixture.followups)}`, /private-legacy-(?:id|result)/u)
+})
+
+for (const cap of ['global', 'route']) {
+  test(`malformed legacy run retains ${cap} quota until disposal succeeds`, async () => {
+    const fixture = makeContext()
+    let finishDispose
+    let starts = 0
+    fixture.ctx.subagents.start = async () => {
+      starts += 1
+      if (starts === 1) return {
+        id: '', result: Promise.resolve({ stopReason: 'completed', output: [] }),
+        dispose: () => new Promise(resolve => { finishDispose = resolve }),
+      }
+      return { id: 'next-legacy-child', result: new Promise(() => {}), dispose: async () => {} }
+    }
+    apply(fixture.ctx, {
+      ...baseConfig, maxConcurrent: cap === 'global' ? 1 : 4,
+      providerConcurrency: { 'llm-provider': 1 },
+      roleRoutes: [{ role: 'explore', provider: 'llm-provider', model: 'model-a' }],
+    })
+    const tool = fixture.tools.get('dsh_omo_task')
+    const exec = { agent: { id: 'parent', followup() {} }, signal: new AbortController().signal }
+    const firstRejected = assert.rejects(tool.execute({ role: 'explore', task: 'malformed' }, exec), /invalid subagent (?:run|activation)/u)
+    void firstRejected.catch(() => {})
+    await new Promise(resolve => setImmediate(resolve))
+    try {
+      assert.equal(typeof finishDispose, 'function')
+      await assert.rejects(tool.execute({ role: 'explore', task: 'blocked' }, exec), cap === 'global' ? /worker limit reached/u : /provider concurrency limit reached/u)
+      assert.equal(starts, 1)
+    } finally {
+      if (finishDispose) finishDispose()
+    }
+    await firstRejected
+    assert.equal((await tool.execute({ role: 'explore', task: 'released' }, exec)).childId, 'next-legacy-child')
+    assert.equal(starts, 2)
+  })
+
+  for (const cleanup of ['rejects', 'missing']) {
+    test(`malformed legacy run with ${cleanup} dispose conservatively retains ${cap} quota`, async () => {
+      const fixture = makeContext()
+      const warnings = []
+      fixture.ctx.logger.warn = message => warnings.push(String(message))
+      let starts = 0
+      fixture.ctx.subagents.start = async () => {
+        starts += 1
+        return {
+          id: '', result: Promise.resolve({ stopReason: 'completed', output: [] }),
+          ...(cleanup === 'rejects' ? { dispose: async () => { throw new Error('private-legacy-dispose') } } : {}),
+        }
+      }
+      apply(fixture.ctx, {
+        ...baseConfig, maxConcurrent: cap === 'global' ? 1 : 4,
+        providerConcurrency: { 'llm-provider': 1 },
+        roleRoutes: [{ role: 'explore', provider: 'llm-provider', model: 'model-a' }],
+      })
+      const tool = fixture.tools.get('dsh_omo_task')
+      const exec = { agent: { id: 'parent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal }
+      let failure
+      try { await tool.execute({ role: 'explore', task: 'malformed' }, exec) } catch (error) { failure = error }
+      assert.ok(failure, 'malformed legacy run must reject')
+      assert.match(String(failure), /invalid subagent (?:run|activation)/u)
+      assert.doesNotMatch(`${failure.stack}\n${warnings.join('\n')}\n${JSON.stringify(fixture.followups)}`, /private-legacy-dispose/u)
+      await assert.rejects(tool.execute({ role: 'explore', task: 'blocked' }, exec), cap === 'global' ? /worker limit reached/u : /provider concurrency limit reached/u)
+      assert.equal(starts, 1)
+    })
+  }
+}
+
+test('invalid current and legacy cleanup warnings never include backend-controlled error names', async () => {
+  for (const mode of ['current', 'legacy']) {
+    const fixture = makeContext({ getProvider: () => ({ capabilities: { depthLimit: true } }) })
+    const warnings = []
+    fixture.ctx.logger.warn = message => warnings.push(String(message))
+    const makeRun = () => ({
+      ...(mode === 'current' ? { childId: '' } : { id: '' }),
+      result: Promise.resolve({ stopReason: 'completed', output: [] }),
+      dispose: async () => { const error = new Error('secret-message'); error.name = 'secret-name\nforged-log'; throw error },
+    })
+    if (mode === 'current') fixture.ctx.subagents.startActivation = async () => makeRun()
+    else fixture.ctx.subagents.start = async () => makeRun()
+    apply(fixture.ctx, baseConfig)
+    await assert.rejects(fixture.tools.get('dsh_omo_task').execute(
+      { role: 'quick', task: 'invalid cleanup' },
+      { agent: { id: 'parent', followup() {} }, signal: new AbortController().signal },
+    ), /invalid subagent/u)
+    assert.ok(warnings.length > 0)
+    assert.doesNotMatch(warnings.join('\n'), /secret-name|forged-log|secret-message/u)
+    assert.ok(warnings.every(message => !message.includes('\n')))
+  }
+})
+
+test('current activation snapshots one-shot Host accessors and preserves their receiver', async () => {
+  const fixture = makeContext({ getProvider: () => ({ capabilities: { depthLimit: true } }) })
+  const counts = { childId: 0, result: 0, dispose: 0, then: 0, calls: 0 }
+  const activation = {
+    get childId() { counts.childId += 1; return 'accessor-child' },
+    get result() {
+      counts.result += 1
+      return { get then() { counts.then += 1; return resolve => resolve({ stopReason: 'completed', output: [] }) } }
+    },
+    get dispose() {
+      counts.dispose += 1
+      return function () { assert.strictEqual(this, activation); counts.calls += 1; return Promise.resolve() }
+    },
+  }
+  fixture.ctx.subagents.startActivation = async () => activation
+  apply(fixture.ctx, baseConfig)
+  const started = await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'quick', task: 'snapshot activation fields once' },
+    { agent: { id: 'parent', followup() {} }, signal: new AbortController().signal },
+  )
+  assert.equal(started.childId, 'accessor-child')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(counts, { childId: 1, result: 1, dispose: 1, then: 1, calls: 1 })
+})
+
+for (const cap of ['global', 'route']) {
+  test(`malformed current activation retains ${cap} quota until disposal succeeds`, async () => {
+    const fixture = makeContext({ getProvider: () => ({ capabilities: { depthLimit: true, agentOptions: true } }) })
+    let finishDispose
+    let starts = 0
+    fixture.ctx.subagents.startActivation = async () => {
+      starts += 1
+      if (starts === 1) return {
+        childId: '', result: Promise.resolve({ stopReason: 'completed', output: [] }),
+        dispose: () => new Promise(resolve => { finishDispose = resolve }),
+      }
+      return { childId: 'next-child', result: new Promise(() => {}), dispose: async () => {} }
+    }
+    apply(fixture.ctx, {
+      ...baseConfig, maxConcurrent: cap === 'global' ? 1 : 4,
+      providerConcurrency: { 'llm-provider': 1 },
+      roleRoutes: [{ role: 'explore', provider: 'llm-provider', model: 'model-a' }],
+    })
+    const tool = fixture.tools.get('dsh_omo_task')
+    const exec = { agent: { id: 'parent', followup() {} }, signal: new AbortController().signal }
+    const first = tool.execute({ role: 'explore', task: 'malformed' }, exec)
+    const firstRejected = assert.rejects(first, /invalid subagent activation/u)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(typeof finishDispose, 'function')
+    try {
+      await assert.rejects(tool.execute({ role: 'explore', task: 'blocked' }, exec), cap === 'global' ? /worker limit reached/u : /provider concurrency limit reached/u)
+      assert.equal(starts, 1)
+    } finally {
+      finishDispose()
+    }
+    await firstRejected
+    assert.equal((await tool.execute({ role: 'explore', task: 'released' }, exec)).childId, 'next-child')
+    assert.equal(starts, 2)
+  })
+
+  for (const cleanup of ['rejects', 'missing']) {
+    test(`malformed current activation with ${cleanup} dispose conservatively retains ${cap} quota`, async () => {
+      const fixture = makeContext({ getProvider: () => ({ capabilities: { depthLimit: true, agentOptions: true } }) })
+      const warnings = []
+      fixture.ctx.logger.warn = message => warnings.push(String(message))
+      let starts = 0
+      fixture.ctx.subagents.startActivation = async () => {
+        starts += 1
+        return {
+          childId: '', result: Promise.resolve({ stopReason: 'completed', output: [] }),
+          ...(cleanup === 'rejects' ? { dispose: async () => { throw new Error('background-sensitive-dispose') } } : {}),
+        }
+      }
+      apply(fixture.ctx, {
+        ...baseConfig, maxConcurrent: cap === 'global' ? 1 : 4,
+        providerConcurrency: { 'llm-provider': 1 },
+        roleRoutes: [{ role: 'explore', provider: 'llm-provider', model: 'model-a' }],
+      })
+      const tool = fixture.tools.get('dsh_omo_task')
+      const exec = { agent: { id: 'parent', followup() {} }, signal: new AbortController().signal }
+      let failure
+      try { await tool.execute({ role: 'explore', task: 'malformed' }, exec) } catch (error) { failure = error }
+      assert.ok(failure, 'malformed activation must reject')
+      assert.match(String(failure), /invalid subagent activation/u)
+      assert.doesNotMatch(`${failure.stack}\n${warnings.join('\n')}\n${JSON.stringify(fixture.followups)}`, /background-sensitive-dispose/u)
+      await assert.rejects(tool.execute({ role: 'explore', task: 'blocked' }, exec), cap === 'global' ? /worker limit reached/u : /provider concurrency limit reached/u)
+      assert.equal(starts, 1)
+    })
+  }
+}
+
 test('current startActivation disposal cancels active children without queuing stale results', async () => {
   let resolveResult
   let disposeCalls = 0
@@ -6507,7 +10135,7 @@ test('plugin disposal releases a route lease while subagent startup is still pen
     result: Promise.resolve({ stopReason: 'completed', output: [] }),
     dispose: async () => { disposeCalls += 1 },
   })
-  await assert.rejects(pendingStart, /unloaded while starting/u)
+  await assert.rejects(pendingStart, /cancel|unload|accepted child/iu)
   assert.equal(disposeCalls, 1)
   assert.equal(fixture.followups.length, 0)
 })
@@ -6582,6 +10210,48 @@ test('/ulw-execute queues one prompt-only plan request and rejects unsupported f
   assert.equal(messages.length, 1, 'invalid and unsupported requests queue no additional follow-up')
 })
 
+test('/hyperplan queues prompt-only planning guidance and respects disabled specialist roles', () => {
+  const fixture = makeContext()
+  const messages = []
+  const agent = { id: 'parent-agent', followup: message => messages.push(message) }
+  apply(fixture.ctx, baseConfig)
+  const command = fixture.commands.get('hyperplan')
+  assert.ok(command)
+  assert.match(command.description, /does not restrict the current Agent or specialists to read-only Tools/u)
+  assert.equal(fixture.tools.has('hyperplan'), false, 'the command is human-invoked, not a model-facing Tool')
+
+  const result = command.handler({ agent, rawInput: 'Plan a safe migration.' })
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /adversarial implementation plan/u)
+  assert.equal(messages.length, 1)
+  const text = messages[0].content[0].text
+  assert.match(text, /Plan only: do not edit files, create worktrees, or execute tasks/u)
+  assert.match(text, /prompt guidance only, not a read-only gate/u)
+  assert.match(text, /adds no Tool restrictions for the current Agent or delegated specialists/u)
+  assert.match(text, /`plan-consultant` and `plan-reviewer`/u)
+  assert.match(text, /Challenge the proposal/u)
+  assert.match(text, /dependency-ordered tasks with acceptance checks/u)
+  assert.match(text, /Plan a safe migration\./u)
+  assert.equal(messages[0].source.kind, 'user')
+  assert.equal(fixture.starts.length, 0, 'the command queues a prompt and does not directly launch specialists')
+  assert.match(fixture.commands.get('omo').handler().text, /\/hyperplan/u)
+
+  const restricted = makeContext()
+  const restrictedMessages = []
+  apply(restricted.ctx, { ...baseConfig, disabledOmoRoles: ['plan-consultant', 'plan-reviewer'] })
+  restricted.commands.get('hyperplan').handler({
+    agent: { id: 'restricted-agent', followup: message => restrictedMessages.push(message) },
+    rawInput: 'Plan without specialists.',
+  })
+  assert.match(restrictedMessages[0].content[0].text, /Planning specialists are disabled/u)
+  assert.doesNotMatch(restrictedMessages[0].content[0].text, /`plan-consultant`|`plan-reviewer`/u)
+
+  for (const rawInput of [undefined, '', '  ', 'x'.repeat(baseConfig.maxTaskChars + 1)]) {
+    assert.equal(command.handler({ agent, rawInput }).kind, 'error')
+  }
+  assert.equal(messages.length, 1, 'invalid and oversized inputs queue no additional follow-up')
+})
+
 test('creates a DSH worktree only for explicit /ulw-execute --worktree and queues bounded plan guidance', async () => {
   const messages = []
   const agent = { id: 'parent-agent', followup: value => messages.push(value) }
@@ -6597,11 +10267,30 @@ test('creates a DSH worktree only for explicit /ulw-execute --worktree and queue
   const command = fixture.commands.get('ulw-execute')
   const result = await command.handler({ agent, rawInput: 'Approved plan --worktree', signal: abort })
   assert.equal(result.kind, 'success')
-  assert.match(result.text, /Created DSH worktree branch plan-a at \/workspace\/\.worktrees\/plan-a from abc123/u)
+  assert.match(result.text, /Created DSH worktree path="\/workspace\/\.worktrees\/plan-a"; branch="plan-a"; baseCommit="abc123"/u)
   assert.deepEqual(calls, [[agent, {}, abort]])
   assert.equal(messages.length, 1)
-  assert.match(messages[0].content[0].text, /already been created and selected as this Agent’s current working directory/u)
+  assert.match(messages[0].content[0].text, /created and selected this retained DSH worktree as this Agent’s current working directory/u)
+  assert.match(messages[0].content[0].text, /path="\/workspace\/\.worktrees\/plan-a"; branch="plan-a"; baseCommit="abc123"/u)
+  assert.match(messages[0].content[0].text, /no worktree-removal service/u)
+  assert.match(messages[0].content[0].text, /do not run git worktree remove or manually delete this checkout/u)
   assert.match(messages[0].content[0].text, /Approved plan/u)
+
+  const invalidMessages = []
+  const invalidMetadata = makeContext({ services: { worktrees: {
+    async create() {
+      return { path: 'x'.repeat(4_097), branch: 'plan-a', baseCommit: 'abc123' }
+    },
+  } } })
+  apply(invalidMetadata.ctx, baseConfig)
+  const invalidResult = await invalidMetadata.commands.get('ulw-execute').handler({
+    agent: { id: 'parent-agent', followup: value => invalidMessages.push(value) },
+    rawInput: 'Approved plan --worktree',
+  })
+  assert.equal(invalidResult.kind, 'error')
+  assert.match(invalidResult.text, /oversized DSH worktree metadata/u)
+  assert.match(invalidResult.text, /inspect the workspace/u)
+  assert.equal(invalidMessages.length, 0, 'invalid Host metadata must not enter the model prompt')
 
   const noService = makeContext()
   const noServiceMessages = []
@@ -6751,6 +10440,108 @@ test('attempts interruption only for resident label-matched children under exact
   assert.equal(fixture.interrupts.length, 2)
 })
 
+test('automatic context overflow recovery is default-off, code-gated, and preserves runtime fallback retries', async () => {
+  const defaultFixture = makeContext()
+  apply(defaultFixture.ctx, baseConfig)
+  assert.equal(defaultFixture.eventListeners.get('agent/request-error')?.length ?? 0, 0)
+  assert.match(defaultFixture.commands.get('omo').handler({ rawInput: 'status' }).text, /contextOverflowRecovery=disabled/u)
+
+  const missingCodes = makeContext()
+  assert.throws(() => apply(missingCodes.ctx, {
+    ...baseConfig, contextOverflowRecovery: { enabled: true },
+  }), /at least one exact provider error code/u)
+
+  const recoveryConfig = {
+    ...baseConfig,
+    contextOverflowRecovery: { enabled: true, codesByProvider: { 'provider-primary': ['context_window_exceeded'] } },
+  }
+  const missingPruner = makeContext()
+  assert.throws(() => apply(missingPruner.ctx, recoveryConfig), /contextOverflowRecovery requires DSH toolResultPruner\.pruneSession/u)
+
+  const missingIdentityServices = makeContext({ services: { toolResultPruner: { pruneSession() {} } } })
+  assert.throws(() => apply(missingIdentityServices.ctx, recoveryConfig), /requires DSH agents\.get, sessions\.get/u)
+
+  const agent = Object.freeze({ id: 'overflow-session' })
+  const session = Object.freeze({ id: agent.id })
+  let pruneCalls = 0
+  const fixture = makeContext({ services: {
+    agents: { get: id => id === agent.id ? agent : undefined },
+    sessions: { get: id => id === session.id ? session : undefined },
+    toolResultPruner: { pruneSession: () => { pruneCalls += 1; return { pruned: [{}], charsRemoved: 42 } } },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    contextOverflowRecovery: { enabled: true, codesByProvider: { 'provider-primary': ['context_window_exceeded'] } },
+    runtimeFallback: {
+      enabled: true,
+      cooldownSeconds: 0,
+      chains: [{
+        provider: 'provider-primary', model: 'model-primary',
+        fallbacks: [{ provider: 'provider-backup', model: 'model-backup' }],
+      }],
+    },
+  })
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /contextOverflowRecovery=enabled/u)
+  const errorListeners = fixture.eventListeners.get('agent/request-error')
+  assert.equal(errorListeners.length, 2)
+  const [recovery, fallback] = errorListeners
+  const signal = new AbortController().signal
+  const callConfig = { provider: 'provider-primary', model: 'model-primary' }
+  const requestEvent = fixture.events.get('agent/request')
+  assert.strictEqual(await requestEvent({ agent, turn: 4, step: 2, signal }, async () => callConfig), callConfig)
+  const payload = {
+    agent, turn: 4, step: 2, provider: 'provider-primary',
+    failure: { code: 'context_window_exceeded', status: 503, message: 'context too large' },
+    retryPolicy: { mode: 'normal', maxRetries: 0, retryableCodes: [], initialDelayMs: 0, maxDelayMs: 0, jitterRatio: 0 },
+    signal,
+  }
+  assert.deepEqual(await recovery(payload, () => fallback(payload, async () => undefined)), { kind: 'retry' })
+  assert.equal(pruneCalls, 0, 'a retry already selected by runtimeFallback is preserved without pruning')
+})
+
+test('automatic pressure compaction is default-off and runs only at the awaited turn boundary', async () => {
+  const defaultFixture = makeContext()
+  apply(defaultFixture.ctx, baseConfig)
+  assert.equal(defaultFixture.eventListeners.get('agent/turn-stopping')?.length ?? 0, 0)
+  assert.match(defaultFixture.commands.get('omo').handler({ rawInput: 'status' }).text, /pressureCompaction=disabled/u)
+
+  assert.throws(
+    () => apply(makeContext().ctx, { ...baseConfig, enablePressureCompaction: true }),
+    /enablePressureCompaction requires DSH compaction\.compactIfNeeded/u,
+  )
+  const missingIdentityServices = makeContext({ services: { compaction: { compactIfNeeded() {} } } })
+  assert.throws(
+    () => apply(missingIdentityServices.ctx, { ...baseConfig, enablePressureCompaction: true }),
+    /enablePressureCompaction requires DSH agents\.get, sessions\.get/u,
+  )
+
+  const agent = Object.freeze({ id: 'pressure-session' })
+  const session = Object.freeze({ header: Object.freeze({ id: agent.id }) })
+  const calls = []
+  const fixture = makeContext({ services: {
+    agents: { get: id => id === agent.id ? agent : undefined },
+    sessions: { get: id => id === agent.id ? session : undefined },
+    compaction: { async compactIfNeeded(agentContext, trigger, signal) {
+      calls.push({ agentContext, trigger, signal })
+      return null
+    } },
+  } })
+  apply(fixture.ctx, { ...baseConfig, enablePressureCompaction: true })
+  const [listener] = fixture.eventListeners.get('agent/turn-stopping')
+  const signal = new AbortController().signal
+  await listener({ agent, turn: 5, signal })
+
+  assert.equal(calls.length, 1)
+  assert.strictEqual(calls[0].agentContext.session, session)
+  assert.deepEqual(calls[0].agentContext.options, {})
+  assert.equal(calls[0].trigger, 'pressure')
+  assert.equal(calls[0].signal.aborted, false)
+  assert.notStrictEqual(calls[0].signal, signal)
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /pressureCompaction=enabled/u)
+  assert.match(fixture.commands.get('omo').handler({ rawInput: 'status' }).text, /compaction=present/u)
+  fixture.effects.find(effect => effect.label === 'dsh-omo pressure compaction')?.dispose?.()
+})
+
 test('manual context pruning is opt-in, current-Agent scoped, and requires exact Host services', () => {
   const defaultFixture = makeContext()
   apply(defaultFixture.ctx, baseConfig)
@@ -6808,4 +10599,876 @@ test('manual context pruning is opt-in, current-Agent scoped, and requires exact
   ])
   fixture.commands.get('omo').handler({ agent, rawInput: 'prune-context other-session', signal: new AbortController().signal })
   assert.equal(calls.filter(([name]) => name === 'pruneSession').length, 1, 'an arbitrary session id is never accepted')
+})
+
+// Exercise ordinary task admission through the registered Tool, not ToolRuntime.
+function pendingTaskFixture(config = {}) {
+  const agents = new Map()
+  const project = config.enableProjectAgentFiles ? makeProjectAgentFs() : undefined
+  const fixture = makeContext({
+    fs: project?.fs,
+    services: {
+      agents: { get: id => agents.get(id), withoutInitiator: fn => fn() },
+      ...(project ? { sessions: { get: id => ({ header: { id, cwd: project.cwd } }) } } : {}),
+    },
+  })
+  const runs = []
+  fixture.ctx.subagents.start = async (_provider, request) => {
+    let finish
+    const result = new Promise(resolve => { finish = resolve })
+    const run = { request, finish, id: `queued-child-${runs.length + 1}` }
+    runs.push(run)
+    return { id: run.id, result, dispose: () => run.dispose?.() }
+  }
+  apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1, maxPendingTasks: 2, ...config })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const agent = { id: 'queue-parent', followup() {} }
+  const controllers = []
+  const call = (task, options = {}) => {
+    const controller = new AbortController()
+    controllers.push(controller)
+    const parent = options.agent ?? agent
+    agents.set(parent.id, parent)
+    const promise = tool.execute({ role: options.role ?? 'quick', task }, { agent: parent, signal: controller.signal })
+    // A rejected queued invocation must never become an unhandled rejection.
+    promise.catch(() => {})
+    return { promise, controller }
+  }
+  const cleanup = () => {
+    for (const controller of controllers) controller.abort()
+    for (const run of runs) run.finish({ stopReason: 'completed', output: [] })
+  }
+  return { fixture, runs, call, cleanup, agent, agents }
+}
+
+const queueTurn = () => new Promise(resolve => setImmediate(resolve))
+async function assertStillQueued(promise) {
+  const state = await Promise.race([promise.then(() => 'fulfilled', () => 'rejected'), queueTurn().then(() => 'pending')])
+  assert.equal(state, 'pending', 'saturated invocation must wait for a global slot')
+}
+
+for (const [label, selector, project] of [
+  ['overlong category', { category: 'untrusted-category-' + 'x'.repeat(65) }, false],
+  ['non-string category', { category: { secret: 'untrusted-category-object' } }, false],
+  ['unsafe project agentFile', { role: '__project_agent_file__', agentFile: '../untrusted-agent-file' }, true],
+  ['overlong project agentFile', { role: '__project_agent_file__', agentFile: 'untrusted-agent-' + 'x'.repeat(65) }, true],
+  ['non-string project agentFile', { role: '__project_agent_file__', agentFile: { secret: 'untrusted-agent-object' } }, true],
+]) {
+  test(`maxPendingTasks rejects ${label} before admission without consuming a waiter`, async () => {
+    const q = pendingTaskFixture({ maxPendingTasks: 1, enableProjectAgentFiles: project })
+    const controller = new AbortController()
+    try {
+      await q.call('hold').promise
+      const invalid = q.fixture.tools.get('dsh_omo_task').execute(
+        { role: 'quick', task: 'invalid', ...selector },
+        { agent: q.agent, signal: controller.signal },
+      )
+      const outcome = invalid.then(() => ({ state: 'fulfilled' }), error => ({ state: 'rejected', error }))
+      const settled = await Promise.race([outcome, queueTurn().then(() => ({ state: 'pending' }))])
+      assert.equal(settled.state, 'rejected', `${label} must fail immediately while the global slot is occupied`)
+      assert.match(String(settled.error), project ? /agentFile/u : /category/iu)
+      assert.doesNotMatch(String(settled.error), /untrusted-(?:category|agent)/u)
+      const valid = q.call('valid waiter')
+      await assertStillQueued(valid.promise)
+      assert.equal(q.runs.length, 1)
+      q.runs[0].finish({ stopReason: 'completed', output: [] })
+      assert.equal((await valid.promise).childId, 'queued-child-2')
+    } finally {
+      controller.abort()
+      q.cleanup()
+    }
+  })
+}
+
+test('maxPendingTasks rejects conflicting project agent names before queueing', async () => {
+  const q = pendingTaskFixture({ maxPendingTasks: 1, enableProjectAgentFiles: true })
+  try {
+    await q.call('hold').promise
+    await assert.rejects(q.fixture.tools.get('dsh_omo_task').execute(
+      { role: '__project_agent_file__', agentFile: 'quick', task: 'conflict' },
+      { agent: q.agent, signal: new AbortController().signal },
+    ), /conflicts with a configured specialist role/u)
+    const valid = q.call('valid waiter')
+    await assertStillQueued(valid.promise)
+    q.runs[0].finish({ stopReason: 'completed', output: [] })
+    assert.equal((await valid.promise).childId, 'queued-child-2')
+  } finally { q.cleanup() }
+})
+
+test('maxPendingTasks bounds the retained task and skill selector payload', async () => {
+  const q = pendingTaskFixture({ maxPendingTasks: 1, maxTaskChars: 100_000 })
+  const controller = new AbortController()
+  try {
+    await q.call('hold').promise
+    const tool = q.fixture.tools.get('dsh_omo_task')
+    for (const args of [
+      { role: 'quick', task: 'small', load_skills: ['a'.repeat(32_768)] },
+      { role: 'quick', task: 'small', load_skills: ['a'.repeat(32_759)] }, // exactly 32769 code units
+      { role: 'quick', task: 'x'.repeat(32_768) },
+      { role: 'quick', task: '😀'.repeat(16_382) }, // 32764 UTF-16 units plus role
+    ]) {
+      await assert.rejects(tool.execute(args, { agent: q.agent, signal: controller.signal }), error => {
+        assert.match(error.message, /waiting payload limit/u)
+        assert.ok(error.message.length < 256, 'do not echo oversized input')
+        return true
+      })
+    }
+    const boundary = new AbortController()
+    const atLimit = tool.execute(
+      { role: 'quick', task: 'small', load_skills: ['a'.repeat(32_758)] },
+      { agent: q.agent, signal: boundary.signal },
+    )
+    await assertStillQueued(atLimit) // 5 + 5 + 32758 = 32768 code units.
+    boundary.abort()
+    await assert.rejects(atLimit, /abort/iu)
+    const valid = q.call('valid waiter')
+    await assertStillQueued(valid.promise)
+    q.runs[0].finish({ stopReason: 'completed', output: [] })
+    assert.equal((await valid.promise).childId, 'queued-child-2')
+  } finally { controller.abort(); q.cleanup() }
+})
+
+test('maxPendingTasks does not apply the waiting payload limit to immediately admitted calls', async () => {
+  const q = pendingTaskFixture({ maxPendingTasks: 1, maxTaskChars: 100_000 })
+  try {
+    const started = q.call('x'.repeat(32_768))
+    assert.equal((await started.promise).childId, 'queued-child-1')
+    assert.equal(q.runs.length, 1)
+  } finally { q.cleanup() }
+})
+
+test('default admission still rejects saturation immediately before category or agentFile route validation', async () => {
+  const q = pendingTaskFixture({ maxPendingTasks: undefined, enableProjectAgentFiles: true })
+  try {
+    await q.call('hold').promise
+    for (const selector of [
+      { category: 'untrusted-category-' + 'x'.repeat(65) },
+      { category: { secret: 'untrusted-category-object' } },
+      { role: '__project_agent_file__', agentFile: '../untrusted-agent-file' },
+      { role: '__project_agent_file__', agentFile: 'untrusted-agent-' + 'x'.repeat(65) },
+    ]) {
+      await assert.rejects(q.fixture.tools.get('dsh_omo_task').execute(
+        { role: 'quick', task: 'saturated', ...selector },
+        { agent: q.agent, signal: new AbortController().signal },
+      ), error => {
+        assert.match(error.message, /worker limit reached/u)
+        assert.doesNotMatch(error.message, /untrusted-(?:category|agent)/u)
+        return true
+      })
+    }
+    assert.equal(q.runs.length, 1)
+  } finally { q.cleanup() }
+})
+
+test('legacy start maxPendingTasks FIFO prevents newly arriving ordinary calls from overtaking', async () => {
+  const q = pendingTaskFixture({ maxPendingTasks: 3 })
+  try {
+    await q.call('first').promise
+    const second = q.call('second')
+    const third = q.call('third')
+    await assertStillQueued(second.promise)
+    await assertStillQueued(third.promise)
+    q.runs[0].finish({ stopReason: 'completed', output: [] })
+    // This call races with the wake-up: it must not claim the released slot ahead of second.
+    const newcomer = q.call('newcomer')
+    assert.equal((await second.promise).childId, 'queued-child-2')
+    await assertStillQueued(third.promise)
+    await assertStillQueued(newcomer.promise)
+    q.runs[1].finish({ stopReason: 'completed', output: [] })
+    assert.equal((await third.promise).childId, 'queued-child-3')
+    q.runs[2].finish({ stopReason: 'completed', output: [] })
+    assert.equal((await newcomer.promise).childId, 'queued-child-4')
+  } finally { q.cleanup() }
+})
+
+for (const field of ['task', 'role', 'category', 'agentFile', 'load_skills']) {
+  test(`maxPendingTasks preserves validated ${field} when queued args are mutated`, async () => {
+    const q = pendingTaskFixture({
+      maxPendingTasks: 1,
+      maxTaskChars: 128,
+      categoryRoutes: [{ name: 'other-route', provider: 'other-provider', model: 'other-model' }],
+    })
+    try {
+      await q.call('first').promise
+      const skills = []
+      const args = { role: 'quick', task: 'Original bounded task', load_skills: skills }
+      const controller = new AbortController()
+      const pending = q.fixture.tools.get('dsh_omo_task').execute(args, { agent: q.agent, signal: controller.signal })
+      pending.catch(() => {})
+      await assertStillQueued(pending)
+      if (field === 'task') args.task = 'x'.repeat(129)
+      if (field === 'role') args.role = 'explore'
+      if (field === 'category') args.category = 'other-route'
+      if (field === 'agentFile') args.agentFile = '../unvalidated'
+      if (field === 'load_skills') skills.push('unavailable-skill')
+      q.runs[0].finish({ stopReason: 'completed', output: [] })
+      await pending
+      assert.equal(q.runs.length, 2)
+      const request = q.runs[1].request
+      assert.equal(request.prompt[0].text, buildWorkerPrompt('quick', 'Original bounded task'))
+      assert.notEqual(request.agentOptions?.provider, 'other-provider')
+      assert.notEqual(request.agentOptions?.model, 'other-model')
+    } finally { q.cleanup() }
+  })
+}
+
+test('one-shot settlement retains its validated task when a direct caller mutates startup arguments', async () => {
+  let accept
+  let starts = 0
+  const fixture = makeContext({ getProvider: () => ({ capabilities: { depthLimit: true } }) })
+  fixture.ctx.subagents.startActivation = () => {
+    starts += 1
+    if (starts === 1) return new Promise(resolve => { accept = resolve })
+    return Promise.resolve({ childId: 'next-child', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose: async () => {} })
+  }
+  apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1 })
+  const args = { role: 'quick', task: 'Original task summary' }
+  const parent = { id: 'parent', followup: message => fixture.followups.push(message) }
+  const exec = { agent: parent, signal: new AbortController().signal }
+  const pending = fixture.tools.get('dsh_omo_task').execute(args, exec)
+  await queueTurn()
+  args.task = null
+  accept({ childId: 'first-child', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose: async () => {} })
+  await pending
+  await queueTurn()
+  assert.match(JSON.stringify(fixture.followups), /Original task summary/u)
+  assert.equal((await fixture.tools.get('dsh_omo_task').execute({ role: 'quick', task: 'next' }, exec)).childId, 'next-child')
+})
+
+test('maxPendingTasks preserves a nonempty skill selection while queued', async () => {
+  const parent = { id: 'skill-parent', followup() {} }
+  const lookups = []
+  const fixture = makeContext({
+    services: {
+      agents: { get: id => id === parent.id ? parent : undefined, withoutInitiator: fn => fn() },
+      sessions: { get: id => ({ id, header: { cwd: '/workspace/project' } }) },
+    },
+    skillGet: async name => {
+      lookups.push(name)
+      return { name, invocation: { modelInvocable: true }, source: 'project-dsh', provider: 'test', content: `Original skill: ${name}` }
+    },
+  })
+  let finishFirst, finishSecond
+  let starts = 0
+  fixture.ctx.subagents.start = async (_provider, request) => {
+    starts += 1
+    let finish
+    const result = new Promise(resolve => { finish = resolve })
+    if (starts === 1) finishFirst = finish
+    else { finishSecond = finish; fixture.starts.push({ request }) }
+    return { id: `skill-child-${starts}`, result, dispose: async () => {} }
+  }
+  apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1, maxPendingTasks: 1 })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: parent, signal: new AbortController().signal }
+  try {
+    await tool.execute({ role: 'quick', task: 'hold' }, exec)
+    const skills = ['debugging']
+    const pending = tool.execute({ role: 'quick', task: 'use selected skill', load_skills: skills }, exec)
+    await assertStillQueued(pending)
+    skills[0] = 'security-research'
+    finishFirst({ stopReason: 'completed', output: [] })
+    await pending
+    assert.deepEqual(lookups, ['debugging'])
+    assert.match(fixture.starts[0].request.prompt[0].text, /Original skill: debugging/u)
+    assert.doesNotMatch(fixture.starts[0].request.prompt[0].text, /Original skill: security-research/u)
+  } finally {
+    finishFirst?.({ stopReason: 'completed', output: [] })
+    finishSecond?.({ stopReason: 'completed', output: [] })
+  }
+})
+
+// These direct Tool calls deliberately violate Host exec identity stability. Host
+// ToolRuntime may freeze args; these are defense-in-depth regressions, not a permission boundary.
+test('maxPendingTasks snapshots exec.agent while waiting for a global slot', async () => {
+  const q = pendingTaskFixture({ maxPendingTasks: 1 })
+  const original = { id: 'original-owner', followup() {} }
+  const other = { id: 'other-owner', followup() {} }
+  const controller = new AbortController()
+  try {
+    q.agents.set(original.id, original)
+    q.agents.set(other.id, other)
+    await q.call('holder').promise
+    const exec = { agent: original, signal: controller.signal }
+    const pending = q.fixture.tools.get('dsh_omo_task').execute({ role: 'quick', task: 'queued owner' }, exec)
+    pending.catch(() => {})
+    await assertStillQueued(pending)
+    exec.agent = other
+    q.runs[0].finish({ stopReason: 'completed', output: [] })
+    assert.equal((await pending).childId, 'queued-child-2')
+    assert.strictEqual(q.runs[1].request.parent, original)
+  } finally { controller.abort(); q.cleanup() }
+})
+
+test('maxPendingTasks snapshots exec.signal while waiting for a global slot', async () => {
+  const q = pendingTaskFixture({ maxPendingTasks: 1 })
+  const original = new AbortController()
+  const replacement = new AbortController()
+  try {
+    await q.call('holder').promise
+    const exec = { agent: q.agent, signal: original.signal }
+    const pending = q.fixture.tools.get('dsh_omo_task').execute({ role: 'quick', task: 'queued cancellation' }, exec)
+    pending.catch(() => {})
+    await assertStillQueued(pending)
+    exec.signal = replacement.signal
+    original.abort()
+    await assert.rejects(pending, /abort/i)
+    q.runs[0].finish({ stopReason: 'completed', output: [] })
+    await queueTurn()
+    assert.equal(q.runs.length, 1, 'replacement signal must not bypass original cancellation')
+  } finally { original.abort(); replacement.abort(); q.cleanup() }
+})
+
+test('maxPendingTasks snapshots exec.agent across deferred Host acceptance and result relay', async () => {
+  const relays = []
+  const original = { id: 'original-owner', followup: message => relays.push({ owner: 'original', message }) }
+  const other = { id: 'other-owner', followup: message => relays.push({ owner: 'other', message }) }
+  const agents = new Map([[original.id, original], [other.id, other]])
+  const fixture = makeContext({
+    getProvider: () => ({ capabilities: { depthLimit: true } }),
+    services: { agents: { get: id => agents.get(id), withoutInitiator: fn => fn() } },
+  })
+  let accept, finish, spec
+  fixture.ctx.subagents.startActivation = value => {
+    spec = value
+    return new Promise(resolve => { accept = resolve })
+  }
+  apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1, maxPendingTasks: 1, enableTaskResultTool: true })
+  const controller = new AbortController()
+  const exec = { agent: original, signal: controller.signal }
+  const pending = fixture.tools.get('dsh_omo_task').execute({ role: 'quick', task: 'deferred owner' }, exec)
+  pending.catch(() => {})
+  try {
+    await queueTurn()
+    assert.equal(typeof accept, 'function')
+    assert.strictEqual(spec.request.parent, original)
+    const result = new Promise(resolve => { finish = resolve })
+    accept({ childId: 'deferred-child', result, dispose: async () => {} })
+    assert.equal((await pending).childId, 'deferred-child')
+    exec.agent = other
+    finish({ stopReason: 'completed', output: [{ type: 'text', text: 'Owned result.' }] })
+    await queueTurn()
+    assert.ok(relays.some(({ owner, message }) => owner === 'original' && message.content.some(block => block.text.includes('Owned result.'))))
+    assert.ok(relays.every(({ owner }) => owner === 'original'))
+    const resultTool = fixture.tools.get('dsh_omo_task_result')
+    assert.equal((await resultTool.execute({ childId: 'deferred-child' }, { agent: original })).output, 'Owned result.')
+    await assert.rejects(resultTool.execute({ childId: 'deferred-child' }, { agent: other }), /No unexpired dsh-omo result/u)
+  } finally { controller.abort(); if (finish) finish({ stopReason: 'completed', output: [] }) }
+})
+
+test('maxPendingTasks accepts sixteen waiters, rejects overflow, and rejects invalid bounds', async () => {
+  for (const value of [-1, 17, 1.5]) {
+    const fixture = makeContext({ services: { agents: { get() {}, withoutInitiator: fn => fn() } } })
+    assert.throws(() => apply(fixture.ctx, { ...baseConfig, maxPendingTasks: value }), /maxPendingTasks/i)
+  }
+  const q = pendingTaskFixture({ maxPendingTasks: 16 })
+  try {
+    await q.call('first').promise
+    const waiters = Array.from({ length: 16 }, (_, i) => q.call(`waiter ${i}`))
+    for (const waiter of waiters) await assertStillQueued(waiter.promise)
+    await assert.rejects(q.call('overflow').promise, /limit|pending|queue/i)
+    assert.equal(q.runs.length, 1)
+  } finally { q.cleanup() }
+})
+
+test('maxPendingTasks waits at most eight seconds and cancellation frees queue capacity', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const q = pendingTaskFixture({ maxPendingTasks: 1 })
+  try {
+    await q.call('first').promise
+    const cancelled = q.call('cancelled')
+    await assertStillQueued(cancelled.promise)
+    cancelled.controller.abort()
+    await assert.rejects(cancelled.promise)
+    const timeout = q.call('timeout')
+    await assertStillQueued(timeout.promise)
+    t.mock.timers.tick(7999)
+    await assertStillQueued(timeout.promise)
+    t.mock.timers.tick(1)
+    await assert.rejects(timeout.promise, /timeout|timed out|limit|wait/i)
+    assert.equal(q.runs.length, 1)
+    const next = q.call('after timeout')
+    await assertStillQueued(next.promise)
+    q.runs[0].finish({ stopReason: 'completed', output: [] })
+    assert.equal((await next.promise).childId, 'queued-child-2')
+  } finally { q.cleanup(); t.mock.timers.reset() }
+})
+
+test('maxPendingTasks agent disposal cancels only the exact queued agent, not a same-ID replacement', async () => {
+  const q = pendingTaskFixture({ maxPendingTasks: 3 })
+  try {
+    await q.call('first').promise
+    const old = { id: 'same-id', followup() {} }
+    const replacement = { id: 'same-id', followup() {} }
+    const obsolete = q.call('old', { agent: old })
+    const live = q.call('replacement', { agent: replacement })
+    const obsoleteState = await Promise.race([obsolete.promise.then(() => 'fulfilled', error => `rejected:${error.message}`), queueTurn().then(() => 'pending')])
+    if (obsoleteState !== 'pending') throw new Error(`obsolete state before disposal: ${obsoleteState}`)
+    const initialLiveState = await Promise.race([live.promise.then(() => 'fulfilled', error => `rejected:${error.message}`), queueTurn().then(() => 'pending')])
+    if (initialLiveState !== 'pending') throw new Error(`replacement state before old disposal: ${initialLiveState}`)
+    for (const listener of q.fixture.eventListeners.get('agent/disposed') ?? []) listener({ agent: old })
+    await assert.rejects(obsolete.promise)
+    assert.equal(q.agents.get(old.id), replacement)
+    const liveState = await Promise.race([live.promise.then(() => 'fulfilled', error => `rejected:${error.message}`), queueTurn().then(() => 'pending')])
+    if (liveState !== 'pending') throw new Error(`replacement state after old disposal: ${liveState}`)
+    q.runs[0].finish({ stopReason: 'completed', output: [] })
+    const replacementResult = await live.promise.catch(error => { throw new Error(`replacement settlement: ${error.message}`) })
+    assert.equal(replacementResult.childId, 'queued-child-2')
+  } finally { q.cleanup() }
+})
+
+for (const disruption of ['caller abort', 'exact parent replacement']) {
+  test(`maxPendingTasks releases a granted lease after ${disruption} before execute resumes`, async () => {
+    const q = pendingTaskFixture({ maxPendingTasks: 2 })
+    const old = { id: 'grant-parent', followup() {} }
+    const replacement = { id: old.id, followup() {} }
+    const nextParent = { id: 'next-parent', followup() {} }
+    let openDispose
+    let intervene
+    const intervention = new Promise((resolve, reject) => { intervene = { resolve, reject } })
+    try {
+      await q.call('A').promise
+      const gate = new Promise(resolve => { openDispose = resolve })
+      q.runs[0].dispose = () => {
+        // onceAsync adopts gate through Promise reactions. Three microtasks place
+        // the intervention after disposal releases/grants B but before B resumes.
+        // The assertions below fail if that ordering ever changes.
+        gate.finally(() => queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => {
+          try {
+            assert.equal(removedAbortListener, true, 'B was dequeued by the synchronous grant')
+            assert.equal(b.controller.signal.aborted, false)
+            assert.equal(q.runs.length, 1, 'B has not reached Host startup')
+            if (disruption === 'caller abort') b.controller.abort()
+            else q.agents.set(old.id, replacement)
+            intervene.resolve()
+          } catch (error) { intervene.reject(error) }
+        }))))
+        return gate
+      }
+      const b = q.call('B', { agent: old })
+      let removedAbortListener = false
+      const signal = b.controller.signal
+      const remove = signal.removeEventListener.bind(signal)
+      signal.removeEventListener = (type, listener, options) => {
+        if (type === 'abort') removedAbortListener = true
+        return remove(type, listener, options)
+      }
+      const c = q.call('C', { agent: nextParent })
+      await assertStillQueued(b.promise)
+      await assertStillQueued(c.promise)
+      q.runs[0].finish({ stopReason: 'completed', output: [] })
+      await queueTurn()
+      assert.equal(q.runs.length, 1, 'A disposal holds the slot')
+      openDispose()
+      await intervention
+      await assert.rejects(b.promise, disruption === 'caller abort' ? /abort/i : /live parent/i)
+      assert.equal((await c.promise).childId, 'queued-child-2')
+      assert.equal(q.runs.length, 2, 'only A and C reached Host startup')
+    } finally {
+      if (openDispose) openDispose()
+      q.cleanup()
+    }
+  })
+}
+
+test('maxPendingTasks plugin unload rejects queued calls without starting them', async () => {
+  const q = pendingTaskFixture()
+  try {
+    await q.call('first').promise
+    const waiting = q.call('waiting')
+    await assertStillQueued(waiting.promise)
+    const effect = q.fixture.effects.find(item => item.label === 'dsh-omo background workers')
+    assert.ok(effect)
+    await effect.dispose()
+    await assert.rejects(waiting.promise)
+    assert.equal(q.runs.length, 1)
+  } finally { q.cleanup() }
+})
+
+test('maxPendingTasks waits for a saturated route without retaining the temporary global slot', async () => {
+  const q = pendingTaskFixture({
+    maxConcurrent: 2,
+    providerConcurrency: { limited: 1 },
+    roleRoutes: [{ role: 'explore', provider: 'limited', model: 'model-a' }],
+  })
+  try {
+    await q.call('route holder', { role: 'explore' }).promise
+    const routeWaiter = q.call('route full with global slot free', { role: 'explore' })
+    await assertStillQueued(routeWaiter.promise)
+    assert.equal(q.runs.length, 1, 'route saturation waits instead of starting or retaining an extra global lease')
+    await q.call('global holder').promise
+    assert.equal(q.runs.length, 2)
+    q.runs[0].finish({ stopReason: 'completed', output: [] })
+    assert.equal((await routeWaiter.promise).childId, 'queued-child-3')
+    assert.equal(q.runs.length, 3)
+    q.runs[1].finish({ stopReason: 'completed', output: [] })
+    q.runs[2].finish({ stopReason: 'completed', output: [] })
+  } finally { q.cleanup() }
+})
+
+test('maxPendingTasks retains global capacity through late start and malformed pending disposal', async () => {
+  const agent = { id: 'parent', followup() {} }
+  const fixture = makeContext({ services: { agents: { get: id => id === agent.id ? agent : undefined, withoutInitiator: fn => fn() } } })
+  let acceptStart, finishDispose
+  let starts = 0
+  fixture.ctx.subagents.start = () => {
+    starts += 1
+    if (starts === 1) return new Promise(resolve => { acceptStart = resolve })
+    return Promise.resolve({ id: 'after-cleanup', result: new Promise(() => {}), dispose: async () => {} })
+  }
+  apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1, maxPendingTasks: 1 })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent, signal: new AbortController().signal }
+  const first = tool.execute({ role: 'quick', task: 'late malformed start' }, exec)
+  first.catch(() => {})
+  const next = tool.execute({ role: 'quick', task: 'wait during startup and cleanup' }, exec)
+  next.catch(() => {})
+  try {
+    await assertStillQueued(next)
+    assert.equal(starts, 1)
+    acceptStart({ id: '', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose: () => new Promise(resolve => { finishDispose = resolve }) })
+    await queueTurn()
+    assert.equal(typeof finishDispose, 'function')
+    await assertStillQueued(next)
+    assert.equal(starts, 1)
+    finishDispose()
+    await assert.rejects(first, /invalid subagent/i)
+    assert.equal((await next).childId, 'after-cleanup')
+  } finally { if (finishDispose) finishDispose() }
+})
+
+test('maxPendingTasks holds a late Host activation through disposal after same-ID parent replacement', async () => {
+  const old = { id: 'parent', followup() { relays.push('old') } }
+  const replacement = { id: 'parent', followup() { relays.push('replacement') } }
+  const relays = []
+  let current = old, acceptStart, finishDispose, finishNext
+  let starts = 0, disposals = 0
+  const fixture = makeContext({
+    getProvider: () => ({ capabilities: { depthLimit: true } }),
+    services: { agents: { get: () => current, withoutInitiator: fn => fn() } },
+  })
+  fixture.ctx.subagents.startActivation = () => {
+    starts += 1
+    if (starts === 1) return new Promise(resolve => { acceptStart = resolve })
+    return Promise.resolve({ childId: 'next', result: new Promise(resolve => { finishNext = resolve }), dispose: async () => {} })
+  }
+  apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1, maxPendingTasks: 1 })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const controller = new AbortController()
+  const first = tool.execute({ role: 'quick', task: 'old parent' }, { agent: old, signal: controller.signal })
+  first.catch(() => {})
+  let next
+  try {
+    await queueTurn()
+    assert.equal(starts, 1)
+    current = replacement
+    next = tool.execute({ role: 'quick', task: 'replacement' }, { agent: replacement, signal: controller.signal })
+    next.catch(() => {})
+    await assertStillQueued(next)
+    acceptStart({ childId: 'late', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose: () => {
+      disposals += 1
+      return new Promise(resolve => { finishDispose = resolve })
+    } })
+    await queueTurn()
+    assert.equal(disposals, 1)
+    await assertStillQueued(next)
+    assert.equal(starts, 1)
+    assert.deepEqual(relays, [])
+    finishDispose()
+    await assert.rejects(first)
+    assert.equal((await next).childId, 'next')
+    assert.equal(starts, 2)
+    await queueTurn()
+    assert.deepEqual(relays, [])
+  } finally {
+    controller.abort()
+    if (finishDispose) finishDispose()
+    if (finishNext) finishNext({ stopReason: 'completed', output: [] })
+  }
+})
+
+test('maxPendingTasks retains ambiguous duplicate child capacity without replacing or disposing the active run', async () => {
+  const agent = { id: 'parent', followup: message => relays.push(message) }
+  const other = { id: 'other', followup: message => relays.push(message) }
+  const relays = []
+  let finishFirst, finishDuplicate, finishThird
+  let starts = 0, firstDisposals = 0, duplicateDisposals = 0
+  const fixture = makeContext({
+    getProvider: () => ({ capabilities: { depthLimit: true } }),
+    services: { agents: { get: id => id === agent.id ? agent : other, withoutInitiator: fn => fn() } },
+  })
+  const interrupts = []
+  fixture.ctx.subagents.interrupt = (id, options) => { interrupts.push([id, options.agent]) }
+  fixture.ctx.subagents.startActivation = async () => {
+    starts += 1
+    if (starts === 1) return { childId: 'duplicate', result: new Promise(resolve => { finishFirst = resolve }), dispose: async () => { firstDisposals += 1 } }
+    if (starts === 2) return { childId: 'duplicate', result: new Promise(resolve => { finishDuplicate = resolve }), dispose: async () => { duplicateDisposals += 1 } }
+    return { childId: 'third', result: new Promise(resolve => { finishThird = resolve }), dispose: async () => {} }
+  }
+  apply(fixture.ctx, { ...baseConfig, maxConcurrent: 2, maxPendingTasks: 1, enableTaskCancelTool: true })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const controller = new AbortController()
+  const exec = { agent, signal: controller.signal }
+  try {
+    assert.equal((await tool.execute({ role: 'quick', task: 'first' }, exec)).childId, 'duplicate')
+    await assert.rejects(tool.execute({ role: 'quick', task: 'ambiguous' }, { ...exec, agent: other }), /ambiguous/i)
+    const cancel = fixture.tools.get('dsh_omo_task_cancel')
+    await assert.rejects(cancel.execute({ childId: 'duplicate' }, { ...exec, agent: other }), /No active/i)
+    assert.equal((await cancel.execute({ childId: 'duplicate' }, exec)).status, 'interrupt-requested')
+    assert.deepEqual(interrupts, [['duplicate', agent]], 'the original owner remains registered')
+    assert.equal(duplicateDisposals, 0)
+    const next = tool.execute({ role: 'quick', task: 'queued' }, exec)
+    next.catch(() => {})
+    await assertStillQueued(next)
+    assert.equal(starts, 2)
+    finishFirst({ stopReason: 'completed', output: [] })
+    await queueTurn()
+    assert.equal(firstDisposals, 1, 'the original active run remains tracked and disposed')
+    assert.equal(duplicateDisposals, 0)
+    assert.equal(relays.length, 1, 'only the original run relays')
+    // One slot remains permanently reserved for the ambiguous handle, while the
+    // original run's released slot admits the waiter.
+    assert.equal((await next).childId, 'third')
+    assert.equal(starts, 3)
+    const fourth = tool.execute({ role: 'quick', task: 'still queued' }, exec)
+    fourth.catch(() => {})
+    await assertStillQueued(fourth)
+    assert.equal(starts, 3, 'ambiguous startup still reserves a slot')
+    assert.equal(duplicateDisposals, 0)
+    controller.abort()
+    await assert.rejects(fourth)
+  } finally {
+    controller.abort()
+    if (finishFirst) finishFirst({ stopReason: 'completed', output: [] })
+    if (finishDuplicate) finishDuplicate({ stopReason: 'completed', output: [] })
+    if (finishThird) finishThird({ stopReason: 'completed', output: [] })
+  }
+})
+
+test('maxPendingTasks retains the global slot when a settled active run fails disposal', async () => {
+  const agent = { id: 'parent', followup() {} }
+  let finishResult, starts = 0, disposals = 0
+  const fixture = makeContext({
+    getProvider: () => ({ capabilities: { depthLimit: true } }),
+    services: { agents: { get: () => agent, withoutInitiator: fn => fn() } },
+  })
+  fixture.ctx.subagents.startActivation = async () => {
+    starts += 1
+    return { childId: 'active', result: new Promise(resolve => { finishResult = resolve }), dispose: async () => { disposals += 1; throw new Error('dispose failed') } }
+  }
+  apply(fixture.ctx, { ...baseConfig, maxConcurrent: 1, maxPendingTasks: 1 })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const controller = new AbortController()
+  const exec = { agent, signal: controller.signal }
+  try {
+    assert.equal((await tool.execute({ role: 'quick', task: 'first' }, exec)).childId, 'active')
+    const next = tool.execute({ role: 'quick', task: 'waiter' }, exec)
+    next.catch(() => {})
+    await assertStillQueued(next)
+    finishResult({ stopReason: 'completed', output: [] })
+    await queueTurn()
+    assert.equal(disposals, 1)
+    await assertStillQueued(next)
+    assert.equal(starts, 1)
+    controller.abort()
+    await assert.rejects(next)
+  } finally { controller.abort(); if (finishResult) finishResult({ stopReason: 'completed', output: [] }) }
+})
+
+test('opt-in pending background returns an ID on global saturation and starts after capacity release', async () => {
+  const q = pendingTaskFixture({ enablePendingBackgroundTasks: true, maxConcurrent: 1, maxPendingTasks: 2 })
+  const messages = []
+  q.agent.followup = message => messages.push(message)
+  const tool = q.fixture.tools.get('dsh_omo_task')
+  const controller = new AbortController()
+  const exec = { agent: q.agent, signal: controller.signal }
+  try {
+    assert.equal((await q.call('hold global slot').promise).status, 'started')
+    const queued = await tool.execute({ role: 'quick', task: 'queued globally' }, exec)
+    assert.equal(queued.status, 'pending')
+    assert.match(queued.taskId, /^bg_/u)
+    assert.equal(queued.childId, undefined)
+    const pendingMessage = tool.output.render({}, queued)[0].text
+    assert.match(pendingMessage, new RegExp(queued.taskId, 'u'))
+    assert.match(pendingMessage, /no child has started yet/u)
+    assert.match(pendingMessage, /dsh_omo_task_pending_status/u)
+    assert.match(pendingMessage, /dsh_omo_task_pending_cancel/u)
+    assert.match(pendingMessage, /successful startup is not announced separately/u)
+    await queueTurn()
+    assert.equal(q.runs.length, 1, 'capacity failure must not spin or oversubscribe')
+
+    q.runs[0].finish({ stopReason: 'completed', output: [] })
+    for (let attempt = 0; attempt < 8 && q.runs.length < 2; attempt += 1) await queueTurn()
+    assert.equal(q.runs.length, 2, 'released global capacity wakes the queued one-shot')
+    q.runs[1].finish({ stopReason: 'completed', output: [] })
+    await queueTurn()
+    assert.ok(messages.some(message => message.content?.some(block => block.text?.includes(`Pending task ID: ${queued.taskId}`))))
+  } finally {
+    controller.abort()
+    for (const run of q.runs) run.finish({ stopReason: 'completed', output: [] })
+    const cleanup = q.fixture.effects.find(effect => effect.label === 'dsh-omo background workers')
+    if (cleanup) await cleanup.dispose()
+    q.cleanup()
+  }
+})
+
+test('opt-in pending background returns immediately on selected-route saturation', async () => {
+  const agents = new Map()
+  const fixture = makeContext({ services: { agents: { get: id => agents.get(id), withoutInitiator: fn => fn() } } })
+  const finishes = []
+  const starts = []
+  fixture.ctx.subagents.start = async (_provider, request) => {
+    starts.push(request)
+    let finish
+    const result = new Promise(resolve => { finish = resolve })
+    finishes.push(finish)
+    return { id: `pending-route-${starts.length}`, result, dispose: async () => {} }
+  }
+  const parent = { id: 'pending-route-parent', followup() {} }
+  agents.set(parent.id, parent)
+  apply(fixture.ctx, {
+    ...baseConfig,
+    maxConcurrent: 3,
+    maxPendingTasks: 2,
+    enablePendingBackgroundTasks: true,
+    providerConcurrency: { 'llm-provider': 1 },
+    roleRoutes: [
+      { role: 'explore', provider: 'llm-provider', model: 'model-a' },
+      { role: 'quick', provider: 'llm-provider', model: 'model-b' },
+    ],
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: parent, signal: new AbortController().signal }
+  try {
+    assert.equal((await tool.execute({ role: 'explore', task: 'occupy provider cap' }, exec)).status, 'started')
+    const queued = await tool.execute({ role: 'quick', task: 'route capacity pending' }, exec)
+    assert.equal(queued.status, 'pending')
+    assert.match(queued.taskId, /^bg_/u)
+    await queueTurn()
+    assert.equal(starts.length, 1, 'full route does not self-retry while global capacity remains free')
+
+    finishes[0]({ stopReason: 'completed', output: [] })
+    for (let attempt = 0; attempt < 8 && starts.length < 2; attempt += 1) await queueTurn()
+    assert.equal(starts.length, 2)
+    assert.equal(starts[1].agentOptions.provider, 'llm-provider')
+    assert.equal(starts[1].agentOptions.model, 'model-b')
+    finishes[1]({ stopReason: 'completed', output: [] })
+    await queueTurn()
+  } finally {
+    for (const finish of finishes) finish({ stopReason: 'completed', output: [] })
+    const cleanup = fixture.effects.find(effect => effect.label === 'dsh-omo background workers')
+    if (cleanup) await cleanup.dispose()
+  }
+})
+
+test('pending background is isolated to dsh_omo_task; call_agent retains in-call waiting', async () => {
+  const q = pendingTaskFixture({ enablePendingBackgroundTasks: true, enableCallOmoAgentTool: true, maxConcurrent: 1, maxPendingTasks: 2 })
+  const callAgent = q.fixture.tools.get('dsh_omo_call_agent')
+  const exec = { agent: q.agent, signal: new AbortController().signal }
+  try {
+    assert.equal((await q.call('hold capacity').promise).status, 'started')
+    const waiting = callAgent.execute({ role: 'explore', task: 'ordinary shared caller waits' }, exec)
+    await assertStillQueued(waiting)
+    assert.equal(q.runs.length, 1)
+    q.runs[0].finish({ stopReason: 'completed', output: [] })
+    assert.equal((await waiting).status, 'started')
+    assert.equal(q.runs.length, 2)
+    q.runs[1].finish({ stopReason: 'completed', output: [] })
+    await queueTurn()
+  } finally {
+    for (const run of q.runs) run.finish({ stopReason: 'completed', output: [] })
+    const cleanup = q.fixture.effects.find(effect => effect.label === 'dsh-omo background workers')
+    if (cleanup) await cleanup.dispose()
+    q.cleanup()
+  }
+})
+
+test('pending background exposes separate pending-ID status and cancellation Tools', async () => {
+  const q = pendingTaskFixture({ enablePendingBackgroundTasks: true })
+  const holder = q.call('hold capacity')
+  try {
+    assert.ok(q.fixture.tools.has('dsh_omo_task_pending_status'))
+    assert.ok(q.fixture.tools.has('dsh_omo_task_pending_cancel'))
+    assert.equal(q.fixture.tools.has('dsh_omo_task_result'), false)
+    assert.equal(q.fixture.tools.has('dsh_omo_task_wait'), false)
+    assert.equal(q.fixture.tools.has('dsh_omo_task_cancel'), false)
+    await holder.promise
+    const taskTool = q.fixture.tools.get('dsh_omo_task')
+    const statusTool = q.fixture.tools.get('dsh_omo_task_pending_status')
+    const cancelTool = q.fixture.tools.get('dsh_omo_task_pending_cancel')
+    const exec = { agent: q.agent, signal: new AbortController().signal }
+    const pending = await taskTool.execute({ role: 'quick', task: 'status and cancel this pending task' }, exec)
+    assert.equal(pending.status, 'pending')
+    await queueTurn()
+    assert.equal((await statusTool.execute({ taskId: pending.taskId }, exec)).status, 'pending')
+    assert.deepEqual(await cancelTool.execute({ taskId: pending.taskId }, exec), {
+      taskId: pending.taskId, status: 'cancelled',
+    })
+    assert.equal((await statusTool.execute({ taskId: pending.taskId }, exec)).status, 'cancelled')
+  } finally {
+    q.cleanup()
+    const cleanup = q.fixture.effects.find(effect => effect.label === 'dsh-omo background workers')
+    if (cleanup) await cleanup.dispose()
+  }
+})
+
+test('pending-ID cancellation requests fire-and-return interruption for an exact bound child', async () => {
+  const q = pendingTaskFixture({ enablePendingBackgroundTasks: true })
+  const holder = q.call('hold capacity')
+  let disposeCalls = 0
+  try {
+    assert.equal((await holder.promise).status, 'started')
+    const pending = await q.call('wait for capacity, then bind').promise
+    assert.equal(pending.status, 'pending')
+    await queueTurn()
+
+    q.runs[0].finish({ stopReason: 'completed', output: [] })
+    for (let attempt = 0; attempt < 8 && q.runs.length < 2; attempt += 1) await queueTurn()
+    assert.equal(q.runs.length, 2)
+    q.runs[1].dispose = () => { disposeCalls += 1 }
+
+    const exec = { agent: q.agent, signal: new AbortController().signal }
+    const taskTool = q.fixture.tools.get('dsh_omo_task')
+    const statusTool = q.fixture.tools.get('dsh_omo_task_pending_status')
+    const cancelTool = q.fixture.tools.get('dsh_omo_task_pending_cancel')
+    assert.match(taskTool.description, /use dsh_omo_task_pending_status and dsh_omo_task_pending_cancel for lifecycle/u)
+    assert.match(taskTool.description, /Child-ID result\/wait\/cancel Tools are incompatible/u)
+    assert.match(cancelTool.description, /fire-and-return interruption/u)
+    assert.match(cancelTool.description, /Requests do not prove the child stopped/u)
+    assert.equal((await statusTool.execute({ taskId: pending.taskId }, exec)).status, 'running')
+
+    const result = await cancelTool.execute({ taskId: pending.taskId }, exec)
+    assert.deepEqual(result, { taskId: pending.taskId, status: 'interrupt-requested' })
+    assert.deepEqual(q.fixture.interrupts.at(-1), {
+      childId: q.runs[1].id,
+      authority: { kind: 'ancestor', agent: q.agent },
+    })
+    assert.equal(Object.hasOwn(result, 'childId'), false)
+    assert.match(cancelTool.output.render({ taskId: pending.taskId }, result)[0].text, /may continue until it observes the request/u)
+    assert.equal((await statusTool.execute({ taskId: pending.taskId }, exec)).status, 'running')
+    assert.equal(disposeCalls, 0, 'a fire-and-return interrupt does not dispose or claim child settlement')
+
+    q.runs[1].finish({ stopReason: 'aborted', output: [] })
+    for (let attempt = 0; attempt < 4 && (await statusTool.execute({ taskId: pending.taskId }, exec)).status === 'running'; attempt += 1) await queueTurn()
+    assert.equal((await statusTool.execute({ taskId: pending.taskId }, exec)).status, 'failed')
+    assert.equal(disposeCalls, 1, 'settlement cleanup occurs only after the child result settles')
+  } finally {
+    q.cleanup()
+    const cleanup = q.fixture.effects.find(effect => effect.label === 'dsh-omo background workers')
+    if (cleanup) await cleanup.dispose()
+  }
+})
+
+test('pending background requires bounded admission and keeps child-ID lifecycle Tools incompatible', () => {
+  const parent = { id: 'pending-config-parent', followup() {} }
+  const makeFixture = () => makeContext({ services: {
+    agents: { get: id => id === parent.id ? parent : undefined, withoutInitiator: fn => fn() },
+  } })
+  assert.throws(() => apply(makeFixture().ctx, { ...baseConfig, enablePendingBackgroundTasks: true }), /requires maxPendingTasks greater than zero/u)
+  for (const field of ['enableTaskResultTool', 'enableTaskWaitTool', 'enableTaskCancelTool']) {
+    assert.throws(() => apply(makeFixture().ctx, {
+      ...baseConfig, maxPendingTasks: 1, enablePendingBackgroundTasks: true,
+      enableTaskResultTool: true, [field]: true,
+    }), /child-ID result\/wait\/cancel Tools cannot be combined/u, field)
+  }
 })

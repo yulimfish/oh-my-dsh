@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Bounded specialist orchestration">
+  <rect width="128" height="128" rx="28" fill="#10233f"/>
+  <path d="M64 64 32 32M64 64 96 32M64 64 64 104" stroke="#60a5fa" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="32" cy="32" r="13" fill="#93c5fd"/>
+  <circle cx="96" cy="32" r="13" fill="#93c5fd"/>
+  <circle cx="64" cy="104" r="13" fill="#93c5fd"/>
+  <circle cx="64" cy="64" r="20" fill="#34d399"/>
+  <path d="m55 64 6 6 12-13" fill="none" stroke="#10233f" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

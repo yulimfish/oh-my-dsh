@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Oh My DSH — 有界协作编排",
+    "description": "为 DeepSeek Harness 提供专家委派、项目技能、命令及可选任务结果。基于 DSH 的兼容适配，非 Oh My OpenAgent 完整复刻。"
+  }
+}

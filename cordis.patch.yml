@@ -1,4 +1,26 @@
 - insert:
+    - id: preset-omo-read-search
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: omo-read-search
+        name: OMO Read and Search
+        description: Read-only Tool-dispatch policy for explicitly selected research specialists; not an OS sandbox.
+        plugins:
+          - id: omo-read-search-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              read: true
+              readImage: false
+              write: false
+              edit: false
+          - id: omo-read-search-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: omo-read-search-policy
+            name: dsh-omo/specialist-preset-policy
+            inject: [tools]
+- insert:
     - id: dsh-omo
       name: dsh-omo
       config:
@@ -10,7 +32,7 @@
         enableContinuableTasks: false
         enableGoalTools: false
         enableTeamTools: false
-        projectSkillDirs: [.opencode/skills, .claude/skills]
+        projectSkillDirs: [.opencode/skills, .claude/skills, .agents/skills]
         disabledSkills: []
         categoryRoutes: []
         roleRoutes: []
