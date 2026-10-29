@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { posix as path } from 'node:path'
+import { getEventListeners } from 'node:events'
 import { createPromptFileExpander, parsePromptFileReference } from '../src/prompt-file-expansion.js'
+import { expandProjectCommandFileReferences } from '../src/project-command-file-expansion.js'
+import { makeProjectCommandDefinition, parseProjectCommandDocument } from '../src/project-commands.js'
 
 function makePromptFs({ files = {}, onRead, onStat, readBytes: customReadBytes, resolveTarget } = {}) {
   const cwd = '/workspace'
@@ -184,6 +187,66 @@ test('expands selected category and role file appends through bounded DSH filesy
     expanded: true,
   })
   assert.deepEqual(readPaths, ['/workspace/prompts/category.md', '/workspace/prompts/role.md'])
+})
+
+test('command references preserve source indentation and line endings while guidance stays trimmed', async () => {
+  for (const contents of ['\n    return value \n\n', '\r\n\treturn value\r\n', '   \n\t\n']) {
+    const { agent, expander } = makeExpander({ fs: makePromptFs({ files: { 'snippet.py': contents } }) })
+    const source = parseProjectCommandDocument('review', 'Read @snippet.py for $ARGUMENTS.')
+    const queued = []
+    const definition = makeProjectCommandDefinition(source, (_agent, prompt) => {
+      queued.push(prompt)
+      return { kind: 'success' }
+    }, (command, invocation) => expandProjectCommandFileReferences(command, { promptFileExpander: expander, ...invocation }))
+    assert.equal((await definition.handler({ agent, rawInput: 'check indentation', signal: signal() })).kind, 'success')
+    assert.ok(queued[0].includes(JSON.stringify(contents)), `quoted source must retain whitespace: ${JSON.stringify(contents)}`)
+    const guidance = await expander.expand({ rolePromptAppend: 'file://snippet.py', agent, signal: signal() })
+    assert.equal(guidance.rolePromptAppend, contents.replace(/\r\n?/gu, '\n').trim())
+  }
+})
+
+test('whitespace preservation keeps source-byte, UTF-8 and control validation', async () => {
+  for (const contents of [' '.repeat(4_097), 'unsafe\u202e text', new Uint8Array([0xff])]) {
+    const { agent, expander } = makeExpander({ fs: makePromptFs({ files: { 'snippet.py': contents } }) })
+    await assert.rejects(expander.expand({
+      rolePromptAppend: 'file://snippet.py', agent, signal: signal(), preserveWhitespace: true,
+    }), /size limit|unsafe text|UTF-8/u)
+  }
+  const { agent, expander } = makeExpander()
+  await assert.rejects(expander.expand({ rolePromptAppend: 'file://missing.md', agent, preserveWhitespace: 'true' }), /must be a boolean/u)
+})
+
+test('invalid later cancellation signals do not leak listeners onto a valid caller signal', async () => {
+  const caller = new AbortController()
+  let reads = 0
+  const { agent, expander } = makeExpander({
+    fs: makePromptFs({ files: { 'prompt.md': 'Guidance' }, onRead: () => { reads += 1 } }),
+    lifecycleSignal: {},
+  })
+  const before = getEventListeners(caller.signal, 'abort').length
+  for (let index = 0; index < 3; index += 1) {
+    await assert.rejects(expander.expand({ rolePromptAppend: 'file://prompt.md', agent, signal: caller.signal }), /invalid cancellation signal/u)
+    assert.equal(getEventListeners(caller.signal, 'abort').length, before)
+  }
+  assert.equal(reads, 0)
+})
+
+test('successful and failed prompt reads release caller and lifecycle abort listeners', async () => {
+  for (const failRead of [false, true]) {
+    const caller = new AbortController()
+    const lifecycle = new AbortController()
+    const { agent, expander } = makeExpander({
+      fs: makePromptFs({ files: { 'prompt.md': 'Guidance' }, onRead: () => {
+        if (failRead) throw new Error('backend failed')
+      } }),
+      lifecycleSignal: lifecycle.signal,
+    })
+    const pending = expander.expand({ rolePromptAppend: 'file://prompt.md', agent, signal: caller.signal })
+    if (failRead) await assert.rejects(pending, /could not be read safely/u)
+    else assert.equal((await pending).rolePromptAppend, 'Guidance')
+    assert.equal(getEventListeners(caller.signal, 'abort').length, 0)
+    assert.equal(getEventListeners(lifecycle.signal, 'abort').length, 0)
+  }
 })
 
 test('does not recursively expand file references found inside loaded content', async () => {

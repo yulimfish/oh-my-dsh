@@ -63,6 +63,12 @@ function awaitWithSignal(operation, signal) {
 }
 
 function linkSignals(signals) {
+  // Reject malformed inputs before attaching to any otherwise valid signal.
+  for (const signal of signals) {
+    if (signal !== undefined && signal !== null && !validSignal(signal)) {
+      throw new TypeError('Prompt-file expansion received an invalid cancellation signal.')
+    }
+  }
   const controller = new AbortController()
   const removers = []
   const abort = () => {
@@ -70,7 +76,6 @@ function linkSignals(signals) {
   }
   for (const signal of signals) {
     if (signal === undefined || signal === null) continue
-    if (!validSignal(signal)) throw new TypeError('Prompt-file expansion received an invalid cancellation signal.')
     if (signal.aborted) {
       abort()
       break
@@ -179,7 +184,7 @@ export function parsePromptFileReference(value) {
   return relativePath
 }
 
-async function readPromptFile({ fs, agents, sessions, agent, cwd, rootTarget, relativePath, signal }) {
+async function readPromptFile({ fs, agents, sessions, agent, cwd, rootTarget, relativePath, signal, preserveWhitespace }) {
   const segments = relativePath.split('/')
   let resolvedPath = ''
   const beforePathInfos = []
@@ -252,7 +257,8 @@ async function readPromptFile({ fs, agents, sessions, agent, cwd, rootTarget, re
   } catch {
     throw new PromptFileExpansionError('Configured prompt file is not valid UTF-8.', 'invalid')
   }
-  text = text.replace(/\r\n?/gu, '\n').trim()
+  // Config guidance is trimmed; command @file excerpts must retain code layout.
+  if (!preserveWhitespace) text = text.replace(/\r\n?/gu, '\n').trim()
   if (CONTROL_OR_BIDI.test(text) || new TextEncoder().encode(text).byteLength > MAX_PROMPT_APPEND_BYTES) {
     throw new PromptFileExpansionError('Configured prompt file contains unsafe text or exceeds the supported size limit.', 'invalid')
   }
@@ -270,7 +276,10 @@ export function createPromptFileExpander({ fs, agents, sessions, lifecycleSignal
     throw new TypeError('Prompt-file expansion requires DSH agents.get and sessions.get.')
   }
 
-  async function expand({ categoryPromptAppend, rolePromptAppend, agent, signal }) {
+  async function expand({ categoryPromptAppend, rolePromptAppend, agent, signal, preserveWhitespace = false }) {
+    if (typeof preserveWhitespace !== 'boolean') {
+      throw new TypeError('Prompt-file whitespace preservation must be a boolean.')
+    }
     const categoryPath = parsePromptFileReference(categoryPromptAppend)
     const rolePath = parsePromptFileReference(rolePromptAppend)
     if (categoryPath === undefined && rolePath === undefined) {
@@ -289,10 +298,10 @@ export function createPromptFileExpander({ fs, agents, sessions, lifecycleSignal
 
       const expandedCategory = categoryPath === undefined
         ? categoryPromptAppend
-        : await readPromptFile({ fs, agents, sessions, agent, cwd, rootTarget, relativePath: categoryPath, signal: operation.signal })
+        : await readPromptFile({ fs, agents, sessions, agent, cwd, rootTarget, relativePath: categoryPath, signal: operation.signal, preserveWhitespace })
       const expandedRole = rolePath === undefined
         ? rolePromptAppend
-        : await readPromptFile({ fs, agents, sessions, agent, cwd, rootTarget, relativePath: rolePath, signal: operation.signal })
+        : await readPromptFile({ fs, agents, sessions, agent, cwd, rootTarget, relativePath: rolePath, signal: operation.signal, preserveWhitespace })
       const afterRootTarget = await awaitWithSignal(() => fs.resolve(cwd, { signal: operation.signal }), operation.signal)
       assertNotAborted(operation.signal)
       if (targetKey(afterRootTarget) !== targetKey(rootTarget)) {
