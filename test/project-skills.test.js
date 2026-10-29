@@ -2503,6 +2503,15 @@ test('format compatibility ignores mixed-case Markdown extensions without shadow
   assert.equal(snapshot.complete, true)
   assert.equal((await registry.get('shadow', { cwd })).content, 'valid lowercase fallback')
   assert.equal((await registry.get('shadow', { cwd })).source, 'project-claude')
+  await writeCompatibilityDocument(cwd, 'team/Team.MD', 'Ignored mixed-case ancestor.')
+  await writeCompatibilityDocument(cwd, 'team/reference/checklist.md', 'Valid nested flat body.')
+  const nestedSnapshot = await registry.snapshot({ cwd })
+  assert.equal(nestedSnapshot.complete, true)
+  assert.equal((await registry.get('checklist', { cwd })).content, 'Valid nested flat body.')
+  await writeCompatibilityDocument(cwd, 'team/SKILL.MD', 'Ignored mixed-case canonical.')
+  const canonicalSnapshot = await registry.snapshot({ cwd })
+  assert.equal(canonicalSnapshot.complete, true)
+  assert.equal((await registry.get('checklist', { cwd })).content, 'Valid nested flat body.')
 })
 
 test('format compatibility discovers bounded nested flat Markdown with container resource bases', async t => {
