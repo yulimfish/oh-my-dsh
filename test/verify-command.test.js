@@ -319,6 +319,27 @@ test('retains a chronological contiguous suffix of complete evidence records wit
   assert.equal(Number(records.at(-1)[2]), 15)
 })
 
+test('retains latest failure and non-text notices under output pressure', async () => {
+  const events = []
+  for (let index = 0; index < 16; index += 1) {
+    events.push(call(index * 2, `long-${index}`, `pnpm test -- ${index}-${'x'.repeat(4_000)}`))
+    events.push({
+      seq: index * 2 + 1,
+      type: 'tool/result',
+      data: {
+        error: { name: 'Error', code: 'FAILED' },
+        message: { toolCallId: `long-${index}`, isError: false, content: [{ type: 'image', data: 'binary' }] },
+      },
+    })
+  }
+  const response = await createVerifyCommand({ observeSession: async () => observation(events) }, fsFixture()).handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  assert.equal(response.kind, 'success')
+  assert.match(response.text, /FAIL\/ERROR/u)
+  assert.match(response.text, /non-text result blocks present/u)
+  assert.match(response.text, /#31 FAIL\/ERROR/u)
+  assert.match(response.text, /Missing evidence means unverified, not failed/u)
+})
+
 test('passes cancellation as the third lstat argument', async () => {
   const controller = new AbortController()
   let received
