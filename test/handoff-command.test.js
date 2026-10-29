@@ -87,6 +87,26 @@ test('validates input, Agent, cancellation, and registry contracts before queuei
   assert.throws(() => createHandoffCommand({ read() {} }, {}), /parent-message queue/u)
 })
 
+test('does not queue handoff when cancellation happens during async result reading', async () => {
+  const agent = { id: 'parent-cancel' }
+  const controller = new AbortController()
+  const queued = []
+  let release
+  const command = createHandoffCommand({
+    async readAsync() {
+      await new Promise(resolve => { release = resolve })
+      return failed()
+    },
+  }, { queueMessage: (...args) => queued.push(args) })
+  const pending = command.handler({ agent, rawInput: 'child-1', signal: controller.signal })
+  controller.abort()
+  release()
+  const response = await pending
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /cancelled before it was queued/u)
+  assert.equal(queued.length, 0)
+})
+
 test('does not queue handoff after the exact parent is replaced during async result reading', async () => {
   const agent = { id: 'parent-replaced' }
   let release
