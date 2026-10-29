@@ -68,15 +68,11 @@ function silenceThenable(value) {
   }
 }
 
-function disposeRegistration(registration, fromTracking = false) {
+function disposeRegistration(registration) {
   if (!registration) return Promise.resolve()
   if (registration.disposalPromise) return registration.disposalPromise
   registration.disposed = true
-  registration.disposalPromise = (async () => {
-    // An Agent tracking disposer owns this cleanup; never await it from itself.
-    if (!fromTracking) await callDisposer(registration.trackingDispose)
-    await callDisposer(registration.contextDispose)
-  })()
+  registration.disposalPromise = Promise.resolve().then(() => callDisposer(registration.contextDispose))
   return registration.disposalPromise
 }
 
@@ -93,7 +89,13 @@ export function createFocusChain(goalsService, agentsService) {
     return promise
   }
 
-  const trackDisposal = (registration, fromTracking = false) => trackPromise(disposeRegistration(registration, fromTracking))
+  const trackDisposal = registration => {
+    const promise = disposeRegistration(registration)
+    const cleanup = (async () => {
+      await callDisposer(registration.trackingDispose)
+    })()
+    return Promise.all([promise, cleanup]).then(() => undefined)
+  }
 
   const listener = async payload => {
     let agentId
@@ -158,7 +160,7 @@ export function createFocusChain(goalsService, agentsService) {
       registrations.set(agentId, registration)
       const trackingDispose = effect.call(agentContext, () => () => {
         if (registrations.get(agentId) === registration) registrations.delete(agentId)
-        return trackDisposal(registration, true)
+        return trackDisposal(registration)
       }, 'dsh-omo Focus Chain tracking')
       if (typeof trackingDispose !== 'function') {
         silenceThenable(trackingDispose)
