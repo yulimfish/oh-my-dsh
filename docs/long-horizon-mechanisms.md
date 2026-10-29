@@ -16,9 +16,11 @@ Features are selected when they satisfy all of these constraints:
 
 ## Cline: what the implementation actually does
 
-The Cline source snapshot is pinned to [`9ee618111d58630fea30b27439216448225458e0`](https://github.com/cline/cline/tree/9ee618111d58630fea30b27439216448225458e0), immediately before its VS Code tree move. This is deliberate: it preserves stable paths for the Focus Chain implementation reviewed here rather than pretending the old documentation URL is a current contract.
+The historical Cline implementation snapshot is pinned to [`9ee618111d58630fea30b27439216448225458e0`](https://github.com/cline/cline/tree/9ee618111d58630fea30b27439216448225458e0) (v3.85.0-era, immediately before its VS Code tree move). This preserves stable paths for the Focus Chain mechanism reviewed here rather than pretending it is a current API.
 
-### Focus Chain is a progress loop, not merely a reminder
+**Current-status follow-up:** Cline's [deprecations page](https://github.com/cline/cline/blob/178c774eca75a548debc7137f94ae42e7617cb68/docs/resources/deprecations.mdx) marks Focus Chain **Deprecated — no direct replacement**, saying the separate feature no longer provided enough additional benefit over the current harness. [PR #14861](https://github.com/cline/cline/pull/14861), merged as `5dea21ab89f7d5a719a532a07f7d13db37a68bd8`, removed its remaining VS Code plumbing; legacy history is filtered without deleting old checklist files. The sections below are therefore a historical mechanism study, not a recommendation to recreate Cline's exact layer. My implementation keeps only independently useful DSH-native properties, all default-off and separately testable.
+
+### Historical Focus Chain is a progress loop, not merely a reminder
 
 - [`focus-chain/index.ts`](https://github.com/cline/cline/blob/9ee618111d58630fea30b27439216448225458e0/src/core/task/focus-chain/index.ts) stores a Markdown checklist per task, accepts model-provided `task_progress`, reloads external edits through a debounced file watcher, and derives completion counts.
 - Its reminder decision is event/state driven: first request, missing list after multiple requests, plan/act transition, user edit, or a configured number of API requests since the last progress update. Existing-list reminders include the checklist and progress percentage; they do not depend only on a static system prompt.
@@ -105,4 +107,4 @@ Goose has moved to `aaif-goose/goose`; the source snapshot is pinned to [`361003
 
 ## Research limitations
 
-These are source-reading findings at pinned commits, not benchmark evidence that a reminder improves a particular model. The current Cline documentation no longer exposes the old Focus Chain page at its previous URL, so this review cites the implementation snapshot directly. No upstream code is copied; the implementation uses independently designed DSH-native contracts and conservative limits.
+These are source-reading findings at pinned commits, not benchmark evidence that a reminder improves a particular model. Cline's deprecation rationale is especially important: adding a separate progress layer is not inherently beneficial. The DSH adaptations therefore reuse native Goal/todo/session state, remain opt-in, and should be evaluated for prompt cost and actual behavior rather than adopted as parity features. No upstream code is copied; the implementation uses independently designed DSH-native contracts and conservative limits.
