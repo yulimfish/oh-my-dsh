@@ -51,6 +51,7 @@ import { createGoalUseReminder } from './goal-use-reminder.js'
 import { createAgentUsageReminder } from './agent-usage-reminder.js'
 import { createCategorySkillReminder } from './category-skill-reminder.js'
 import { createCompactionResumeAdvisory } from './compaction-resume-advisory.js'
+import { createFocusChain } from './focus-chain.js'
 import { createGeneralToolResultPruningListener, createSearchToolResultPruningListener, normalizeAdditionalToolResultPruningNames } from './search-tool-result-pruning.js'
 import { createManualContextPruningHandler } from './manual-context-pruning-command.js'
 import { normalizeImageQueryRoute, registerImageQueryTool } from './image-query-tool.js'
@@ -135,6 +136,7 @@ export const Config = z.object({
   enableContinuableTasks: z.boolean().default(false),
   enableContinuableTaskFollowups: z.boolean().default(false),
   enableGoalTools: z.boolean().default(false),
+  enableFocusChain: z.boolean().default(false),
   enableGoalUseReminder: z.boolean().default(false),
   enableAgentUsageReminder: z.boolean().default(false),
   enableCategorySkillReminder: z.boolean().default(false),
@@ -184,6 +186,7 @@ export const Config = z.object({
   enableProjectCommandMalformedFrontmatter: z.boolean().default(false),
   enableProjectCommandEmptyBody: z.boolean().default(false),
   enableProjectCommandPreserveBodyLineEndings: z.boolean().default(false),
+  enableNearestProjectOpenCodeCommands: z.boolean().default(false),
   enableAutomaticSlashCommands: z.boolean().default(false),
   enableProjectRootCommands: z.boolean().default(false),
   projectCommandsRoot: z.string().default(''),
@@ -664,7 +667,7 @@ function sameProjectCommandScan(left, right) {
   })
 }
 
-function createProjectCommandManager(ctx, sessionsService, agentsService, lifecycle, userOpenCodeCommandRoots, userClaudeCommandRoots, promptFileExpander, enableWatch, projectCommandsRoot, commandRoutes, launchTask, enableAutomatic = false, allowEmptyDescription = false, userAgentsCommandRoots = [], allowBlankDisplayMetadata = false, allowUnterminatedFrontmatter = false, allowMalformedFrontmatter = false, allowEmptyBody = false, preserveBodyLineEndings = false) {
+function createProjectCommandManager(ctx, sessionsService, agentsService, lifecycle, userOpenCodeCommandRoots, userClaudeCommandRoots, promptFileExpander, enableWatch, projectCommandsRoot, commandRoutes, launchTask, enableAutomatic = false, allowEmptyDescription = false, userAgentsCommandRoots = [], allowBlankDisplayMetadata = false, allowUnterminatedFrontmatter = false, allowMalformedFrontmatter = false, allowEmptyBody = false, preserveBodyLineEndings = false, nearestProjectOpenCode = false) {
   const adapter = createProjectCommandAdapter(ctx.fs, {
     sessions: sessionsService,
     userOpenCodeCommandRoots,
@@ -677,6 +680,7 @@ function createProjectCommandManager(ctx, sessionsService, agentsService, lifecy
     allowMalformedFrontmatter,
     allowEmptyBody,
     preserveBodyLineEndings,
+    nearestProjectOpenCode,
   })
   const scopes = new Map()
   const refreshing = new Set()
@@ -3224,7 +3228,7 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
             kind: 'success',
             text: [
               'dsh-omo status: config flags and optional-service presence observed at plugin setup; this is not a service health check.',
-              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; continuableTaskFollowups=${enabled(statusSnapshot.flags.continuableTaskFollowups)}; taskResultTool=${enabled(statusSnapshot.flags.taskResultTool)}; taskResultPersistence=${enabled(statusSnapshot.flags.taskResultPersistence)}; taskListTool=${enabled(statusSnapshot.flags.taskListTool)}; taskWaitTool=${enabled(statusSnapshot.flags.taskWaitTool)}; callOmoAgentTool=${enabled(statusSnapshot.flags.callOmoAgentTool)}; taskCancelTool=${enabled(statusSnapshot.flags.taskCancelTool)}; persistentMemoryTools=${enabled(statusSnapshot.flags.persistentMemoryTools)}; goalTools=${enabled(statusSnapshot.flags.goalTools)}; goalUseReminder=${enabled(statusSnapshot.flags.goalUseReminder)}; agentUsageReminder=${enabled(statusSnapshot.flags.agentUsageReminder)}; categorySkillReminder=${enabled(statusSnapshot.flags.categorySkillReminder)}; compactionResumeAdvisory=${enabled(statusSnapshot.flags.compactionResumeAdvisory)}; pressureCompaction=${enabled(statusSnapshot.flags.pressureCompaction)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; contextOverflowRecovery=${enabled(statusSnapshot.flags.contextOverflowRecovery)}; pinnedRoutePreflight=${enabled(statusSnapshot.flags.pinnedRoutePreflight)}; agentPresetPreflight=${enabled(statusSnapshot.flags.agentPresetPreflight)}; thinkModeReasoning=${enabled(statusSnapshot.flags.thinkModeReasoning)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; teamModeContext=${enabled(statusSnapshot.flags.teamModeContext)}; teamStatusContext=${enabled(statusSnapshot.flags.teamStatusContext)}; teamTaskUseReminder=${enabled(statusSnapshot.flags.teamTaskUseReminder)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; imageQueryTool=${enabled(statusSnapshot.flags.imageQueryTool)}; readImageResizing=${enabled(statusSnapshot.flags.readImageResizing)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; manualContextPruning=${enabled(statusSnapshot.flags.manualContextPruning)}; searchToolResultPruning=${enabled(statusSnapshot.flags.searchToolResultPruning)}; generalToolResultPruning=${enabled(statusSnapshot.flags.generalToolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; planFormatAdvisory=${enabled(statusSnapshot.flags.planFormatAdvisory)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; webSearchCommand=${enabled(statusSnapshot.flags.webSearchCommand)}; webSearchTool=${enabled(statusSnapshot.flags.webSearchTool)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; rootAgentsContextWatch=${enabled(statusSnapshot.flags.rootAgentsContextWatch)}; projectRootAgentsContext=${enabled(statusSnapshot.flags.projectRootAgentsContext)}; projectRootAgentsContextWatch=${enabled(statusSnapshot.flags.projectRootAgentsContextWatch)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; projectCommands=${enabled(statusSnapshot.flags.projectCommands)}; projectRootCommands=${enabled(statusSnapshot.flags.projectRootCommands)}; projectCommandWatch=${enabled(statusSnapshot.flags.projectCommandWatch)}; promptFileExpansion=${enabled(statusSnapshot.flags.promptFileExpansion)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; omoProjectRulesOnRead=${enabled(statusSnapshot.flags.omoProjectRulesOnRead)}; cursorProjectRulesOnRead=${enabled(statusSnapshot.flags.cursorProjectRulesOnRead)}; githubProjectInstructionsOnRead=${enabled(statusSnapshot.flags.githubProjectInstructionsOnRead)}; githubCopilotInstructionsOnRead=${enabled(statusSnapshot.flags.githubCopilotInstructionsOnRead)}; openCodeRulesOnRead=${enabled(statusSnapshot.flags.openCodeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; notepadWriteGuard=${enabled(statusSnapshot.flags.notepadWriteGuard)}; editErrorRecovery=${enabled(statusSnapshot.flags.editErrorRecovery)}; jsonErrorRecovery=${enabled(statusSnapshot.flags.jsonErrorRecovery)}; delegateTaskErrorGuidance=${enabled(statusSnapshot.flags.delegateTaskErrorGuidance)}; bashFileReadGuidance=${enabled(statusSnapshot.flags.bashFileReadGuidance)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionEventSearch=${enabled(statusSnapshot.flags.sessionEventSearch)}; sessionEventTrace=${enabled(statusSnapshot.flags.sessionEventTrace)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
+              `Feature flags: continuableTasks=${enabled(statusSnapshot.flags.continuableTasks)}; continuableTaskFollowups=${enabled(statusSnapshot.flags.continuableTaskFollowups)}; taskResultTool=${enabled(statusSnapshot.flags.taskResultTool)}; taskResultPersistence=${enabled(statusSnapshot.flags.taskResultPersistence)}; taskListTool=${enabled(statusSnapshot.flags.taskListTool)}; taskWaitTool=${enabled(statusSnapshot.flags.taskWaitTool)}; callOmoAgentTool=${enabled(statusSnapshot.flags.callOmoAgentTool)}; taskCancelTool=${enabled(statusSnapshot.flags.taskCancelTool)}; persistentMemoryTools=${enabled(statusSnapshot.flags.persistentMemoryTools)}; goalTools=${enabled(statusSnapshot.flags.goalTools)}; focusChain=${enabled(statusSnapshot.flags.focusChain)}; goalUseReminder=${enabled(statusSnapshot.flags.goalUseReminder)}; agentUsageReminder=${enabled(statusSnapshot.flags.agentUsageReminder)}; categorySkillReminder=${enabled(statusSnapshot.flags.categorySkillReminder)}; compactionResumeAdvisory=${enabled(statusSnapshot.flags.compactionResumeAdvisory)}; pressureCompaction=${enabled(statusSnapshot.flags.pressureCompaction)}; runtimeFallback=${enabled(statusSnapshot.flags.runtimeFallback)}; contextOverflowRecovery=${enabled(statusSnapshot.flags.contextOverflowRecovery)}; pinnedRoutePreflight=${enabled(statusSnapshot.flags.pinnedRoutePreflight)}; agentPresetPreflight=${enabled(statusSnapshot.flags.agentPresetPreflight)}; thinkModeReasoning=${enabled(statusSnapshot.flags.thinkModeReasoning)}; teamTools=${enabled(statusSnapshot.flags.teamTools)}; teamModeContext=${enabled(statusSnapshot.flags.teamModeContext)}; teamStatusContext=${enabled(statusSnapshot.flags.teamStatusContext)}; teamTaskUseReminder=${enabled(statusSnapshot.flags.teamTaskUseReminder)}; jobTools=${enabled(statusSnapshot.flags.jobTools)}; imageQueryTool=${enabled(statusSnapshot.flags.imageQueryTool)}; readImageResizing=${enabled(statusSnapshot.flags.readImageResizing)}; toolResultPruning=${enabled(statusSnapshot.flags.toolResultPruning)}; manualContextPruning=${enabled(statusSnapshot.flags.manualContextPruning)}; searchToolResultPruning=${enabled(statusSnapshot.flags.searchToolResultPruning)}; generalToolResultPruning=${enabled(statusSnapshot.flags.generalToolResultPruning)}; agentTerminalTools=${enabled(statusSnapshot.flags.agentTerminalTools)}; planChecklist=${enabled(statusSnapshot.flags.planChecklist)}; planFormatAdvisory=${enabled(statusSnapshot.flags.planFormatAdvisory)}; modelCapabilitiesRefresh=${enabled(statusSnapshot.flags.modelCapabilitiesRefresh)}; webSearchCommand=${enabled(statusSnapshot.flags.webSearchCommand)}; webSearchTool=${enabled(statusSnapshot.flags.webSearchTool)}; lspTools=${enabled(statusSnapshot.flags.lspTools)}; rootAgentsContext=${enabled(statusSnapshot.flags.rootAgentsContext)}; rootAgentsContextWatch=${enabled(statusSnapshot.flags.rootAgentsContextWatch)}; projectRootAgentsContext=${enabled(statusSnapshot.flags.projectRootAgentsContext)}; projectRootAgentsContextWatch=${enabled(statusSnapshot.flags.projectRootAgentsContextWatch)}; agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectAgentFiles=${enabled(statusSnapshot.flags.projectAgentFiles)}; projectCommands=${enabled(statusSnapshot.flags.projectCommands)}; projectRootCommands=${enabled(statusSnapshot.flags.projectRootCommands)}; projectCommandWatch=${enabled(statusSnapshot.flags.projectCommandWatch)}; promptFileExpansion=${enabled(statusSnapshot.flags.promptFileExpansion)}; rootReadmeContext=${enabled(statusSnapshot.flags.rootReadmeContext)}; readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; claudeRulesOnRead=${enabled(statusSnapshot.flags.claudeRulesOnRead)}; omoProjectRulesOnRead=${enabled(statusSnapshot.flags.omoProjectRulesOnRead)}; cursorProjectRulesOnRead=${enabled(statusSnapshot.flags.cursorProjectRulesOnRead)}; githubProjectInstructionsOnRead=${enabled(statusSnapshot.flags.githubProjectInstructionsOnRead)}; githubCopilotInstructionsOnRead=${enabled(statusSnapshot.flags.githubCopilotInstructionsOnRead)}; openCodeRulesOnRead=${enabled(statusSnapshot.flags.openCodeRulesOnRead)}; writeExistingFileGuard=${enabled(statusSnapshot.flags.writeExistingFileGuard)}; notepadWriteGuard=${enabled(statusSnapshot.flags.notepadWriteGuard)}; editErrorRecovery=${enabled(statusSnapshot.flags.editErrorRecovery)}; jsonErrorRecovery=${enabled(statusSnapshot.flags.jsonErrorRecovery)}; delegateTaskErrorGuidance=${enabled(statusSnapshot.flags.delegateTaskErrorGuidance)}; bashFileReadGuidance=${enabled(statusSnapshot.flags.bashFileReadGuidance)}; sessionSearch=${enabled(statusSnapshot.flags.sessionSearch)}; sessionEventSearch=${enabled(statusSnapshot.flags.sessionEventSearch)}; sessionEventTrace=${enabled(statusSnapshot.flags.sessionEventTrace)}; sessionRead=${enabled(statusSnapshot.flags.sessionRead)}; sessionList=${enabled(statusSnapshot.flags.sessionList)}; sessionInfo=${enabled(statusSnapshot.flags.sessionInfo)}.`,
               `OMO rules: omoProjectRulesOnRead=${enabled(statusSnapshot.flags.omoProjectRulesOnRead)}; projectRootOmoRulesOnRead=${enabled(statusSnapshot.flags.projectRootOmoRulesOnRead)}.`,
               `AGENTS context: agentsOnRead=${enabled(statusSnapshot.flags.agentsOnRead)}; projectRootAgentsOnRead=${enabled(statusSnapshot.flags.projectRootAgentsOnRead)}; rootSnapshot=${enabled(statusSnapshot.flags.rootAgentsContext)}; projectRootSnapshot=${enabled(statusSnapshot.flags.projectRootAgentsContext)}.`,
               `README context: readmeOnRead=${enabled(statusSnapshot.flags.readmeOnRead)}; projectRootReadmeOnRead=${enabled(statusSnapshot.flags.projectRootReadmeOnRead)}; rootSnapshot=${enabled(statusSnapshot.flags.rootReadmeContext)}.`,
@@ -3426,6 +3430,9 @@ export function apply(ctx, rawConfig) {
     || ['get', 'create', 'edit', 'pause', 'resume', 'complete'].some(method => typeof goalService[method] !== 'function'))) {
     throw new Error('dsh-omo: enableGoalTools requires DSH goals.get/create/edit/pause/resume/complete')
   }
+  if (config.enableFocusChain && typeof goalService?.get !== 'function') {
+    throw new Error('dsh-omo: enableFocusChain requires DSH goals.get')
+  }
   const llmService = optionalService(ctx, 'llm')
   const attachmentsService = optionalService(ctx, 'attachments')
   const agentPresetsService = optionalService(ctx, 'agentPresets')
@@ -3532,6 +3539,10 @@ export function apply(ctx, rawConfig) {
     ? createTaskResultRegistry({ persistentStore: taskResultStorage })
     : undefined
   const systemPromptService = optionalService(ctx, 'systemPrompt')
+  if (config.enableFocusChain && (typeof agentsService?.get !== 'function' || typeof systemPromptService?.context !== 'function'
+    || typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
+    throw new Error('dsh-omo: enableFocusChain requires DSH agents.get, systemPrompt.context, Cordis ctx.on, and ctx.effect')
+  }
   const hasCategorySkillDefaults = Array.isArray(config.categoryRoutes)
     && config.categoryRoutes.slice(0, 32).some(route => route?.disable !== true && Array.isArray(route?.skills) && route.skills.length > 0)
   if (config.enableCategorySkillReminder && hasCategorySkillDefaults
@@ -3829,6 +3840,9 @@ export function apply(ctx, rawConfig) {
   if (config.enableProjectCommandPreserveBodyLineEndings && config.enableProjectCommands !== true) {
     throw new Error('dsh-omo: enableProjectCommandPreserveBodyLineEndings requires enableProjectCommands')
   }
+  if (config.enableNearestProjectOpenCodeCommands && config.enableProjectRootCommands !== true) {
+    throw new Error('dsh-omo: enableNearestProjectOpenCodeCommands requires enableProjectRootCommands')
+  }
   if (config.enableProjectCommands && (!sessionsService || typeof sessionsService.get !== 'function'
     || !agentsService || typeof agentsService.get !== 'function'
     || !ctx.fs || ['resolve', 'contains', 'lstat', 'stat', 'listDir', 'readBytes'].some(method => typeof ctx.fs[method] !== 'function')
@@ -4010,6 +4024,7 @@ export function apply(ctx, rawConfig) {
       taskCancelTool: config.enableTaskCancelTool === true,
       persistentMemoryTools: config.enablePersistentMemoryTools === true,
       goalTools: config.enableGoalTools === true,
+      focusChain: config.enableFocusChain === true,
       goalUseReminder: config.enableGoalUseReminder === true,
       agentUsageReminder: config.enableAgentUsageReminder === true,
       categorySkillReminder: config.enableCategorySkillReminder === true,
@@ -4295,6 +4310,7 @@ export function apply(ctx, rawConfig) {
       config.enableProjectCommandMalformedFrontmatter === true,
       config.enableProjectCommandEmptyBody === true,
       config.enableProjectCommandPreserveBodyLineEndings === true,
+      config.enableNearestProjectOpenCodeCommands === true,
     )
     : undefined
   ctx.tools.register(specialist.tool)
@@ -4625,6 +4641,11 @@ export function apply(ctx, rawConfig) {
     const advisory = createCompactionResumeAdvisory(agentsService)
     ctx.on('agent/created', advisory.listener)
     ctx.effect(() => advisory.dispose, 'dsh-omo compaction-resume advisory')
+  }
+  if (config.enableFocusChain) {
+    const focusChain = createFocusChain(goalService, agentsService)
+    ctx.on('agent/created', focusChain.listener)
+    ctx.effect(() => focusChain.dispose, 'dsh-omo Focus Chain')
   }
   if (config.enableGoalUseReminder) {
     const reminder = createGoalUseReminder(teamService, agentsService)

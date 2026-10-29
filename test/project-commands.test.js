@@ -122,6 +122,7 @@ function fixture(options = {}) {
     allowMalformedFrontmatter: options.allowMalformedFrontmatter,
     allowEmptyBody: options.allowEmptyBody,
     preserveBodyLineEndings: options.preserveBodyLineEndings,
+    nearestProjectOpenCode: options.nearestProjectOpenCode,
   })
   return { ...memory, agent, session, sessions, adapter }
 }
@@ -810,6 +811,42 @@ test('loads explicit project-root commands before exact-CWD sources', async () =
     `${cwd}/.opencode/commands`,
   ])
   assert.ok(state.calls.some(call => call.method === 'lstat' && call.value === root), 'the DSH FS validates the configured absolute project root')
+})
+
+test('opt-in nearest OpenCode project sources win without changing Claude precedence', async () => {
+  const root = '/workspace'
+  const cwd = `${root}/project/apps/web`
+  const state = fixture({ cwd, projectCommandsRoot: root, nearestProjectOpenCode: true })
+  for (const directory of [
+    root, `${root}/.opencode`, `${root}/.opencode/commands`, `${root}/.opencode/command`, `${root}/.claude`, `${root}/.claude/commands`,
+    cwd, `${cwd}/.opencode`, `${cwd}/.opencode/commands`, `${cwd}/.opencode/command`, `${cwd}/.claude`, `${cwd}/.claude/commands`,
+  ]) state.addDirectory(directory)
+  state.addFile(`${root}/.opencode/commands/shared.md`, '---\ndescription: Root shared\n---\nRoot body.\n')
+  state.addFile(`${cwd}/.opencode/commands/shared.md`, '---\ndescription: CWD shared\n---\nCWD body.\n')
+  state.addFile(`${root}/.opencode/commands/invalid.md`, '---\ndescription: Root fallback\n---\nRoot body.\n')
+  state.addFile(`${cwd}/.opencode/commands/invalid.md`, '---\ndescription: [broken\n---\nInvalid body.\n')
+  state.addFile(`${root}/.opencode/command/plural.md`, '---\ndescription: Root singular\n---\nRoot singular body.\n')
+  state.addFile(`${root}/.opencode/commands/plural.md`, '---\ndescription: Root plural\n---\nRoot plural body.\n')
+  state.addFile(`${cwd}/.opencode/command/singular.md`, '---\ndescription: CWD singular\n---\nCWD singular body.\n')
+  state.addFile(`${cwd}/.opencode/commands/singular.md`, '---\ndescription: CWD plural\n---\nCWD plural body.\n')
+  state.addFile(`${cwd}/.opencode/command/nearest.md`, '---\ndescription: CWD singular nearest\n---\nCWD singular body.\n')
+  state.addFile(`${root}/.opencode/commands/nearest.md`, '---\ndescription: Root plural nearest\n---\nRoot plural body.\n')
+  state.addFile(`${root}/.opencode/commands/claude-shared.md`, '---\ndescription: Root OpenCode\n---\nRoot OpenCode body.\n')
+  state.addFile(`${cwd}/.claude/commands/claude-shared.md`, '---\ndescription: CWD Claude\n---\nCWD Claude body.\n')
+  state.addFile(`${cwd}/.claude/commands/root-claude.md`, '---\ndescription: CWD Claude loses\n---\nCWD Claude body.\n')
+  state.addFile(`${root}/.claude/commands/root-claude.md`, '---\ndescription: Root Claude wins\n---\nRoot Claude body.\n')
+  const result = await state.adapter.list(state.agent)
+  const selected = Object.fromEntries(result.commands.map(command => [command.name, command.description]))
+  assert.equal(selected.shared, 'CWD shared')
+  assert.equal(selected.invalid, 'Root fallback')
+  assert.equal(selected.plural, 'Root plural')
+  assert.equal(selected.singular, 'CWD plural')
+  assert.equal(selected.nearest, 'CWD singular nearest')
+  assert.equal(selected['claude-shared'], 'Root OpenCode')
+  assert.equal(selected['root-claude'], 'Root Claude wins')
+  const defaultState = fixture({ cwd, projectCommandsRoot: root })
+  for (const [key, value] of state.nodes) defaultState.nodes.set(key, value)
+  assert.equal((await defaultState.adapter.list(defaultState.agent)).commands.find(command => command.name === 'shared')?.description, 'Root shared')
 })
 
 test('ignores explicit project-root commands outside the live Agent CWD boundary', async () => {
@@ -1629,6 +1666,21 @@ test('Config forwards plain frontmatter fallback through real apply', async t =>
   await state.createAgent()
   assert.equal(state.scopedCommands.get('plain-frontmatter')?.description, 'Project command /plain-frontmatter')
   assert.throws(() => state.setup({ enableProjectCommandUnterminatedFrontmatter: true, enableProjectCommands: false }), /requires enableProjectCommands/u)
+})
+
+test('Config forwards nearest OpenCode project precedence through real apply', async t => {
+  const state = applyCommandFixture()
+  t.after(() => state.dispose())
+  state.session.header.cwd = `${CWD}/nested`
+  state.addDirectory(`${CWD}/nested`)
+  state.addDirectory(`${CWD}/nested/.opencode`)
+  state.addDirectory(`${CWD}/nested/.opencode/commands`)
+  state.addFile(`${CWD}/${PROJECT_COMMAND_DIRECTORY}/shared.md`, '---\ndescription: Root\n---\nRoot body.\n')
+  state.addFile(`${CWD}/nested/.opencode/commands/shared.md`, '---\ndescription: Nested\n---\nNested body.\n')
+  state.setup({ enableProjectRootCommands: true, projectCommandsRoot: CWD, enableNearestProjectOpenCodeCommands: true })
+  await state.createAgent()
+  assert.equal(state.scopedCommands.get('shared')?.description, 'Nested')
+  assert.throws(() => state.setup({ enableNearestProjectOpenCodeCommands: true, enableProjectRootCommands: false }), /requires enableProjectRootCommands/u)
 })
 
 test('Config forwards body line-ending compatibility through real apply', async t => {

@@ -363,7 +363,7 @@ function sameProjectCommandsRoot(before, after) {
     && before.relativeCwd === after.relativeCwd)
 }
 
-async function resolveScope(fs, cwd, signal, userOpenCodeCommandRoots = [], userClaudeCommandRoots = [], watchMissingProjectParents = false, watchMissingUserRoots = false, projectCommandsRoot, userAgentsCommandRoots = []) {
+async function resolveScope(fs, cwd, signal, userOpenCodeCommandRoots = [], userClaudeCommandRoots = [], watchMissingProjectParents = false, watchMissingUserRoots = false, projectCommandsRoot, userAgentsCommandRoots = [], nearestProjectOpenCode = false) {
   const rootPathInfo = await awaitWithSignal(() => fs.lstat(cwd, { cwd, signal }), signal)
   assertNotAborted(signal)
   if (rootPathInfo?.type !== 'directory') throw new TypeError('Agent CWD is not a real directory.')
@@ -480,16 +480,20 @@ async function resolveScope(fs, cwd, signal, userOpenCodeCommandRoots = [], user
       }
     }
   }
+  const orderedDirectories = nearestProjectOpenCode && configuredProjectRoot
+    ? [...directories.slice(3, 5), ...directories.slice(0, 2), directories[2], ...directories.slice(5)]
+    : directories
   return {
     rootTarget,
     rootInfo,
     projectCommandsRoot,
     projectRoot: configuredProjectRoot,
-    directories,
+    directories: orderedDirectories,
     watchDirectories: [...watchDirectories.values()],
     userOpenCodeCommandRoots,
     userClaudeCommandRoots,
     userAgentsCommandRoots,
+    nearestProjectOpenCode,
   }
 }
 
@@ -509,6 +513,7 @@ async function scopeStillMatches(fs, cwd, before, signal) {
     false,
     before.projectCommandsRoot,
     before.userAgentsCommandRoots,
+    before.nearestProjectOpenCode,
   )
   return targetKey(after.rootTarget) === targetKey(before.rootTarget)
     && (before.rootInfo.version === undefined || after.rootInfo.version === before.rootInfo.version)
@@ -721,6 +726,7 @@ export function createProjectCommandAdapter(fs, options = {}) {
   const allowMalformedFrontmatter = options.allowMalformedFrontmatter === true
   const allowEmptyBody = options.allowEmptyBody === true
   const preserveBodyLineEndings = options.preserveBodyLineEndings === true
+  const nearestProjectOpenCode = options.nearestProjectOpenCode === true
   const commandFs = fs
   const callFs = createFilesystemCallGate()
   if (!sessions || typeof sessions.get !== 'function') throw new TypeError('Project commands require DSH sessions.get.')
@@ -756,7 +762,7 @@ export function createProjectCommandAdapter(fs, options = {}) {
     if (signal !== undefined && !validSignal(signal)) throw new TypeError('Project command listing requires a valid AbortSignal.')
     assertNotAborted(signal)
     const cwd = safeAgentCwd(agent, sessions)
-    const scope = await resolveScope(gatedFs, cwd, signal, userOpenCodeCommandRoots, userClaudeCommandRoots, false, false, projectCommandsRoot, userAgentsCommandRoots)
+    const scope = await resolveScope(gatedFs, cwd, signal, userOpenCodeCommandRoots, userClaudeCommandRoots, false, false, projectCommandsRoot, userAgentsCommandRoots, nearestProjectOpenCode)
     assertNotAborted(signal)
     if (!scope.directories.some(Boolean)) return Object.freeze({ commands: Object.freeze([]), truncated: false, skipped: 0 })
 
@@ -840,7 +846,7 @@ export function createProjectCommandAdapter(fs, options = {}) {
     if (signal !== undefined && !validSignal(signal)) throw new TypeError('Project command watch target discovery requires a valid AbortSignal.')
     assertNotAborted(signal)
     const cwd = safeAgentCwd(agent, sessions)
-    const scope = await resolveScope(gatedFs, cwd, signal, userOpenCodeCommandRoots, userClaudeCommandRoots, true, true, projectCommandsRoot, userAgentsCommandRoots)
+    const scope = await resolveScope(gatedFs, cwd, signal, userOpenCodeCommandRoots, userClaudeCommandRoots, true, true, projectCommandsRoot, userAgentsCommandRoots, nearestProjectOpenCode)
     assertNotAborted(signal)
     return Object.freeze([...scope.watchDirectories])
   }
