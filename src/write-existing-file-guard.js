@@ -671,6 +671,7 @@ export function createWriteExistingFileGuard(agents, sessions, fs, options = {})
     const agent = payload?.agent
     let id
     try { id = agent?.id } catch { return }
+    if (typeof id !== 'string' || !isLiveAgent(agents, id, agent)) return
     clearAgent(id)
   }
 
@@ -678,6 +679,13 @@ export function createWriteExistingFileGuard(agents, sessions, fs, options = {})
     const agent = payload?.agent
     let id
     try { id = agent?.id } catch { return }
+    if (typeof id !== 'string') return
+    try {
+      const current = agents.get(id)
+      if (current !== undefined && current !== agent) return
+    } catch {
+      return
+    }
     clearAgent(id)
   }
 

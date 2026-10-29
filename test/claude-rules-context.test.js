@@ -6,7 +6,18 @@ import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { createClaudeRulesOnReadContextListener, normalizeUserClaudeRulesRoots, normalizeUserOpenCodeRulesRoots, registerClaudeRulesOnReadContext } from '../src/claude-rules-context.js'
+import {
+  createClaudeRulesOnReadContextListener,
+  normalizeProjectOmoRulesRoot,
+  normalizeProjectClaudeRulesRoot,
+  normalizeProjectCursorRulesRoot,
+  normalizeProjectGitHubInstructionsRoot,
+  normalizeProjectSisyphusRulesRoot,
+  normalizeUserClaudeRulesRoots,
+  normalizeUserOpenCodeRulesRoots,
+  normalizeUserSisyphusRulesRoot,
+  registerClaudeRulesOnReadContext,
+} from '../src/claude-rules-context.js'
 
 const systemPromptRequire = createRequire(import.meta.resolve('@deepseek-ai/dsh-system-prompt'))
 const { createScope } = await import(systemPromptRequire.resolve('@deepseek-ai/dsh-scope'))
@@ -17,6 +28,7 @@ const CWD = '/workspace/project'
 const USER_CLAUDE_RULES_ROOT = '/Users/alice/.claude/rules'
 const USER_OMO_RULES_ROOT = '/Users/alice/.omo/rules'
 const USER_OPENCODE_RULES_ROOT = '/Users/alice/.opencode/rules'
+const USER_SISYPHUS_RULES_ROOT = '/Users/alice/.sisyphus/rules'
 const encoder = new TextEncoder()
 
 function rule(body, frontmatter = 'alwaysApply: true') {
@@ -36,8 +48,10 @@ function makeRecord(value) {
 
 function makeFileSystem({
   cwd = CWD,
+  projectRoot,
   userClaudeRulesRoot = USER_CLAUDE_RULES_ROOT,
   userOpenCodeRulesRoots = [],
+  userSisyphusRulesRoot = USER_SISYPHUS_RULES_ROOT,
   userRootTargetKey,
   targetKeys = {},
   symlinkTargets = {},
@@ -55,9 +69,17 @@ function makeFileSystem({
   const symlinkTargetAliases = new Map(Object.entries(symlinkTargets))
   const userRootMappings = [
     { path: userClaudeRulesRoot, relative: '@user' },
+    { path: userSisyphusRulesRoot, relative: '@sisyphus' },
     ...userOpenCodeRulesRoots.map((root, index) => ({ path: root, relative: `@opencode${index}` })),
   ].sort((left, right) => right.path.length - left.path.length)
-  const directories = new Set(['', '.claude', '.claude/rules'])
+  const projectRootRelative = projectRoot ? '@project' : undefined
+  const cwdWithinProjectRoot = typeof projectRoot === 'string'
+    && (cwd === projectRoot || cwd.startsWith(`${projectRoot}/`))
+  const cwdRelativeToProjectRoot = cwdWithinProjectRoot ? path.relative(projectRoot, cwd) : undefined
+  const cwdVirtualRelative = cwdWithinProjectRoot
+    ? cwdRelativeToProjectRoot ? `${projectRootRelative}/${cwdRelativeToProjectRoot}` : projectRootRelative
+    : ''
+  const directories = new Set(['', '.claude', '.claude/rules', ...(projectRootRelative ? [projectRootRelative] : [])])
   if (!missingUserRoot) for (const root of userRootMappings) directories.add(root.relative)
   const targets = new WeakMap()
   const targetCache = new Map()
@@ -110,7 +132,13 @@ function makeFileSystem({
 
   function relativeFromPath(value, baseCwd = cwd) {
     if (typeof value !== 'string') return undefined
-    if (value === cwd) return ''
+    if (projectRoot && path.isAbsolute(value)) {
+      if (value === projectRoot) return projectRootRelative
+      if (value.startsWith(`${projectRoot}/`)) {
+        const relative = path.relative(projectRoot, value)
+        return relative ? `${projectRootRelative}/${relative}` : projectRootRelative
+      }
+    }
     for (const root of userRootMappings) {
       if (value === root.path) return root.relative
       if (path.isAbsolute(value) && value.startsWith(`${root.path}/`)) {
@@ -118,9 +146,10 @@ function makeFileSystem({
       }
     }
     if (path.isAbsolute(value)) {
+      if (value === cwd) return cwdVirtualRelative
       const relative = path.relative(cwd, value)
       if (relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return undefined
-      return relative
+      return relative ? path.join(cwdVirtualRelative, relative) : cwdVirtualRelative
     }
     const userRoot = userRootMappings.find(root => root.path === baseCwd)
     if (userRoot) {
@@ -128,6 +157,18 @@ function makeFileSystem({
       if (relative === '.') return userRoot.relative
       if (relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return undefined
       return `${userRoot.relative}/${relative}`
+    }
+    if (projectRoot && baseCwd === projectRoot) {
+      const relative = path.normalize(value)
+      if (relative === '.') return projectRootRelative
+      if (relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return undefined
+      return `${projectRootRelative}/${relative}`
+    }
+    if (projectRoot && baseCwd === cwd) {
+      const relative = path.normalize(value)
+      if (relative === '.') return cwdVirtualRelative
+      if (relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return undefined
+      return cwdVirtualRelative ? `${cwdVirtualRelative}/${relative}` : relative
     }
     return value
   }
@@ -199,7 +240,8 @@ function makeFileSystem({
   const fs = {
     async resolve(value, options = {}) {
       calls.push({ method: 'resolve', path: value, options })
-      if (options.cwd !== undefined && options.cwd !== cwd && !userRootMappings.some(root => root.path === options.cwd)) {
+      if (options.cwd !== undefined && options.cwd !== cwd && options.cwd !== projectRoot
+        && !userRootMappings.some(root => root.path === options.cwd)) {
         return makeTarget(String(value), 'file', undefined, { outside: true, key: `outside:${String(value)}` })
       }
       const relative = relativeFromPath(value, options.cwd ?? cwd)
@@ -330,7 +372,14 @@ async function makeHarness(options = {}) {
       includeProjectCursorRoot: options.includeProjectCursorRoot ?? false,
       includeProjectGitHubInstructionsRoot: options.includeProjectGitHubInstructionsRoot ?? false,
       includeProjectGitHubCopilotInstructionsFile: options.includeProjectGitHubCopilotInstructionsFile ?? false,
+      includeProjectSisyphusRoot: options.includeProjectSisyphusRoot ?? false,
+      projectOmoRulesRoot: options.projectOmoRulesRoot,
+      projectClaudeRulesRoot: options.projectClaudeRulesRoot,
+      projectCursorRulesRoot: options.projectCursorRulesRoot,
+      projectGitHubInstructionsRoot: options.projectGitHubInstructionsRoot,
+      projectSisyphusRulesRoot: options.projectSisyphusRulesRoot,
       userOpenCodeRulesRoots: options.userOpenCodeRulesRoots ?? [],
+      userSisyphusRulesRoot: options.userSisyphusRulesRoot,
     },
   ))
   let policyFiber
@@ -493,6 +542,56 @@ test('validates one explicit normalized absolute user Claude rules root', () => 
   }
 })
 
+test('validates one explicit normalized absolute non-root project OMO rules root', () => {
+  assert.equal(normalizeProjectOmoRulesRoot(undefined), undefined)
+  assert.equal(normalizeProjectOmoRulesRoot(''), undefined)
+  assert.equal(normalizeProjectOmoRulesRoot('/repo'), '/repo')
+  assert.equal(normalizeProjectOmoRulesRoot('/repo/'), '/repo')
+  for (const invalid of ['relative/path', '/', '/repo/../other', '/repo\\rules', ' /repo']) {
+    assert.throws(() => normalizeProjectOmoRulesRoot(invalid), /normalized absolute non-filesystem-root path/u, invalid)
+  }
+})
+
+test('validates one explicit normalized absolute non-root project Claude rules root', () => {
+  assert.equal(normalizeProjectClaudeRulesRoot(undefined), undefined)
+  assert.equal(normalizeProjectClaudeRulesRoot(''), undefined)
+  assert.equal(normalizeProjectClaudeRulesRoot('/repo'), '/repo')
+  assert.equal(normalizeProjectClaudeRulesRoot('/repo/'), '/repo')
+  for (const invalid of ['relative/path', '/', '/repo/../other', '/repo\\rules', ' /repo']) {
+    assert.throws(() => normalizeProjectClaudeRulesRoot(invalid), /normalized absolute non-filesystem-root path/u, invalid)
+  }
+})
+
+test('validates one explicit normalized absolute non-root project Cursor rules root', () => {
+  assert.equal(normalizeProjectCursorRulesRoot(undefined), undefined)
+  assert.equal(normalizeProjectCursorRulesRoot(''), undefined)
+  assert.equal(normalizeProjectCursorRulesRoot('/repo'), '/repo')
+  assert.equal(normalizeProjectCursorRulesRoot('/repo/'), '/repo')
+  for (const invalid of ['relative/path', '/', '/repo/../other', '/repo\\rules', ' /repo']) {
+    assert.throws(() => normalizeProjectCursorRulesRoot(invalid), /normalized absolute non-filesystem-root path/u, invalid)
+  }
+})
+
+test('validates one explicit normalized absolute non-root project GitHub instructions root', () => {
+  assert.equal(normalizeProjectGitHubInstructionsRoot(undefined), undefined)
+  assert.equal(normalizeProjectGitHubInstructionsRoot(''), undefined)
+  assert.equal(normalizeProjectGitHubInstructionsRoot('/repo'), '/repo')
+  assert.equal(normalizeProjectGitHubInstructionsRoot('/repo/'), '/repo')
+  for (const invalid of ['relative/path', '/', '/repo/../other', '/repo\\rules', ' /repo']) {
+    assert.throws(() => normalizeProjectGitHubInstructionsRoot(invalid), /normalized absolute non-filesystem-root path/u, invalid)
+  }
+})
+
+test('validates one explicit normalized absolute non-root project Sisyphus rules root', () => {
+  assert.equal(normalizeProjectSisyphusRulesRoot(undefined), undefined)
+  assert.equal(normalizeProjectSisyphusRulesRoot(''), undefined)
+  assert.equal(normalizeProjectSisyphusRulesRoot('/repo'), '/repo')
+  assert.equal(normalizeProjectSisyphusRulesRoot('/repo/'), '/repo')
+  for (const invalid of ['relative/path', '/', '/repo/../other', '/repo\\rules', ' /repo']) {
+    assert.throws(() => normalizeProjectSisyphusRulesRoot(invalid), /normalized absolute non-filesystem-root path/u, invalid)
+  }
+})
+
 test('validates explicit OpenCode user roots and sorts sources in pinned priority', () => {
   assert.deepEqual(normalizeUserOpenCodeRulesRoots(undefined), [])
   assert.deepEqual(
@@ -524,6 +623,23 @@ test('validates explicit OpenCode user roots and sorts sources in pinned priorit
   }
 })
 
+test('validates one explicit normalized absolute user Sisyphus rules root', () => {
+  assert.equal(normalizeUserSisyphusRulesRoot(undefined), undefined)
+  assert.equal(normalizeUserSisyphusRulesRoot(''), undefined)
+  assert.equal(normalizeUserSisyphusRulesRoot(USER_SISYPHUS_RULES_ROOT), USER_SISYPHUS_RULES_ROOT)
+  assert.equal(normalizeUserSisyphusRulesRoot(`${USER_SISYPHUS_RULES_ROOT}/`), USER_SISYPHUS_RULES_ROOT)
+  for (const invalid of [
+    'relative/.sisyphus/rules',
+    '~/.sisyphus/rules',
+    '/Users/alice/.sisyphus/commands',
+    '/Users/alice/.sisyphus/rules/../other',
+    '/Users/alice/.sisyphus\\rules',
+    ` ${USER_SISYPHUS_RULES_ROOT}`,
+  ]) {
+    assert.throws(() => normalizeUserSisyphusRulesRoot(invalid), /normalized absolute path/u, invalid)
+  }
+})
+
 test('injects alwaysApply and matching .md/.mdc rules while preserving native value/content and UserMessage shape', async () => {
   const harness = await makeHarness({ rules: {
     '.claude/rules/always.md': rule('always guidance', 'alwaysApply: true'),
@@ -546,6 +662,23 @@ test('injects alwaysApply and matching .md/.mdc rules while preserving native va
     assert.match(texts[0], /always guidance/u)
     assert.match(texts[1], /Untrusted/u)
     assert.ok(result.additionalContexts.every(message => message.role === 'user' && message.source.kind === 'user'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('sorts recursively scanned rule files by relative path rather than traversal order', async () => {
+  const harness = await makeHarness({ rules: {
+    '.claude/rules/a/child.md': rule('nested lexical path', 'alwaysApply: true'),
+    '.claude/rules/a0.md': rule('sibling lexical path', 'alwaysApply: true'),
+  } })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.claude/rules/a/child.md',
+      '.claude/rules/a0.md',
+    ])
   } finally {
     await harness.dispose()
   }
@@ -742,7 +875,7 @@ test('strips valid Copilot YAML frontmatter without applying rule-matcher patter
   }
 })
 
-test('omits deprecated .sisyphus project rules while loading the prioritized Copilot source', async () => {
+test('keeps default-off deprecated .sisyphus project rules omitted while loading the prioritized Copilot source', async () => {
   const harness = await makeHarness({
     includeProjectClaudeRoot: false,
     includeProjectGitHubCopilotInstructionsFile: true,
@@ -839,6 +972,926 @@ test('keeps the session cwd as the matching root for files beneath a nested proj
   }
 })
 
+test('matches explicit project-root Claude rules for a nested session cwd', async () => {
+  const projectRoot = '/repo'
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot,
+    projectClaudeRulesRoot: projectRoot,
+    includeProjectClaudeRoot: false,
+    rules: {
+      '@project/.claude/rules/monorepo.md': rule('project-root guidance matches from the configured root', 'applyTo: "apps/a/src/*.ts"'),
+      '@project/.claude/rules/cwd-relative-only.md': rule('this root rule must not use cwd-relative matching', 'applyTo: "src/*.ts"'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      'project-root/.claude/rules/monorepo.md',
+    ])
+    assert.ok(texts[0].includes('[Match: glob: apps/a/src/*.ts]'))
+    assert.ok(texts[0].includes('project-root guidance matches from the configured root'))
+    assert.deepEqual(result.value, { body: 'body:src/x.ts' })
+    assert.deepEqual(result.content, [{ type: 'text', text: 'finalized:canonical:body:src/x.ts' }])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat'
+      && typeof call.path === 'string' && call.path.split('/').includes('..')), false, 'explicit-root scanning never probes ancestors')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('does not read explicit project-root rules for a sibling cwd or symlinked rules root', async t => {
+  await t.test('sibling cwd is outside the configured project root', async () => {
+    const harness = await makeHarness({
+      cwd: '/repo/apps/b',
+      projectRoot: '/repo/apps/a',
+      projectClaudeRulesRoot: '/repo/apps/a',
+      includeProjectClaudeRoot: false,
+      rules: { '@project/.claude/rules/always.md': rule('sibling guidance must not inject') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+        && String(call.path).startsWith('@project/.claude/rules')), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('symlinked project rules directory fails closed', async () => {
+    const harness = await makeHarness({
+      cwd: '/repo/apps/a',
+      projectRoot: '/repo',
+      projectClaudeRulesRoot: '/repo',
+      includeProjectClaudeRoot: false,
+      types: { '@project/.claude/rules': 'symlink' },
+      rules: { '@project/.claude/rules/always.md': rule('symlink guidance must not inject') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+        && String(call.path).startsWith('@project/.claude/rules')), false)
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+        && String(call.target?.relative).startsWith('@project/.claude/rules')), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+})
+
+test('deduplicates explicit project-root Claude rules when the configured root equals cwd', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo',
+    projectRoot: '/repo',
+    projectClaudeRulesRoot: '/repo',
+    includeProjectClaudeRoot: true,
+    rules: { '@project/.claude/rules/always.md': rule('one root, one injection') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.claude/rules/always.md',
+    ])
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'listDir'
+      && call.path === '@project/.claude/rules').length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('preserves root-relative globs when a CWD symlink alias resolves to the configured root', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/self',
+    projectRoot: '/repo',
+    projectClaudeRulesRoot: '/repo',
+    includeProjectClaudeRoot: true,
+    types: {
+      '@project/self': 'symlink',
+      '@project/self/.claude': 'directory',
+      '@project/self/.claude/rules': 'directory',
+    },
+    symlinkTargets: { '@project/self': '@project' },
+    rules: {
+      '@project/.claude/rules/monorepo.md': rule('alias-root guidance', 'applyTo: "self/src/*.ts"'),
+      '@project/.claude/rules/cwd-alias.md': rule('cwd-relative alias guidance', 'applyTo: "src/*.ts"'),
+      '@project/src/x.ts': 'canonical source target',
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      'project-root/.claude/rules/cwd-alias.md',
+      'project-root/.claude/rules/monorepo.md',
+    ])
+    assert.ok(texts[0].includes('[Match: glob: src/*.ts]'), 'CWD-relative alias patterns remain eligible')
+    assert.ok(texts[1].includes('[Match: glob: self/src/*.ts]'), 'configured-root patterns use the explicit root-relative path')
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'listDir'
+      && call.path === '@project/.claude/rules').length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('matches explicit project-root Cursor rules for a nested session cwd', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    projectCursorRulesRoot: '/repo',
+    includeProjectClaudeRoot: false,
+    rules: {
+      '@project/.cursor/rules/always.md': rule('explicit-root Cursor always-apply guidance'),
+      '@project/.cursor/rules/monorepo.mdc': rule(
+        'explicit-root Cursor glob guidance',
+        'description: Apply to TypeScript files\napplyTo: "apps/a/src/*.ts"',
+      ),
+      '@project/.cursor/rules/cwd-relative-only.md': rule(
+        'this project-root rule must not use cwd-relative matching',
+        'applyTo: "src/*.ts"',
+      ),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      'project-root/.cursor/rules/always.md',
+      'project-root/.cursor/rules/monorepo.mdc',
+    ])
+    assert.ok(texts[0].includes('[Match: alwaysApply]'))
+    assert.ok(texts[1].includes('[Match: glob: apps/a/src/*.ts]'))
+    assert.deepEqual(result.value, { body: 'body:src/x.ts' })
+    assert.deepEqual(result.content, [{ type: 'text', text: 'finalized:canonical:body:src/x.ts' }])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat'
+      && typeof call.path === 'string' && call.path.split('/').includes('..')), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('orders closer CWD rules before farther project roots, then preserves pinned source priority', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    projectClaudeRulesRoot: '/repo',
+    projectCursorRulesRoot: '/repo',
+    includeProjectClaudeRoot: true,
+    includeProjectCursorRoot: true,
+    userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+    rules: {
+      '@project/.claude/rules/project.md': rule('project Claude priority'),
+      '@project/.cursor/rules/project.mdc': rule('project Cursor priority'),
+      '@project/apps/a/.claude/rules/cwd.md': rule('CWD Claude priority'),
+      '@project/apps/a/.cursor/rules/cwd.mdc': rule('CWD Cursor priority'),
+      '@user/user.md': rule('explicit user rules follow project sources'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.claude/rules/cwd.md',
+      '.cursor/rules/cwd.mdc',
+      'project-root/.claude/rules/project.md',
+      'project-root/.cursor/rules/project.mdc',
+      'user/.claude/rules/user.md',
+    ])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('deduplicates explicit project-root Cursor rules when the configured root equals cwd', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo',
+    projectRoot: '/repo',
+    projectCursorRulesRoot: '/repo',
+    includeProjectCursorRoot: true,
+    rules: { '@project/.cursor/rules/always.mdc': rule('one Cursor root, one injection') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.cursor/rules/always.mdc',
+    ])
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'listDir'
+      && call.path === '@project/.cursor/rules').length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('preserves root-relative and CWD-relative Cursor globs for a root symlink alias', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/self',
+    projectRoot: '/repo',
+    projectCursorRulesRoot: '/repo',
+    includeProjectCursorRoot: true,
+    types: {
+      '@project/self': 'symlink',
+      '@project/self/.cursor': 'directory',
+      '@project/self/.cursor/rules': 'directory',
+    },
+    symlinkTargets: { '@project/self': '@project' },
+    rules: {
+      '@project/.cursor/rules/cwd-alias.mdc': rule('CWD-relative alias guidance', 'applyTo: "src/*.ts"'),
+      '@project/.cursor/rules/project-root.mdc': rule('project-root alias guidance', 'applyTo: "self/src/*.ts"'),
+      '@project/src/x.ts': 'canonical source target',
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      'project-root/.cursor/rules/cwd-alias.mdc',
+      'project-root/.cursor/rules/project-root.mdc',
+    ])
+    assert.ok(texts[0].includes('[Match: glob: src/*.ts]'))
+    assert.ok(texts[1].includes('[Match: glob: self/src/*.ts]'))
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'listDir'
+      && call.path === '@project/.cursor/rules').length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('explicit project-root Cursor rules fail closed outside scope and on symlinked roots', async t => {
+  await t.test('sibling cwd is outside the configured root', async () => {
+    const harness = await makeHarness({
+      cwd: '/repo/apps/b',
+      projectRoot: '/repo/apps/a',
+      projectCursorRulesRoot: '/repo/apps/a',
+      rules: { '@project/.cursor/rules/always.md': rule('sibling Cursor guidance') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+        && String(call.path).startsWith('@project/.cursor/rules')), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('symlinked .cursor and rules directories fail closed', async () => {
+    for (const symlinkPath of ['@project/.cursor', '@project/.cursor/rules']) {
+      const harness = await makeHarness({
+        cwd: '/repo/apps/a',
+        projectRoot: '/repo',
+        projectCursorRulesRoot: '/repo',
+        types: { [symlinkPath]: 'symlink' },
+        rules: { '@project/.cursor/rules/always.md': rule('symlink Cursor guidance') },
+      })
+      try {
+        const agent = await harness.createAgent()
+        assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+        assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+          && String(call.path).startsWith('@project/.cursor/rules')), false)
+        assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+          && String(call.target?.relative).startsWith('@project/.cursor/rules')), false)
+      } finally {
+        await harness.dispose()
+      }
+    }
+  })
+})
+
+test('matches explicit project-root GitHub instructions for a nested session cwd', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    projectGitHubInstructionsRoot: '/repo',
+    includeProjectClaudeRoot: false,
+    rules: {
+      '@project/.github/instructions/always.instructions.md': rule('explicit-root always-apply instruction', 'alwaysApply: true'),
+      '@project/.github/instructions/monorepo.instructions.md': rule(
+        'explicit-root GitHub glob guidance',
+        'description: Apply to TypeScript files\napplyTo: "apps/a/src/*.ts"',
+      ),
+      '@project/.github/instructions/cwd-relative.instructions.md': rule(
+        'project-root instructions must not use cwd-relative matching',
+        'applyTo: "src/*.ts"',
+      ),
+      '@project/.github/instructions/plain.md': rule('plain Markdown is not a GitHub instruction', 'alwaysApply: true'),
+      '@project/.github/instructions/wrong-extension.instructions.mdc': rule('MDC is not a GitHub instruction', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      'project-root/.github/instructions/always.instructions.md',
+      'project-root/.github/instructions/monorepo.instructions.md',
+    ])
+    assert.ok(texts[0].includes('[Match: alwaysApply]'))
+    assert.ok(texts[1].includes('[Match: glob: apps/a/src/*.ts]'))
+    assert.deepEqual(result.value, { body: 'body:src/x.ts' })
+    assert.deepEqual(result.content, [{ type: 'text', text: 'finalized:canonical:body:src/x.ts' }])
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'listDir'
+      && call.path === '@project/.github/instructions').length, 1)
+    for (const suffix of ['/plain.md', '/wrong-extension.instructions.mdc']) {
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+        && String(call.target?.relative).endsWith(suffix)), false, `${suffix} must not be read`)
+    }
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('orders distance-zero project Copilot before CWD sources and nearer CWD before ancestor directories', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    projectGitHubInstructionsRoot: '/repo',
+    includeProjectClaudeRoot: false,
+    includeProjectOmoRoot: true,
+    includeProjectGitHubInstructionsRoot: true,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    rules: {
+      '@project/apps/a/.omo/rules/cwd.md': rule('closer CWD OMO rule', 'alwaysApply: true'),
+      '@project/.github/instructions/root.instructions.md': rule('project GitHub rules', 'alwaysApply: true'),
+      '@project/apps/a/.github/instructions/cwd.instructions.md': rule('cwd GitHub rules', 'alwaysApply: true'),
+      '@project/.github/copilot-instructions.md': 'project-root Copilot guidance.',
+      '@project/apps/a/.github/copilot-instructions.md': 'cwd Copilot guidance.',
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      'project-root/.github/copilot-instructions.md',
+      '.omo/rules/cwd.md',
+      '.github/instructions/cwd.instructions.md',
+      '.github/copilot-instructions.md',
+      'project-root/.github/instructions/root.instructions.md',
+    ])
+    assert.ok(texts[0].includes('project-root Copilot guidance.'))
+    assert.ok(texts[3].includes('cwd Copilot guidance.'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('loads explicit-root Copilot guidance only when its Copilot opt-in is enabled', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    projectGitHubInstructionsRoot: '/repo',
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubInstructionsRoot: false,
+    includeProjectGitHubCopilotInstructionsFile: false,
+    rules: { '@project/.github/copilot-instructions.md': 'must not be read without Copilot opt-in.' },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.equal(contextTexts(result).length, 0)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+      && String(call.target?.relative).endsWith('.github/copilot-instructions.md')), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('loads explicit-root Copilot guidance when CWD GitHub instructions are disabled', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    projectGitHubInstructionsRoot: '/repo',
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubInstructionsRoot: false,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    rules: { '@project/.github/copilot-instructions.md': 'root Copilot remains an explicit opt-in.' },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      'project-root/.github/copilot-instructions.md',
+    ])
+    assert.ok(contextTexts(result)[0].includes('root Copilot remains an explicit opt-in.'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('does not read configured project files when the explicit-root opt-in is absent', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubInstructionsRoot: false,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    rules: { '@project/.github/copilot-instructions.md': 'root must remain unavailable without its root flag.' },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+      && String(call.target?.relative).startsWith('@project/.github/copilot-instructions.md')), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('deduplicates the explicit-root Copilot file when the configured root equals cwd', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo',
+    projectRoot: '/repo',
+    projectGitHubInstructionsRoot: '/repo',
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubInstructionsRoot: true,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    rules: { '@project/.github/copilot-instructions.md': 'one exact CWD Copilot source.' },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.equal(contextTexts(result).length, 1)
+    assert.ok(contextTexts(result)[0].includes('[Rule: .github/copilot-instructions.md]'))
+    assert.ok(contextTexts(result)[0].includes('one exact CWD Copilot source.'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('deduplicates the root Copilot file when CWD aliases the configured root target', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/self',
+    projectRoot: '/repo',
+    projectGitHubInstructionsRoot: '/repo',
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubInstructionsRoot: true,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    types: { '@project/self': 'symlink', '@project/self/.github': 'directory' },
+    symlinkTargets: { '@project/self': '@project' },
+    rules: {
+      '@project/.github/copilot-instructions.md': 'one canonical Copilot file.',
+      '@project/src/x.ts': 'canonical source target',
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.equal(contextTexts(result).length, 1)
+    assert.ok(contextTexts(result)[0].includes('[Rule: project-root/.github/copilot-instructions.md]'))
+    assert.ok(contextTexts(result)[0].includes('one canonical Copilot file.'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('explicit-root Copilot guidance fails closed outside the Agent boundary and on symlinks', async t => {
+  await t.test('a sibling cwd cannot read the configured root file', async () => {
+    const harness = await makeHarness({
+      cwd: '/repo/apps/b',
+      projectRoot: '/repo/apps/a',
+      projectGitHubInstructionsRoot: '/repo/apps/a',
+      includeProjectClaudeRoot: false,
+      includeProjectGitHubInstructionsRoot: true,
+      includeProjectGitHubCopilotInstructionsFile: true,
+      rules: { '@project/.github/copilot-instructions.md': 'sibling root must stay unread.' },
+    })
+    try {
+      const agent = await harness.createAgent()
+      assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+        && String(call.target?.relative).startsWith('@project/.github/copilot-instructions.md')), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('a symlinked .github parent is not traversed', async () => {
+    const harness = await makeHarness({
+      cwd: '/repo/apps/a',
+      projectRoot: '/repo',
+      projectGitHubInstructionsRoot: '/repo',
+      includeProjectClaudeRoot: false,
+      includeProjectGitHubInstructionsRoot: true,
+      includeProjectGitHubCopilotInstructionsFile: true,
+      types: { '@project/.github': 'symlink' },
+      rules: { '@project/.github/copilot-instructions.md': 'symlink parent must stay unread.' },
+    })
+    try {
+      const agent = await harness.createAgent()
+      assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+        && String(call.target?.relative).startsWith('@project/.github/copilot-instructions.md')), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('a symlinked Copilot file is not read', async () => {
+    const harness = await makeHarness({
+      cwd: '/repo/apps/a',
+      projectRoot: '/repo',
+      projectGitHubInstructionsRoot: '/repo',
+      includeProjectClaudeRoot: false,
+      includeProjectGitHubInstructionsRoot: true,
+      includeProjectGitHubCopilotInstructionsFile: true,
+      types: { '@project/.github/copilot-instructions.md': 'symlink' },
+      rules: { '@project/.github/copilot-instructions.md': 'symlink file must stay unread.' },
+    })
+    try {
+      const agent = await harness.createAgent()
+      assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+        && String(call.target?.relative).startsWith('@project/.github/copilot-instructions.md')), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+})
+
+test('adds explicit-root GitHub instructions after successful read, write, and edit results', async () => {
+  for (const name of ['read', 'write', 'edit']) {
+    const harness = await makeHarness({
+      cwd: '/repo/apps/a',
+      projectRoot: '/repo',
+      projectGitHubInstructionsRoot: '/repo',
+      rules: { '@project/.github/instructions/always.instructions.md': rule('project-root operation guidance', 'alwaysApply: true') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      const extraArgs = name === 'write' ? { content: 'new content' }
+        : name === 'edit' ? { old_string: 'old', new_string: 'new' } : {}
+      const result = await harness.executeFileOperation(agent, name, 'src/x.ts', extraArgs)
+      assert.equal(contextTexts(result).length, 1, `${name} must receive the explicit-root context`)
+      assert.deepEqual(result.value, { body: name === 'read' ? 'body:src/x.ts' : 'src/x.ts' })
+      if (name === 'read') {
+        assert.deepEqual(result.content, [{ type: 'text', text: 'finalized:canonical:body:src/x.ts' }])
+      } else {
+        assert.deepEqual(result.content, [{ type: 'text', text: `${name}:src/x.ts` }])
+      }
+    } finally {
+      await harness.dispose()
+    }
+  }
+})
+
+test('drops explicit-root GitHub instructions when the configured project root identity changes during scanning', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    projectGitHubInstructionsRoot: '/repo',
+    rules: {
+      '@project': {
+        type: 'directory',
+        version: 'v1',
+        stat: { type: 'directory', version: 'v1' },
+        replaced: true,
+        afterPathInfo: { type: 'directory', version: 'v2' },
+      },
+      '@project/.github/instructions/always.instructions.md': rule('stale root must not publish', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.deepEqual(result.value, { body: 'body:src/x.ts' })
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('orders explicit project-root GitHub instructions after all closer CWD sources', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    projectGitHubInstructionsRoot: '/repo',
+    includeProjectCursorRoot: true,
+    includeProjectGitHubInstructionsRoot: true,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    rules: {
+      '@project/apps/a/.cursor/rules/cwd.mdc': rule('CWD Cursor priority', 'alwaysApply: true'),
+      '@project/.github/instructions/project.instructions.md': rule('explicit project GitHub priority', 'alwaysApply: true'),
+      '@project/apps/a/.github/instructions/cwd.instructions.md': rule('CWD GitHub priority', 'alwaysApply: true'),
+      '@project/apps/a/.github/copilot-instructions.md': rule('CWD Copilot priority', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.cursor/rules/cwd.mdc',
+      '.github/instructions/cwd.instructions.md',
+      '.github/copilot-instructions.md',
+      'project-root/.github/instructions/project.instructions.md',
+    ])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('deduplicates explicit project-root GitHub instructions when the configured root equals cwd', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo',
+    projectRoot: '/repo',
+    projectGitHubInstructionsRoot: '/repo',
+    includeProjectGitHubInstructionsRoot: true,
+    rules: { '@project/.github/instructions/always.instructions.md': rule('one GitHub root, one injection', 'alwaysApply: true') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.github/instructions/always.instructions.md',
+    ])
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'listDir'
+      && call.path === '@project/.github/instructions').length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('preserves root-relative and CWD-relative GitHub globs for a root symlink alias', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/self',
+    projectRoot: '/repo',
+    projectGitHubInstructionsRoot: '/repo',
+    includeProjectGitHubInstructionsRoot: true,
+    types: {
+      '@project/self': 'symlink',
+      '@project/self/.github': 'directory',
+      '@project/self/.github/instructions': 'directory',
+    },
+    symlinkTargets: { '@project/self': '@project' },
+    rules: {
+      '@project/.github/instructions/cwd-alias.instructions.md': rule('CWD-relative alias guidance', 'applyTo: "src/*.ts"'),
+      '@project/.github/instructions/project-root.instructions.md': rule('project-root alias guidance', 'applyTo: "self/src/*.ts"'),
+      '@project/src/x.ts': 'canonical source target',
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      'project-root/.github/instructions/cwd-alias.instructions.md',
+      'project-root/.github/instructions/project-root.instructions.md',
+    ])
+    assert.ok(texts[0].includes('[Match: glob: src/*.ts]'))
+    assert.ok(texts[1].includes('[Match: glob: self/src/*.ts]'))
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'listDir'
+      && call.path === '@project/.github/instructions').length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('explicit project-root GitHub instructions fail closed outside scope and on symlinked roots', async t => {
+  await t.test('sibling cwd is outside the configured root', async () => {
+    const harness = await makeHarness({
+      cwd: '/repo/apps/b',
+      projectRoot: '/repo/apps/a',
+      projectGitHubInstructionsRoot: '/repo/apps/a',
+      rules: { '@project/.github/instructions/always.instructions.md': rule('sibling instructions', 'alwaysApply: true') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+        && String(call.path).startsWith('@project/.github/instructions')), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('symlinked project, .github, and instructions roots fail closed', async () => {
+    for (const symlinkPath of ['@project', '@project/.github', '@project/.github/instructions']) {
+      const harness = await makeHarness({
+        cwd: '/repo/apps/a',
+        projectRoot: '/repo',
+        projectGitHubInstructionsRoot: '/repo',
+        types: { [symlinkPath]: 'symlink' },
+        rules: { '@project/.github/instructions/always.instructions.md': rule('symlink instructions', 'alwaysApply: true') },
+      })
+      try {
+        const agent = await harness.createAgent()
+        assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+        assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+          && String(call.path).startsWith('@project/.github/instructions')), false)
+        assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+          && String(call.target?.relative).startsWith('@project/.github/instructions')), false)
+      } finally {
+        await harness.dispose()
+      }
+    }
+  })
+})
+
+test('explicit project-root GitHub instructions preserve failure, cap, and cancellation gates', async t => {
+  await t.test('failed and blocked operations receive no project context', async () => {
+    for (const options of [{ toolError: true }, { blockRead: true }]) {
+      const harness = await makeHarness({
+        cwd: '/repo/apps/a',
+        projectRoot: '/repo',
+        projectGitHubInstructionsRoot: '/repo',
+        rules: { '@project/.github/instructions/always.instructions.md': rule('only successful operations', 'alwaysApply: true') },
+        ...options,
+      })
+      try {
+        const agent = await harness.createAgent()
+        assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      } finally {
+        await harness.dispose()
+      }
+    }
+  })
+
+  await t.test('scanner cap prevents reading an overlarge explicit root', async () => {
+    const rules = Object.fromEntries(Array.from({ length: 257 }, (_, index) => [
+      `@project/.github/instructions/rule-${index}.instructions.md`, rule(`bounded-${index}`, 'alwaysApply: true'),
+    ]))
+    const harness = await makeHarness({
+      cwd: '/repo/apps/a',
+      projectRoot: '/repo',
+      projectGitHubInstructionsRoot: '/repo',
+      rules,
+    })
+    try {
+      const agent = await harness.createAgent()
+      const result = await harness.executeRead(agent, 'src/x.ts')
+      assert.deepEqual(contextTexts(result), [])
+      assert.deepEqual(result.value, { body: 'body:src/x.ts' })
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+        && String(call.target?.relative).startsWith('@project/.github/instructions')), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('cancellation cannot append a partial project-root GitHub context', async () => {
+    const harness = await makeHarness({
+      cwd: '/repo/apps/a',
+      projectRoot: '/repo',
+      projectGitHubInstructionsRoot: '/repo',
+      hangListDir: true,
+      rules: { '@project/.github/instructions/always.instructions.md': rule('cancelled instructions', 'alwaysApply: true') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      const controller = new AbortController()
+      const pending = harness.executeRead(agent, 'src/x.ts', { signal: controller.signal })
+      while (!harness.fileSystem.calls.some(call => call.method === 'listDir'
+        && call.path === '@project/.github/instructions')) await new Promise(resolve => setImmediate(resolve))
+      controller.abort()
+      harness.fileSystem.fs.releaseListing?.()
+      assert.deepEqual(contextTexts(await pending), [])
+    } finally {
+      harness.fileSystem.fs.releaseListing?.()
+      await harness.dispose()
+    }
+  })
+})
+
+test('explicit project-root Cursor scanning preserves outcomes and shared caps', async t => {
+  await t.test('failed and blocked file operations receive no project context', async () => {
+    for (const options of [{ toolError: true }, { blockRead: true }]) {
+      const harness = await makeHarness({
+        cwd: '/repo/apps/a',
+        projectRoot: '/repo',
+        projectCursorRulesRoot: '/repo',
+        rules: { '@project/.cursor/rules/always.mdc': rule('must only follow successful reads') },
+        ...options,
+      })
+      try {
+        const agent = await harness.createAgent()
+        assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      } finally {
+        await harness.dispose()
+      }
+    }
+  })
+
+  await t.test('scanner cap prevents reading an overlarge explicit root', async () => {
+    const rules = Object.fromEntries(Array.from({ length: 257 }, (_, index) => [
+      `@project/.cursor/rules/rule-${index}.mdc`, rule(`bounded-${index}`),
+    ]))
+    const harness = await makeHarness({
+      cwd: '/repo/apps/a',
+      projectRoot: '/repo',
+      projectCursorRulesRoot: '/repo',
+      rules,
+    })
+    try {
+      const agent = await harness.createAgent()
+      const result = await harness.executeRead(agent, 'src/x.ts')
+      assert.deepEqual(contextTexts(result), [])
+      assert.deepEqual(result.value, { body: 'body:src/x.ts' })
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+        && String(call.target?.relative).startsWith('@project/.cursor/rules')), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('cancellation cannot append a partial project-root Cursor context', async () => {
+    const harness = await makeHarness({
+      cwd: '/repo/apps/a',
+      projectRoot: '/repo',
+      projectCursorRulesRoot: '/repo',
+      hangListDir: true,
+      rules: { '@project/.cursor/rules/always.mdc': rule('cancelled Cursor guidance') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      const controller = new AbortController()
+      const pending = harness.executeRead(agent, 'src/x.ts', { signal: controller.signal })
+      while (!harness.fileSystem.calls.some(call => call.method === 'listDir'
+        && call.path === '@project/.cursor/rules')) await new Promise(resolve => setImmediate(resolve))
+      controller.abort()
+      harness.fileSystem.fs.releaseListing?.()
+      assert.deepEqual(contextTexts(await pending), [])
+    } finally {
+      harness.fileSystem.fs.releaseListing?.()
+      await harness.dispose()
+    }
+  })
+})
+
+test('explicit project-root Claude scanning keeps existing success, cap, and cancellation gates', async t => {
+  await t.test('failed and blocked file operations receive no project context', async () => {
+    for (const options of [{ toolError: true }, { blockRead: true }]) {
+      const harness = await makeHarness({
+        cwd: '/repo/apps/a',
+        projectRoot: '/repo',
+        projectClaudeRulesRoot: '/repo',
+        includeProjectClaudeRoot: false,
+        rules: { '@project/.claude/rules/always.md': rule('must only follow successful reads') },
+        ...options,
+      })
+      try {
+        const agent = await harness.createAgent()
+        assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      } finally {
+        await harness.dispose()
+      }
+    }
+  })
+
+  await t.test('scanner cap stops a large explicit root before reading rules', async () => {
+    const rules = Object.fromEntries(Array.from({ length: 257 }, (_, index) => [
+      `@project/.claude/rules/rule-${index}.md`, rule(`bounded-${index}`),
+    ]))
+    const harness = await makeHarness({
+      cwd: '/repo/apps/a',
+      projectRoot: '/repo',
+      projectClaudeRulesRoot: '/repo',
+      includeProjectClaudeRoot: false,
+      rules,
+    })
+    try {
+      const agent = await harness.createAgent()
+      assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+        && String(call.target?.relative).startsWith('@project/.claude/rules')), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('cancellation cannot append a partial project-root context', async () => {
+    const harness = await makeHarness({
+      cwd: '/repo/apps/a',
+      projectRoot: '/repo',
+      projectClaudeRulesRoot: '/repo',
+      includeProjectClaudeRoot: false,
+      hangListDir: true,
+      rules: { '@project/.claude/rules/always.md': rule('cancelled guidance') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      const controller = new AbortController()
+      const pending = harness.executeRead(agent, 'src/x.ts', { signal: controller.signal })
+      while (!harness.fileSystem.calls.some(call => call.method === 'listDir'
+        && call.path === '@project/.claude/rules')) await new Promise(resolve => setImmediate(resolve))
+      controller.abort()
+      harness.fileSystem.fs.releaseListing?.()
+      const result = await pending
+      assert.deepEqual(contextTexts(result), [])
+    } finally {
+      harness.fileSystem.fs.releaseListing?.()
+      await harness.dispose()
+    }
+  })
+})
+
 test('does not search an ancestor .cursor/rules tree', async () => {
   const harness = await makeHarness({
     includeProjectClaudeRoot: false,
@@ -914,13 +1967,236 @@ test('OMO-only mode scans the session-cwd .omo/rules root without inspecting Cla
   }
 })
 
-test('scans session-cwd OMO, Claude, Cursor, GitHub Instructions, and Copilot sources in pinned priority before user roots', async () => {
+test('explicit project-root OMO rules follow nearer session-cwd rules while matching root-relative paths', async () => {
+  const projectRoot = '/repo'
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot,
+    projectOmoRulesRoot: projectRoot,
+    includeProjectOmoRoot: true,
+    includeProjectClaudeRoot: false,
+    rules: {
+      '@project/.omo/rules/monorepo.md': rule('project-root OMO guidance', 'applyTo: "apps/a/src/*.ts"'),
+      '@project/.omo/rules/cwd-only.md': rule('this root rule must not use cwd-relative matching', 'applyTo: "src/*.ts"'),
+      '@project/apps/a/.omo/rules/cwd.md': rule('session-cwd OMO guidance', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.omo/rules/cwd.md',
+      'project-root/.omo/rules/monorepo.md',
+    ])
+    assert.ok(texts[1].includes('[Match: glob: apps/a/src/*.ts]'))
+    assert.ok(texts[1].includes('project-root OMO guidance'))
+    assert.ok(texts[0].includes('session-cwd OMO guidance'))
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat'
+      && typeof call.path === 'string' && call.path.split('/').includes('..')), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('closer CWD Sisyphus rules precede farther project OMO despite lower source priority', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    projectOmoRulesRoot: '/repo',
+    includeProjectOmoRoot: true,
+    includeProjectSisyphusRoot: true,
+    includeProjectClaudeRoot: false,
+    rules: {
+      '@project/.omo/rules/ancestor.md': rule('farther OMO source', 'applyTo: "apps/a/src/*.ts"'),
+      '@project/apps/a/.sisyphus/rules/cwd.md': rule('closer Sisyphus source', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.sisyphus/rules/cwd.md',
+      'project-root/.omo/rules/ancestor.md',
+    ])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('explicit project-root OMO rules deduplicate when root equals session cwd', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo',
+    projectRoot: '/repo',
+    projectOmoRulesRoot: '/repo',
+    includeProjectOmoRoot: true,
+    includeProjectClaudeRoot: false,
+    rules: { '@project/.omo/rules/always.md': rule('one OMO root, one injection') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.omo/rules/always.md',
+    ])
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'listDir'
+      && call.path === '@project/.omo/rules').length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('explicit project-root OMO rules retain both matching paths when CWD and project roots share a target', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    projectOmoRulesRoot: '/repo',
+    includeProjectOmoRoot: true,
+    includeProjectClaudeRoot: false,
+    types: { '@project/apps/a/.omo/rules': 'directory' },
+    targetKeys: {
+      '@project/.omo/rules': 'shared-omo-rules-target',
+      '@project/apps/a/.omo/rules': 'shared-omo-rules-target',
+    },
+    rules: {
+      '@project/.omo/rules/cwd-glob.md': rule('alias keeps CWD-relative matching', 'applyTo: "src/*.ts"'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      'project-root/.omo/rules/cwd-glob.md',
+    ])
+    assert.ok(texts[0].includes('[Match: glob: src/*.ts]'))
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'listDir'
+      && call.path === '@project/.omo/rules').length, 1)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+      && call.path === '@project/apps/a/.omo/rules'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('explicit project-root OMO rules fail closed outside scope and through symlinked root components', async t => {
+  await t.test('sibling cwd is outside the configured root', async () => {
+    const harness = await makeHarness({
+      cwd: '/other',
+      projectRoot: '/repo',
+      projectOmoRulesRoot: '/repo',
+      includeProjectClaudeRoot: false,
+      rules: { '@project/.omo/rules/always.md': rule('outside guidance must not inject') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+        && String(call.path).startsWith('@project/.omo/rules')), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  for (const symlinkPath of ['@project', '@project/.omo', '@project/.omo/rules']) {
+    await t.test(`symlinked ${symlinkPath} is rejected`, async () => {
+      const harness = await makeHarness({
+        cwd: '/repo/apps/a',
+        projectRoot: '/repo',
+        projectOmoRulesRoot: '/repo',
+        includeProjectClaudeRoot: false,
+        types: { [symlinkPath]: 'symlink' },
+        rules: { '@project/.omo/rules/escape.md': rule('symlinked OMO rules must not inject') },
+      })
+      try {
+        const agent = await harness.createAgent()
+        assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+        assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+          && String(call.path).startsWith('@project/.omo/rules')), false)
+        assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+          && String(call.target?.relative).startsWith('@project/.omo/rules')), false)
+      } finally {
+        await harness.dispose()
+      }
+    })
+  }
+})
+
+test('explicit project-root OMO rules preserve outcome, shared-cap, and cancellation gates', async t => {
+  await t.test('failed and blocked operations receive no context', async () => {
+    for (const options of [{ toolError: true }, { blockRead: true }]) {
+      const harness = await makeHarness({
+        cwd: '/repo/apps/a',
+        projectRoot: '/repo',
+        projectOmoRulesRoot: '/repo',
+        includeProjectClaudeRoot: false,
+        rules: { '@project/.omo/rules/always.md': rule('only successful operations receive context') },
+        ...options,
+      })
+      try {
+        const agent = await harness.createAgent()
+        assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      } finally {
+        await harness.dispose()
+      }
+    }
+  })
+
+  await t.test('project and CWD sources share the injected-rule cap', async () => {
+    const rules = Object.fromEntries(Array.from({ length: 8 }, (_, index) => [
+      `@project/.omo/rules/root-${index}.md`, rule(`root-${index}`),
+    ]))
+    rules['@project/apps/a/.omo/rules/cwd.md'] = rule('cwd rule crosses the shared cap')
+    const harness = await makeHarness({
+      cwd: '/repo/apps/a',
+      projectRoot: '/repo',
+      projectOmoRulesRoot: '/repo',
+      includeProjectOmoRoot: true,
+      includeProjectClaudeRoot: false,
+      rules,
+    })
+    try {
+      const agent = await harness.createAgent()
+      assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@project/.omo/rules'))
+      assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@project/apps/a/.omo/rules'))
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('cancellation cannot append a partial project-root context', async () => {
+    const harness = await makeHarness({
+      cwd: '/repo/apps/a',
+      projectRoot: '/repo',
+      projectOmoRulesRoot: '/repo',
+      includeProjectClaudeRoot: false,
+      hangListDir: true,
+      rules: { '@project/.omo/rules/always.md': rule('cancelled OMO guidance') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      const controller = new AbortController()
+      const pending = harness.executeRead(agent, 'src/x.ts', { signal: controller.signal })
+      while (!harness.fileSystem.calls.some(call => call.method === 'listDir'
+        && call.path === '@project/.omo/rules')) await new Promise(resolve => setImmediate(resolve))
+      controller.abort()
+      harness.fileSystem.fs.releaseListing?.()
+      assert.deepEqual(contextTexts(await pending), [])
+    } finally {
+      harness.fileSystem.fs.releaseListing?.()
+      await harness.dispose()
+    }
+  })
+})
+
+test('scans session-cwd OMO, Claude, Cursor, GitHub Instructions, Copilot, and Sisyphus sources in pinned priority before user roots', async () => {
   const harness = await makeHarness({
     includeProjectOmoRoot: true,
     includeProjectCursorRoot: true,
     includeProjectGitHubInstructionsRoot: true,
     includeProjectGitHubCopilotInstructionsFile: true,
-    userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+    includeProjectSisyphusRoot: true,
     userOpenCodeRulesRoots: [USER_OPENCODE_RULES_ROOT, USER_OMO_RULES_ROOT],
     rules: {
       '.omo/rules/project-omo.md': rule('shared project body', 'alwaysApply: true'),
@@ -931,9 +2207,9 @@ test('scans session-cwd OMO, Claude, Cursor, GitHub Instructions, and Copilot so
       '.github/instructions/project-duplicate.instructions.md': rule('shared project body', 'alwaysApply: true'),
       '.github/instructions/project-github.instructions.md': rule('cwd GitHub instructions source', 'alwaysApply: true'),
       '.github/copilot-instructions.md': rule('cwd GitHub Copilot single-file source', 'applyTo: "no-match/**/*.md"'),
+      '.sisyphus/rules/project-sisyphus.md': rule('cwd Sisyphus source', 'alwaysApply: true'),
       '@opencode1/user-omo.md': rule('user OMO source', 'alwaysApply: true'),
       '@opencode0/user-opencode.md': rule('user OpenCode source', 'alwaysApply: true'),
-      '@user/user-claude.md': rule('user Claude source', 'alwaysApply: true'),
     },
   })
   try {
@@ -946,12 +2222,157 @@ test('scans session-cwd OMO, Claude, Cursor, GitHub Instructions, and Copilot so
       '.cursor/rules/project-cursor.mdc',
       '.github/instructions/project-github.instructions.md',
       '.github/copilot-instructions.md',
+      '.sisyphus/rules/project-sisyphus.md',
       'user/.omo/rules/user-omo.md',
       'user/.opencode/rules/user-opencode.md',
-      'user/.claude/rules/user-claude.md',
     ])
     assert.equal(texts.filter(text => text.includes('shared project body')).length, 1)
     assert.ok(texts[4].includes('[Match: copilot-instructions (always apply)]'))
+    assert.ok(texts[5].includes('cwd Sisyphus source'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('orders nearer CWD Sisyphus before ancestor project-root Sisyphus and all user roots', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    projectSisyphusRulesRoot: '/repo',
+    includeProjectClaudeRoot: false,
+    includeProjectGitHubCopilotInstructionsFile: true,
+    includeProjectSisyphusRoot: true,
+    userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
+    userOpenCodeRulesRoots: [USER_OPENCODE_RULES_ROOT, USER_OMO_RULES_ROOT],
+    rules: {
+      '@project/apps/a/.github/copilot-instructions.md': rule('CWD Copilot priority', 'alwaysApply: true'),
+      '@project/.sisyphus/rules/project-root.mdc': rule(
+        'explicit project-root Sisyphus guidance', 'applyTo: "apps/a/src/*.ts"',
+      ),
+      '@project/.sisyphus/rules/cwd-only.mdc': rule(
+        'project-root rule must not use a CWD-relative pattern', 'applyTo: "src/*.ts"',
+      ),
+      '@project/apps/a/.sisyphus/rules/cwd.md': rule('exact-CWD Sisyphus source', 'alwaysApply: true'),
+      '@opencode1/user-omo.md': rule('user OMO root follows all project sources', 'alwaysApply: true'),
+      '@opencode0/user-opencode.md': rule('user OpenCode root follows user OMO', 'alwaysApply: true'),
+      '@user/user.md': rule('user Claude root follows user OpenCode', 'alwaysApply: true'),
+    },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    const texts = contextTexts(result)
+    assert.deepEqual(texts.map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.github/copilot-instructions.md',
+      '.sisyphus/rules/cwd.md',
+      'project-root/.sisyphus/rules/project-root.mdc',
+      'user/.omo/rules/user-omo.md',
+      'user/.opencode/rules/user-opencode.md',
+      'user/.claude/rules/user.md',
+    ])
+    assert.ok(texts[2].includes('[Match: glob: apps/a/src/*.ts]'))
+    assert.ok(texts[2].includes('explicit project-root Sisyphus guidance'))
+    assert.equal(texts.some(text => text.includes('CWD-relative pattern')), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('deduplicates explicit project-root Sisyphus rules when the configured root equals cwd', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo',
+    projectRoot: '/repo',
+    projectSisyphusRulesRoot: '/repo',
+    includeProjectClaudeRoot: false,
+    includeProjectSisyphusRoot: true,
+    rules: { '@project/.sisyphus/rules/always.md': rule('one Sisyphus root, one injection') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/x.ts')
+    assert.deepEqual(contextTexts(result).map(text => text.match(/^\[Rule: ([^\]]+)/u)?.[1]), [
+      '.sisyphus/rules/always.md',
+    ])
+    assert.equal(harness.fileSystem.calls.filter(call => call.method === 'listDir'
+      && call.path === '@project/.sisyphus/rules').length, 1)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('rejects configured project-root Sisyphus rules for sibling CWDs and symlinked roots', async t => {
+  await t.test('sibling CWD is outside the configured root', async () => {
+    const harness = await makeHarness({
+      cwd: '/repo/apps/b',
+      projectRoot: '/repo/apps/a',
+      projectSisyphusRulesRoot: '/repo/apps/a',
+      includeProjectClaudeRoot: false,
+      rules: { '@project/.sisyphus/rules/always.md': rule('sibling guidance must not inject') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+        && String(call.path).startsWith('@project/.sisyphus/rules')), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('symlinked configured root components and entries fail closed', async t => {
+    const cases = [
+      { symlinkPath: '@project/.sisyphus', rulePath: '@project/.sisyphus/rules/always.md' },
+      { symlinkPath: '@project/.sisyphus/rules', rulePath: '@project/.sisyphus/rules/always.md' },
+      { symlinkPath: '@project/.sisyphus/rules/escape', rulePath: '@project/.sisyphus/rules/escape/secret.md' },
+      { symlinkPath: '@project/.sisyphus/rules/escape.md', rulePath: '@project/.sisyphus/rules/escape.md' },
+    ]
+    for (const { symlinkPath, rulePath } of cases) {
+      await t.test(symlinkPath, async () => {
+        const harness = await makeHarness({
+          cwd: '/repo/apps/a',
+          projectRoot: '/repo',
+          projectSisyphusRulesRoot: '/repo',
+          includeProjectClaudeRoot: false,
+          types: { [symlinkPath]: 'symlink' },
+          rules: { [rulePath]: rule('symlink guidance must not inject') },
+        })
+        try {
+          const agent = await harness.createAgent()
+          assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+          assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+            && call.path === symlinkPath), false)
+          assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+            && String(call.target?.relative).includes(rulePath)), false)
+        } finally {
+          await harness.dispose()
+        }
+      })
+    }
+  })
+})
+
+test('rejects regular-looking configured Sisyphus roots whose canonical targets escape the project root', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    projectSisyphusRulesRoot: '/repo',
+    includeProjectClaudeRoot: false,
+    rules: { '@project/.sisyphus/rules/secret.md': rule('escaped root must stay unread') },
+  })
+  const resolve = harness.fileSystem.fs.resolve.bind(harness.fileSystem.fs)
+  harness.fileSystem.fs.resolve = async (value, options = {}) => {
+    if (value === '.sisyphus/rules' && options.cwd === '/repo') {
+      return resolve('../outside/.sisyphus/rules', { cwd: '/repo' })
+    }
+    return resolve(value, options)
+  }
+  try {
+    const agent = await harness.createAgent()
+    assert.deepEqual(contextTexts(await harness.executeRead(agent, 'src/x.ts')), [])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+      && String(call.path).startsWith('@project/.sisyphus/rules')), false)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+      && String(call.target?.relative).includes('.sisyphus/rules/secret.md')), false)
   } finally {
     await harness.dispose()
   }
@@ -1039,6 +2460,121 @@ test('rejects symlinked session-cwd Copilot source roots and files', async t => 
         await harness.dispose()
       }
     })
+  }
+})
+
+test('rejects symlinked session-cwd Sisyphus rule-root components', async t => {
+  for (const symlinkPath of ['.sisyphus', '.sisyphus/rules']) {
+    await t.test(symlinkPath, async () => {
+      const harness = await makeHarness({
+        includeProjectClaudeRoot: false,
+        includeProjectSisyphusRoot: true,
+        types: { [symlinkPath]: 'symlink' },
+        rules: { '.sisyphus/rules/escape.md': rule('symlinked Sisyphus roots must not be read', 'alwaysApply: true') },
+      })
+      try {
+        const agent = await harness.createAgent()
+        const result = await harness.executeRead(agent, 'src/app.ts')
+        assert.deepEqual(contextTexts(result), [])
+        assert.ok(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === symlinkPath))
+        assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.sisyphus/rules'), false)
+      } finally {
+        await harness.dispose()
+      }
+    })
+  }
+})
+
+test('does not follow symlinked entries inside the session-cwd Sisyphus rules root', async () => {
+  const harness = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectSisyphusRoot: true,
+    types: { '.sisyphus/rules/escape': 'symlink' },
+    symlinkTargets: { '.sisyphus/rules/escape': '../outside/.sisyphus/rules' },
+    rules: { '.sisyphus/rules/escape/secret.md': rule('a symlinked Sisyphus entry must not be read') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '.sisyphus/rules'))
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+      && call.target?.relative === '.sisyphus/rules/escape/secret.md'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('rejects regular-looking Sisyphus roots or files whose canonical targets escape CWD', async t => {
+  await t.test('rule root', async () => {
+    const harness = await makeHarness({
+      includeProjectClaudeRoot: false,
+      includeProjectSisyphusRoot: true,
+      rules: { '.sisyphus/rules/secret.md': rule('escaped Sisyphus root must stay unread', 'alwaysApply: true') },
+    })
+    const resolve = harness.fileSystem.fs.resolve.bind(harness.fileSystem.fs)
+    harness.fileSystem.fs.resolve = async (value, options = {}) => {
+      if (value === '.sisyphus/rules' && options.cwd === CWD) {
+        return resolve('../outside/.sisyphus/rules', { cwd: CWD })
+      }
+      return resolve(value, options)
+    }
+    try {
+      const agent = await harness.createAgent()
+      const result = await harness.executeRead(agent, 'src/app.ts')
+      assert.deepEqual(contextTexts(result), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+        && call.path === '.sisyphus/rules'), false)
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+        && call.target?.relative === '.sisyphus/rules/secret.md'), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('rule file', async () => {
+    const harness = await makeHarness({
+      includeProjectClaudeRoot: false,
+      includeProjectSisyphusRoot: true,
+      rules: {
+        '.sisyphus/rules/escape.md': {
+          ...makeRecord(rule('escaped Sisyphus file must stay unread', 'alwaysApply: true')),
+          resolveOutside: true,
+        },
+      },
+    })
+    try {
+      const agent = await harness.createAgent()
+      const result = await harness.executeRead(agent, 'src/app.ts')
+      assert.deepEqual(contextTexts(result), [])
+      assert.ok(harness.fileSystem.calls.some(call => call.method === 'listDir'
+        && call.path === '.sisyphus/rules'))
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+        && call.target?.relative === '.sisyphus/rules/escape.md'), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+})
+
+test('does not walk parent CWDs to find Sisyphus project rules', async () => {
+  const harness = await makeHarness({
+    cwd: '/repo/apps/a',
+    projectRoot: '/repo',
+    includeProjectClaudeRoot: false,
+    includeProjectSisyphusRoot: true,
+    rules: { '@project/.sisyphus/rules/parent.md': rule('ancestor Sisyphus guidance must remain out of scope', 'alwaysApply: true') },
+  })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir'
+      && call.path === '@project/.sisyphus/rules'), false)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'
+      && call.target?.relative === '@project/.sisyphus/rules/parent.md'), false)
+  } finally {
+    await harness.dispose()
   }
 })
 
@@ -1179,14 +2715,16 @@ test('scans one explicit user Claude root after project rules and matches the se
   }
 })
 
-test('scans explicit OpenCode user roots after project rules in pinned priority order', async () => {
+test('orders explicit user Sisyphus rules after the pinned user Claude roots', async () => {
   const harness = await makeHarness({
     userClaudeRulesRoots: [USER_CLAUDE_RULES_ROOT],
     userOpenCodeRulesRoots: [USER_OPENCODE_RULES_ROOT, USER_OMO_RULES_ROOT],
+    userSisyphusRulesRoot: USER_SISYPHUS_RULES_ROOT,
     rules: {
       '.claude/rules/project.md': rule('project rule first', 'alwaysApply: true'),
       '@opencode1/omo.mdc': rule('explicit OMO global source', 'globs: "**/*.ts"'),
       '@opencode0/opencode.md': rule('explicit OpenCode global source', 'alwaysApply: true'),
+      '@sisyphus/sisyphus.md': rule('explicit Sisyphus user source', 'alwaysApply: true'),
       '@user/claude.md': rule('explicit Claude global source', 'alwaysApply: true'),
     },
   })
@@ -1199,12 +2737,14 @@ test('scans explicit OpenCode user roots after project rules in pinned priority 
       'user/.omo/rules/omo.mdc',
       'user/.opencode/rules/opencode.md',
       'user/.claude/rules/claude.md',
+      'user/.sisyphus/rules/sisyphus.md',
     ])
     for (const [index, expected] of [
       'project rule first',
       'explicit OMO global source',
       'explicit OpenCode global source',
       'explicit Claude global source',
+      'explicit Sisyphus user source',
     ].entries()) assert.ok(texts[index].includes(expected))
   } finally {
     await harness.dispose()
@@ -1261,12 +2801,14 @@ test('does not infer user rule roots and skips a missing explicit root', async (
   const implicit = await makeHarness({ rules: {
     '@user/global.md': rule('must not be discovered implicitly', 'alwaysApply: true'),
     '@opencode0/global.md': rule('must not be discovered implicitly', 'alwaysApply: true'),
+    '@sisyphus/global.md': rule('must not be discovered implicitly', 'alwaysApply: true'),
   } })
   try {
     const agent = await implicit.createAgent()
     const result = await implicit.executeRead(agent, 'src/app.ts')
     assert.deepEqual(contextTexts(result), [])
     assert.equal(implicit.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@user'), false)
+    assert.equal(implicit.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@sisyphus'), false)
   } finally {
     await implicit.dispose()
   }
@@ -1295,6 +2837,20 @@ test('does not infer user rule roots and skips a missing explicit root', async (
     assert.equal(missingOpenCode.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@opencode0'), false)
   } finally {
     await missingOpenCode.dispose()
+  }
+
+  const missingSisyphus = await makeHarness({
+    includeProjectClaudeRoot: false,
+    userSisyphusRulesRoot: USER_SISYPHUS_RULES_ROOT,
+    missingUserRoot: true,
+  })
+  try {
+    const agent = await missingSisyphus.createAgent()
+    const result = await missingSisyphus.executeRead(agent, 'src/app.ts')
+    assert.deepEqual(contextTexts(result), [])
+    assert.equal(missingSisyphus.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@sisyphus'), false)
+  } finally {
+    await missingSisyphus.dispose()
   }
 })
 
@@ -1346,6 +2902,77 @@ test('fails closed on a symlinked user root or an entry resolving outside its co
       assert.equal(harness.fileSystem.calls.some(call => call.method === 'resolve' && call.path === USER_OMO_RULES_ROOT), false, 'lstat rejects the final symlink before resolve follows it')
       assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@opencode0'), false)
       assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@opencode0/escape.md'), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('symlinked Sisyphus user root', async () => {
+    const harness = await makeHarness({
+      includeProjectClaudeRoot: false,
+      userSisyphusRulesRoot: USER_SISYPHUS_RULES_ROOT,
+      types: { '@sisyphus': 'symlink', '@outside/rules': 'directory' },
+      symlinkTargets: { '@sisyphus': '@outside/rules' },
+      rules: { '@sisyphus/escape.md': rule('Sisyphus user root symlink must not be followed', 'alwaysApply: true') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      const result = await harness.executeRead(agent, 'src/app.ts')
+      assert.deepEqual(contextTexts(result), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'resolve' && call.path === USER_SISYPHUS_RULES_ROOT), false)
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@sisyphus'), false)
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@sisyphus/escape.md'), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('outside Sisyphus user entry alias', async () => {
+    const harness = await makeHarness({
+      includeProjectClaudeRoot: false,
+      userSisyphusRulesRoot: USER_SISYPHUS_RULES_ROOT,
+      rules: { '@sisyphus/escape.md': { text: rule('outside Sisyphus user entry must not be read', 'alwaysApply: true'), resolveOutside: true } },
+    })
+    try {
+      const agent = await harness.createAgent()
+      const result = await harness.executeRead(agent, 'src/app.ts')
+      assert.deepEqual(contextTexts(result), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@sisyphus/escape.md'), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('symlinked Sisyphus user descendant directory', async () => {
+    const harness = await makeHarness({
+      includeProjectClaudeRoot: false,
+      userSisyphusRulesRoot: USER_SISYPHUS_RULES_ROOT,
+      types: { '@sisyphus/branch': 'symlink' },
+      rules: { '@sisyphus/branch/secret.md': rule('symlinked descendant rules must not be followed', 'alwaysApply: true') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      const result = await harness.executeRead(agent, 'src/app.ts')
+      assert.deepEqual(contextTexts(result), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'listDir' && call.path === '@sisyphus/branch'), false)
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@sisyphus/branch/secret.md'), false)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  await t.test('symlinked Sisyphus user rule file', async () => {
+    const harness = await makeHarness({
+      includeProjectClaudeRoot: false,
+      userSisyphusRulesRoot: USER_SISYPHUS_RULES_ROOT,
+      types: { '@sisyphus/escape.md': 'symlink' },
+      rules: { '@sisyphus/escape.md': rule('symlinked rule file must not be read', 'alwaysApply: true') },
+    })
+    try {
+      const agent = await harness.createAgent()
+      const result = await harness.executeRead(agent, 'src/app.ts')
+      assert.deepEqual(contextTexts(result), [])
+      assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes' && call.target?.relative === '@sisyphus/escape.md'), false)
     } finally {
       await harness.dispose()
     }
@@ -1582,8 +3209,10 @@ test('injects matching OMO project rules after successful write and edit file op
 
 test('does not inject after failed, blocked, or unsafe write/edit operations', async () => {
   const failure = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectSisyphusRoot: true,
     toolErrorName: 'write',
-    rules: { '.claude/rules/all.md': rule('must not inject after failure', 'alwaysApply: true') },
+    rules: { '.sisyphus/rules/all.md': rule('must not inject after failure', 'alwaysApply: true') },
   })
   try {
     const agent = await failure.createAgent('failed-write')
@@ -1596,8 +3225,10 @@ test('does not inject after failed, blocked, or unsafe write/edit operations', a
   }
 
   const blocked = await makeHarness({
+    includeProjectClaudeRoot: false,
+    includeProjectSisyphusRoot: true,
     blockTool: 'edit',
-    rules: { '.claude/rules/all.md': rule('must not inject after block', 'alwaysApply: true') },
+    rules: { '.sisyphus/rules/all.md': rule('must not inject after block', 'alwaysApply: true') },
   })
   try {
     const agent = await blocked.createAgent('blocked-edit')
@@ -1716,6 +3347,30 @@ test('outer post-execute middleware can drop a rule after dedupe commits', async
     assert.deepEqual(outerSawContexts, [1, 0])
     assert.equal(harness.fileSystem.calls.filter(call => call.method === 'readBytes'
       && call.target?.relative === '.claude/rules/all.md').length, 2)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('preserves apostrophes in plain scalar and inline-array globs', async () => {
+  const harness = await makeHarness({ rules: {
+    '.claude/rules/plain-apostrophe.md': rule(
+      'plain scalar apostrophe guidance',
+      "description: Don't edit generated files\napplyTo: src/don't-*.ts",
+    ),
+    '.claude/rules/array-apostrophe.md': rule(
+      'inline array apostrophe guidance',
+      "applyTo: [src/don't-*.ts, src/other.ts]",
+    ),
+  } })
+  try {
+    const agent = await harness.createAgent()
+    const result = await harness.executeRead(agent, "src/don't-change.ts")
+    const texts = contextTexts(result)
+    assert.equal(texts.length, 2)
+    assert.ok(texts.some(text => text.includes('plain scalar apostrophe guidance')))
+    assert.ok(texts.some(text => text.includes('inline array apostrophe guidance')))
+    assert.ok(texts.every(text => text.includes("[Match: glob: src/don't-*.ts]")))
   } finally {
     await harness.dispose()
   }

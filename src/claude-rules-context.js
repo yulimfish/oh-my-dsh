@@ -10,10 +10,25 @@ const RULES_DIRECTORY = '.claude/rules'
 const CURSOR_PROJECT_RULES_DIRECTORY = '.cursor/rules'
 const GITHUB_PROJECT_INSTRUCTIONS_DIRECTORY = '.github/instructions'
 const GITHUB_COPILOT_INSTRUCTIONS_FILE = '.github/copilot-instructions.md'
+const SISYPHUS_PROJECT_RULES_DIRECTORY = '.sisyphus/rules'
 const GITHUB_INSTRUCTION_FILE_PATTERN = /\.instructions\.md$/u
 const OPENCODE_USER_RULE_SOURCES = Object.freeze([
   Object.freeze({ suffix: '.omo/rules', labelPrefix: 'user/.omo/rules' }),
   Object.freeze({ suffix: '.opencode/rules', labelPrefix: 'user/.opencode/rules' }),
+])
+const RULE_SOURCE_PRIORITY_BY_PATH = new Map([
+  [OMO_PROJECT_RULES_DIRECTORY, 0],
+  [RULES_DIRECTORY, 1],
+  [CURSOR_PROJECT_RULES_DIRECTORY, 2],
+  [GITHUB_PROJECT_INSTRUCTIONS_DIRECTORY, 3],
+  [GITHUB_COPILOT_INSTRUCTIONS_FILE, 4],
+  [SISYPHUS_PROJECT_RULES_DIRECTORY, 5],
+])
+const USER_RULE_SOURCE_PRIORITY_BY_LABEL = new Map([
+  ['user/.omo/rules', 100],
+  ['user/.opencode/rules', 101],
+  ['user/.claude/rules', 102],
+  ['user/.sisyphus/rules', 103],
 ])
 const SKIP_RULE_DIRECTORIES = new Set(['node_modules', '.git', 'dist', 'build', '.turbo', '.next', 'coverage'])
 const MAX_CWD_CHARS = 4_096
@@ -26,6 +41,8 @@ const MAX_INJECTED_RULES = 8
 const MAX_FILE_BYTES = 16_384
 const MAX_TOTAL_BYTES = 32_768
 const MAX_AGENT_CACHE_ENTRIES = 256
+const MAX_PATTERN_MATCHER_CACHE_ENTRIES = 256
+const ruleMatcherCache = new Map()
 const READ_PIPELINE_TIMEOUT_MS = 5_000
 const CONTROL_OR_BIDI_GLOBAL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\p{Bidi_Control}]/gu
 const PATH_CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\p{Bidi_Control}]/u
@@ -51,6 +68,37 @@ export function normalizeUserClaudeRulesRoots(value) {
     roots.push(root)
   }
   return Object.freeze(roots)
+}
+
+function normalizeExplicitProjectRulesRoot(value, fieldName) {
+  if (value === undefined || value === null || value === '') return undefined
+  const root = typeof value === 'string' ? value.replace(/\/+$/u, '') || value : value
+  if (typeof value !== 'string' || value.trim() !== value || value.length > MAX_PATH_CHARS
+    || root.includes('\\') || PATH_CONTROL_OR_BIDI.test(value) || !path.isAbsolute(root) || path.normalize(root) !== root
+    || path.parse(root).root === root) {
+    throw new TypeError(`${fieldName} must be a normalized absolute non-filesystem-root path`)
+  }
+  return root
+}
+
+export function normalizeProjectOmoRulesRoot(value) {
+  return normalizeExplicitProjectRulesRoot(value, 'projectOmoRulesRoot')
+}
+
+export function normalizeProjectClaudeRulesRoot(value) {
+  return normalizeExplicitProjectRulesRoot(value, 'projectClaudeRulesRoot')
+}
+
+export function normalizeProjectCursorRulesRoot(value) {
+  return normalizeExplicitProjectRulesRoot(value, 'projectCursorRulesRoot')
+}
+
+export function normalizeProjectGitHubInstructionsRoot(value) {
+  return normalizeExplicitProjectRulesRoot(value, 'projectGitHubInstructionsRoot')
+}
+
+export function normalizeProjectSisyphusRulesRoot(value) {
+  return normalizeExplicitProjectRulesRoot(value, 'projectSisyphusRulesRoot')
 }
 
 export function normalizeUserOpenCodeRulesRoots(value) {
@@ -83,6 +131,17 @@ export function normalizeUserOpenCodeRulesRoots(value) {
     return leftIndex - rightIndex
   })
   return Object.freeze(roots)
+}
+
+export function normalizeUserSisyphusRulesRoot(value) {
+  if (value === undefined || value === null || value === '') return undefined
+  const root = typeof value === 'string' ? value.replace(/\/+$/u, '') || value : value
+  if (typeof value !== 'string' || value.trim() !== value || value.length > MAX_PATH_CHARS
+    || PATH_CONTROL_OR_BIDI.test(value) || !path.isAbsolute(root) || path.normalize(root) !== root
+    || path.basename(root) !== 'rules' || path.basename(path.dirname(root)) !== '.sisyphus') {
+    throw new TypeError('userSisyphusRulesRoot must be a normalized absolute path ending in .sisyphus/rules')
+  }
+  return root
 }
 
 function isObject(value) {
@@ -402,6 +461,13 @@ async function readRuleFile(fs, cwd, cwdTarget, rulesTarget, relative, entry, ag
   return { text, key: file.key }
 }
 
+function startsScalarQuote(value, index) {
+  let previous = index - 1
+  while (previous >= 0 && /\s/u.test(value[previous])) previous--
+  if (previous < 0 || ':,[{'.includes(value[previous])) return true
+  return value[previous] === '-' && /^\s*-\s*$/u.test(value.slice(0, index))
+}
+
 function stripComment(value) {
   let quote
   let escaped = false
@@ -418,7 +484,7 @@ function stripComment(value) {
       else if (char === "'") quote = undefined
       continue
     }
-    if (char === '"' || char === "'") quote = char
+    if ((char === '"' || char === "'") && startsScalarQuote(value, index)) quote = char
     else if (char === '#' && (index === 0 || /\s/u.test(value[index - 1]))) return value.slice(0, index).trimEnd()
   }
   if (quote) throw INVALID_RULE
@@ -488,7 +554,7 @@ function splitOutsideQuotes(value, delimiter) {
       else if (char === "'") quote = undefined
       continue
     }
-    if (char === '"' || char === "'") quote = char
+    if ((char === '"' || char === "'") && startsScalarQuote(value, index)) quote = char
     else if (char === '[') squareDepth++
     else if (char === ']' && squareDepth > 0) squareDepth--
     else if (char === '{') braceDepth++
@@ -630,25 +696,45 @@ function copilotInstructionsBody(text) {
 }
 
 function compilePattern(pattern) {
+  const cached = ruleMatcherCache.get(pattern)
+  if (cached) {
+    ruleMatcherCache.delete(pattern)
+    ruleMatcherCache.set(pattern, cached)
+    return cached
+  }
+
+  let matcher
   try {
-    return picomatch(pattern, { dot: true, bash: true })
+    matcher = picomatch(pattern, { dot: true, bash: true })
   } catch {
     throw INVALID_RULE
   }
+  if (ruleMatcherCache.size >= MAX_PATTERN_MATCHER_CACHE_ENTRIES) {
+    const oldest = ruleMatcherCache.keys().next().value
+    if (oldest !== undefined) ruleMatcherCache.delete(oldest)
+  }
+  ruleMatcherCache.set(pattern, matcher)
+  return matcher
 }
 
 function ruleMatch(rule, targetPath) {
   if (rule.alwaysApply) return 'alwaysApply'
-  const patterns = rule.patterns.map(raw => {
-    const negative = raw.startsWith('!')
-    const pattern = negative ? raw.slice(1) : raw
-    if (pattern.length === 0 || pattern.startsWith('!')) throw INVALID_RULE
-    return { raw, negative, matcher: compilePattern(pattern) }
-  })
-  const matches = ({ matcher }) => matcher(targetPath.relativePath) || matcher(targetPath.basename)
-  if (patterns.some(pattern => pattern.negative && matches(pattern))) return undefined
-  const positive = patterns.find(pattern => !pattern.negative && matches(pattern))
-  return positive ? `glob: ${positive.raw}` : undefined
+  const negativeMatchers = rule.patterns
+    .filter(pattern => pattern.startsWith('!'))
+    .map(raw => {
+      const pattern = raw.slice(1)
+      if (pattern.length === 0 || pattern.startsWith('!')) throw INVALID_RULE
+      return compilePattern(pattern)
+    })
+  const matches = matcher => matcher(targetPath.relativePath) || matcher(targetPath.basename)
+  for (const raw of rule.patterns) {
+    if (raw.startsWith('!')) continue
+    const matcher = compilePattern(raw)
+    if (!matches(matcher)) continue
+    if (negativeMatchers.some(matches)) return undefined
+    return `glob: ${raw}`
+  }
+  return undefined
 }
 
 function escapeRuleMetadata(value) {
@@ -720,6 +806,64 @@ async function getConfiguredUserRulesRoot(fs, rootPath, signal) {
   return { target, key, pathInfo, info }
 }
 
+async function getExplicitProjectRoot(fs, projectRootPath, cwd, cwdTarget, signal) {
+  assertNotAborted(signal)
+  const pathInfo = await lstat(fs, projectRootPath, undefined, signal)
+  assertNotAborted(signal)
+  if (pathInfo?.type !== 'directory') return undefined
+  const target = await resolve(fs, projectRootPath, undefined, signal)
+  assertNotAborted(signal)
+  const key = safeTargetKey(target)
+  const cwdKey = safeTargetKey(cwdTarget)
+  if (!key || !cwdKey || !contains(fs, target, cwdTarget)) return undefined
+  const info = await stat(fs, target, signal)
+  assertNotAborted(signal)
+  if (info?.type !== 'directory' || !metadataMatches(pathInfo, info)) return undefined
+
+  const relativeCwd = path.relative(projectRootPath, cwd)
+  if (relativeCwd === '..' || relativeCwd.startsWith('../') || path.isAbsolute(relativeCwd)) return undefined
+  if (relativeCwd !== '' && relativeCwd.split('/').some(segment => segment === '' || segment === '.' || segment === '..')) {
+    return undefined
+  }
+  const lexicalCwdTarget = await resolve(fs, relativeCwd || '.', projectRootPath, signal)
+  assertNotAborted(signal)
+  if (safeTargetKey(lexicalCwdTarget) !== cwdKey) return undefined
+  return { path: projectRootPath, target, key, pathInfo, info, relativeCwd }
+}
+
+function isUserRuleRoot(root) {
+  return typeof root.labelPrefix === 'string' && root.labelPrefix.startsWith('user/')
+}
+
+function ruleRootDistance(root, fileParentDistance) {
+  if (isUserRuleRoot(root)) return 9999
+  if (root.projectSource === 'github-copilot') return 0
+  if (Number.isSafeInteger(root.sourceDistance) && root.sourceDistance >= 0) return root.sourceDistance
+  const relativeCwd = root.configuredProjectRoot?.relativeCwd
+  const configuredRootDistance = typeof relativeCwd === 'string' && relativeCwd !== ''
+    ? relativeCwd.split('/').filter(Boolean).length
+    : 0
+  return fileParentDistance + configuredRootDistance
+}
+
+function ruleRootSourcePriority(root) {
+  if (isUserRuleRoot(root)) return USER_RULE_SOURCE_PRIORITY_BY_LABEL.get(root.labelPrefix) ?? Number.MAX_SAFE_INTEGER
+  return RULE_SOURCE_PRIORITY_BY_PATH.get(root.relative) ?? Number.MAX_SAFE_INTEGER
+}
+
+// Match pinned upstream ordering: global scope, ancestor distance, source priority, then stable registration order.
+function orderRuleRoots(roots, fileParentDistance) {
+  return roots
+    .map((root, index) => ({ root, index }))
+    .sort((left, right) => (
+      Number(isUserRuleRoot(left.root)) - Number(isUserRuleRoot(right.root))
+      || ruleRootDistance(left.root, fileParentDistance) - ruleRootDistance(right.root, fileParentDistance)
+      || ruleRootSourcePriority(left.root) - ruleRootSourcePriority(right.root)
+      || left.index - right.index
+    ))
+    .map(({ root }) => root)
+}
+
 async function prepareRulesContext({
   fs,
   cwd,
@@ -733,11 +877,86 @@ async function prepareRulesContext({
   includeProjectCursorRoot = false,
   includeProjectGitHubInstructionsRoot = false,
   includeProjectGitHubCopilotInstructionsFile = false,
+  includeProjectSisyphusRoot = false,
   userClaudeRulesRoots = [],
   userOpenCodeRulesRoots = [],
+  userSisyphusRulesRoot,
+  projectOmoRulesRoot,
+  projectClaudeRulesRoot,
+  projectCursorRulesRoot,
+  projectGitHubInstructionsRoot,
+  projectSisyphusRulesRoot,
 }) {
   assertNotAborted(signal)
+  const fileParentPath = path.dirname(filePath.relativePath)
+  const fileParentDistance = fileParentPath === '.' || fileParentPath === ''
+    ? 0
+    : fileParentPath.split('/').filter(Boolean).length
   const roots = []
+  let configuredProjectOmoRoot
+  let configuredProjectClaudeRoot
+  let configuredProjectCursorRoot
+  let configuredProjectGitHubInstructionsRoot
+  let configuredProjectSisyphusRoot
+  const cwdTargetKey = safeTargetKey(cwdTarget)
+  if (projectOmoRulesRoot) {
+    configuredProjectOmoRoot = await getExplicitProjectRoot(
+      fs, projectOmoRulesRoot, cwd, cwdTarget, signal,
+    )
+  }
+  if (projectClaudeRulesRoot) {
+    configuredProjectClaudeRoot = await getExplicitProjectRoot(
+      fs, projectClaudeRulesRoot, cwd, cwdTarget, signal,
+    )
+  }
+  if (projectCursorRulesRoot) {
+    configuredProjectCursorRoot = await getExplicitProjectRoot(
+      fs, projectCursorRulesRoot, cwd, cwdTarget, signal,
+    )
+  }
+  if (projectGitHubInstructionsRoot) {
+    configuredProjectGitHubInstructionsRoot = await getExplicitProjectRoot(
+      fs, projectGitHubInstructionsRoot, cwd, cwdTarget, signal,
+    )
+  }
+  if (projectSisyphusRulesRoot) {
+    configuredProjectSisyphusRoot = await getExplicitProjectRoot(
+      fs, projectSisyphusRulesRoot, cwd, cwdTarget, signal,
+    )
+  }
+  if (configuredProjectOmoRoot
+    && !(includeProjectOmoRoot && configuredProjectOmoRoot.relativeCwd === '')) {
+    const omo = await getDirectoryTarget(
+      fs, projectOmoRulesRoot, configuredProjectOmoRoot.target, '.omo', undefined, undefined, signal,
+    )
+    if (omo) {
+      const rules = await getDirectoryTarget(
+        fs, projectOmoRulesRoot, configuredProjectOmoRoot.target,
+        OMO_PROJECT_RULES_DIRECTORY, undefined, undefined, signal,
+      )
+      if (rules && contains(fs, omo.target, rules.target)) {
+        const rootBefore = await getDirectoryTarget(
+          fs, projectOmoRulesRoot, configuredProjectOmoRoot.target,
+          OMO_PROJECT_RULES_DIRECTORY, rules.key, undefined, signal,
+        )
+        if (rootBefore) {
+          const matchRelativePath = path.join(configuredProjectOmoRoot.relativeCwd, filePath.relativePath)
+          roots.push({
+            cwd: projectOmoRulesRoot,
+            cwdTarget: configuredProjectOmoRoot.target,
+            rulesTarget: rootBefore.target,
+            relative: OMO_PROJECT_RULES_DIRECTORY,
+            rootKey: rootBefore.key,
+            pathInfo: rootBefore.pathInfo,
+            labelPrefix: 'project-root',
+            matchFilePaths: [{ relativePath: matchRelativePath, basename: path.basename(matchRelativePath) }],
+            configuredProjectRoot: configuredProjectOmoRoot,
+            projectSource: 'omo',
+          })
+        }
+      }
+    }
+  }
   if (includeProjectOmoRoot) {
     const omo = await getDirectoryTarget(fs, cwd, cwdTarget, '.omo', undefined, undefined, signal)
     if (omo) {
@@ -745,14 +964,53 @@ async function prepareRulesContext({
       if (rules && contains(fs, omo.target, rules.target)) {
         const rootBefore = await getDirectoryTarget(fs, cwd, cwdTarget, OMO_PROJECT_RULES_DIRECTORY, rules.key, undefined, signal)
         if (rootBefore) {
+          const matchingProjectRoot = roots.find(root => root.projectSource === 'omo' && root.rootKey === rootBefore.key)
+          if (matchingProjectRoot) {
+            matchingProjectRoot.sourceDistance = fileParentDistance
+            const matchFilePaths = matchingProjectRoot.matchFilePaths ?? []
+            if (!matchFilePaths.some(match => match.relativePath === filePath.relativePath)) matchFilePaths.push(filePath)
+            matchingProjectRoot.matchFilePaths = matchFilePaths
+          } else {
+            roots.push({
+              cwd,
+              cwdTarget,
+              rulesTarget: rootBefore.target,
+              relative: OMO_PROJECT_RULES_DIRECTORY,
+              rootKey: rootBefore.key,
+              pathInfo: rootBefore.pathInfo,
+              labelPrefix: '',
+            })
+          }
+        }
+      }
+    }
+  }
+  if (configuredProjectClaudeRoot
+    && !(includeProjectClaudeRoot && configuredProjectClaudeRoot.relativeCwd === '')) {
+    const claude = await getDirectoryTarget(
+      fs, projectClaudeRulesRoot, configuredProjectClaudeRoot.target, '.claude', undefined, undefined, signal,
+    )
+    if (claude) {
+      const rules = await getDirectoryTarget(
+        fs, projectClaudeRulesRoot, configuredProjectClaudeRoot.target, RULES_DIRECTORY, undefined, undefined, signal,
+      )
+      if (rules && contains(fs, claude.target, rules.target)) {
+        const rootBefore = await getDirectoryTarget(
+          fs, projectClaudeRulesRoot, configuredProjectClaudeRoot.target, RULES_DIRECTORY, rules.key, undefined, signal,
+        )
+        if (rootBefore) {
+          const matchRelativePath = path.join(configuredProjectClaudeRoot.relativeCwd, filePath.relativePath)
           roots.push({
-            cwd,
-            cwdTarget,
+            cwd: projectClaudeRulesRoot,
+            cwdTarget: configuredProjectClaudeRoot.target,
             rulesTarget: rootBefore.target,
-            relative: OMO_PROJECT_RULES_DIRECTORY,
+            relative: RULES_DIRECTORY,
             rootKey: rootBefore.key,
             pathInfo: rootBefore.pathInfo,
-            labelPrefix: '',
+            labelPrefix: 'project-root',
+            matchFilePaths: [{ relativePath: matchRelativePath, basename: path.basename(matchRelativePath) }],
+            configuredProjectRoot: configuredProjectClaudeRoot,
+            projectSource: 'claude',
           })
         }
       }
@@ -765,14 +1023,55 @@ async function prepareRulesContext({
       if (rules && contains(fs, claude.target, rules.target)) {
         const rootBefore = await getDirectoryTarget(fs, cwd, cwdTarget, RULES_DIRECTORY, rules.key, undefined, signal)
         if (rootBefore) {
+          const matchingProjectRoot = roots.find(root => root.projectSource === 'claude' && root.rootKey === rootBefore.key)
+          if (matchingProjectRoot) {
+            matchingProjectRoot.sourceDistance = fileParentDistance
+            const matchFilePaths = matchingProjectRoot.matchFilePaths ?? []
+            if (!matchFilePaths.some(match => match.relativePath === filePath.relativePath)) matchFilePaths.push(filePath)
+            matchingProjectRoot.matchFilePaths = matchFilePaths
+          } else {
+            roots.push({
+              cwd,
+              cwdTarget,
+              rulesTarget: rootBefore.target,
+              relative: RULES_DIRECTORY,
+              rootKey: rootBefore.key,
+              pathInfo: rootBefore.pathInfo,
+              labelPrefix: '',
+            })
+          }
+        }
+      }
+    }
+  }
+  if (configuredProjectCursorRoot
+    && !(includeProjectCursorRoot && configuredProjectCursorRoot.relativeCwd === '')) {
+    const cursor = await getDirectoryTarget(
+      fs, projectCursorRulesRoot, configuredProjectCursorRoot.target, '.cursor', undefined, undefined, signal,
+    )
+    if (cursor) {
+      const rules = await getDirectoryTarget(
+        fs, projectCursorRulesRoot, configuredProjectCursorRoot.target,
+        CURSOR_PROJECT_RULES_DIRECTORY, undefined, undefined, signal,
+      )
+      if (rules && contains(fs, cursor.target, rules.target)) {
+        const rootBefore = await getDirectoryTarget(
+          fs, projectCursorRulesRoot, configuredProjectCursorRoot.target,
+          CURSOR_PROJECT_RULES_DIRECTORY, rules.key, undefined, signal,
+        )
+        if (rootBefore) {
+          const matchRelativePath = path.join(configuredProjectCursorRoot.relativeCwd, filePath.relativePath)
           roots.push({
-            cwd,
-            cwdTarget,
+            cwd: projectCursorRulesRoot,
+            cwdTarget: configuredProjectCursorRoot.target,
             rulesTarget: rootBefore.target,
-            relative: RULES_DIRECTORY,
+            relative: CURSOR_PROJECT_RULES_DIRECTORY,
             rootKey: rootBefore.key,
             pathInfo: rootBefore.pathInfo,
-            labelPrefix: '',
+            labelPrefix: 'project-root',
+            matchFilePaths: [{ relativePath: matchRelativePath, basename: path.basename(matchRelativePath) }],
+            configuredProjectRoot: configuredProjectCursorRoot,
+            projectSource: 'cursor',
           })
         }
       }
@@ -785,14 +1084,59 @@ async function prepareRulesContext({
       if (rules && contains(fs, cursor.target, rules.target)) {
         const rootBefore = await getDirectoryTarget(fs, cwd, cwdTarget, CURSOR_PROJECT_RULES_DIRECTORY, rules.key, undefined, signal)
         if (rootBefore) {
+          const matchingProjectRoot = roots.find(root => root.projectSource === 'cursor' && root.rootKey === rootBefore.key)
+          if (matchingProjectRoot) {
+            matchingProjectRoot.sourceDistance = fileParentDistance
+            const matchFilePaths = matchingProjectRoot.matchFilePaths ?? []
+            if (!matchFilePaths.some(match => match.relativePath === filePath.relativePath)) matchFilePaths.push(filePath)
+            matchingProjectRoot.matchFilePaths = matchFilePaths
+          } else {
+            roots.push({
+              cwd,
+              cwdTarget,
+              rulesTarget: rootBefore.target,
+              relative: CURSOR_PROJECT_RULES_DIRECTORY,
+              rootKey: rootBefore.key,
+              pathInfo: rootBefore.pathInfo,
+              labelPrefix: '',
+            })
+          }
+        }
+      }
+    }
+  }
+  if (configuredProjectGitHubInstructionsRoot
+    && !(includeProjectGitHubInstructionsRoot && configuredProjectGitHubInstructionsRoot.relativeCwd === '')) {
+    const github = await getDirectoryTarget(
+      fs, projectGitHubInstructionsRoot, configuredProjectGitHubInstructionsRoot.target,
+      '.github', undefined, undefined, signal,
+    )
+    if (github) {
+      const instructions = await getDirectoryTarget(
+        fs, projectGitHubInstructionsRoot, configuredProjectGitHubInstructionsRoot.target,
+        GITHUB_PROJECT_INSTRUCTIONS_DIRECTORY, undefined, undefined, signal,
+      )
+      if (instructions && contains(fs, github.target, instructions.target)) {
+        const rootBefore = await getDirectoryTarget(
+          fs, projectGitHubInstructionsRoot, configuredProjectGitHubInstructionsRoot.target,
+          GITHUB_PROJECT_INSTRUCTIONS_DIRECTORY, instructions.key, undefined, signal,
+        )
+        if (rootBefore) {
+          const matchRelativePath = path.join(
+            configuredProjectGitHubInstructionsRoot.relativeCwd, filePath.relativePath,
+          )
           roots.push({
-            cwd,
-            cwdTarget,
+            cwd: projectGitHubInstructionsRoot,
+            cwdTarget: configuredProjectGitHubInstructionsRoot.target,
             rulesTarget: rootBefore.target,
-            relative: CURSOR_PROJECT_RULES_DIRECTORY,
+            relative: GITHUB_PROJECT_INSTRUCTIONS_DIRECTORY,
             rootKey: rootBefore.key,
             pathInfo: rootBefore.pathInfo,
-            labelPrefix: '',
+            labelPrefix: 'project-root',
+            ruleFilePattern: GITHUB_INSTRUCTION_FILE_PATTERN,
+            matchFilePaths: [{ relativePath: matchRelativePath, basename: path.basename(matchRelativePath) }],
+            configuredProjectRoot: configuredProjectGitHubInstructionsRoot,
+            projectSource: 'github-instructions',
           })
         }
       }
@@ -805,17 +1149,54 @@ async function prepareRulesContext({
       if (instructions && contains(fs, github.target, instructions.target)) {
         const rootBefore = await getDirectoryTarget(fs, cwd, cwdTarget, GITHUB_PROJECT_INSTRUCTIONS_DIRECTORY, instructions.key, undefined, signal)
         if (rootBefore) {
-          roots.push({
-            cwd,
-            cwdTarget,
-            rulesTarget: rootBefore.target,
-            relative: GITHUB_PROJECT_INSTRUCTIONS_DIRECTORY,
-            rootKey: rootBefore.key,
-            pathInfo: rootBefore.pathInfo,
-            labelPrefix: '',
-            ruleFilePattern: GITHUB_INSTRUCTION_FILE_PATTERN,
-          })
+          const matchingProjectRoot = roots.find(root => root.projectSource === 'github-instructions' && root.rootKey === rootBefore.key)
+          if (matchingProjectRoot) {
+            matchingProjectRoot.sourceDistance = fileParentDistance
+            const matchFilePaths = matchingProjectRoot.matchFilePaths ?? []
+            if (!matchFilePaths.some(match => match.relativePath === filePath.relativePath)) matchFilePaths.push(filePath)
+            matchingProjectRoot.matchFilePaths = matchFilePaths
+          } else {
+            roots.push({
+              cwd,
+              cwdTarget,
+              rulesTarget: rootBefore.target,
+              relative: GITHUB_PROJECT_INSTRUCTIONS_DIRECTORY,
+              rootKey: rootBefore.key,
+              pathInfo: rootBefore.pathInfo,
+              labelPrefix: '',
+              ruleFilePattern: GITHUB_INSTRUCTION_FILE_PATTERN,
+            })
+          }
         }
+      }
+    }
+  }
+  if (includeProjectGitHubCopilotInstructionsFile
+    && configuredProjectGitHubInstructionsRoot && configuredProjectGitHubInstructionsRoot.relativeCwd !== '') {
+    const rootPath = projectGitHubInstructionsRoot
+    const root = configuredProjectGitHubInstructionsRoot
+    const github = await getDirectoryTarget(fs, rootPath, root.target, '.github', undefined, undefined, signal)
+    if (github) {
+      const file = await getStandaloneFileTarget(
+        fs, rootPath, root.target, github.target, GITHUB_COPILOT_INSTRUCTIONS_FILE, signal,
+      )
+      if (file) {
+        roots.push({
+          cwd: rootPath,
+          cwdTarget: root.target,
+          rulesTarget: github.target,
+          relative: GITHUB_COPILOT_INSTRUCTIONS_FILE,
+          displayRelativePath: `project-root/${GITHUB_COPILOT_INSTRUCTIONS_FILE}`,
+          rootKey: file.key,
+          pathInfo: file.pathInfo,
+          parentKey: github.key,
+          parentPathInfo: github.pathInfo,
+          parentInfo: github.info,
+          labelPrefix: 'project-root',
+          singleFile: true,
+          configuredProjectRoot: root,
+          projectSource: 'github-copilot',
+        })
       }
     }
   }
@@ -838,11 +1219,86 @@ async function prepareRulesContext({
           parentInfo: github.info,
           labelPrefix: '',
           singleFile: true,
+          ...(configuredProjectGitHubInstructionsRoot?.relativeCwd === ''
+            ? { projectSource: 'github-copilot' }
+            : {}),
         })
       }
     }
   }
-  // Pinned upstream orders these user sources: ~/.omo, ~/.opencode, then ~/.claude.
+  // Pinned priority 5 is deprecated; the configured root is explicit, while CWD remains exact.
+  if (configuredProjectSisyphusRoot
+    && !(includeProjectSisyphusRoot && configuredProjectSisyphusRoot.relativeCwd === '')) {
+    const sisyphus = await getDirectoryTarget(
+      fs, projectSisyphusRulesRoot, configuredProjectSisyphusRoot.target, '.sisyphus', undefined, undefined, signal,
+    )
+    if (sisyphus) {
+      const rules = await getDirectoryTarget(
+        fs, projectSisyphusRulesRoot, configuredProjectSisyphusRoot.target,
+        SISYPHUS_PROJECT_RULES_DIRECTORY, undefined, undefined, signal,
+      )
+      if (rules && contains(fs, sisyphus.target, rules.target)) {
+        const rootBefore = await getDirectoryTarget(
+          fs, projectSisyphusRulesRoot, configuredProjectSisyphusRoot.target,
+          SISYPHUS_PROJECT_RULES_DIRECTORY, rules.key, undefined, signal,
+        )
+        if (rootBefore) {
+          const matchRelativePath = path.join(
+            configuredProjectSisyphusRoot.relativeCwd, filePath.relativePath,
+          )
+          roots.push({
+            cwd: projectSisyphusRulesRoot,
+            cwdTarget: configuredProjectSisyphusRoot.target,
+            rulesTarget: rootBefore.target,
+            relative: SISYPHUS_PROJECT_RULES_DIRECTORY,
+            rootKey: rootBefore.key,
+            pathInfo: rootBefore.pathInfo,
+            labelPrefix: 'project-root',
+            matchFilePaths: [{ relativePath: matchRelativePath, basename: path.basename(matchRelativePath) }],
+            configuredProjectRoot: configuredProjectSisyphusRoot,
+            projectSource: 'sisyphus',
+          })
+        }
+      }
+    }
+  }
+  if (includeProjectSisyphusRoot) {
+    const sisyphus = await getDirectoryTarget(fs, cwd, cwdTarget, '.sisyphus', undefined, undefined, signal)
+    if (sisyphus) {
+      const rules = await getDirectoryTarget(
+        fs, cwd, cwdTarget, SISYPHUS_PROJECT_RULES_DIRECTORY, undefined, undefined, signal,
+      )
+      if (rules && contains(fs, sisyphus.target, rules.target)) {
+        const rootBefore = await getDirectoryTarget(
+          fs, cwd, cwdTarget, SISYPHUS_PROJECT_RULES_DIRECTORY, rules.key, undefined, signal,
+        )
+        if (rootBefore) {
+          const matchingProjectRoot = roots.find(
+            root => root.projectSource === 'sisyphus' && root.rootKey === rootBefore.key,
+          )
+          if (matchingProjectRoot) {
+            matchingProjectRoot.sourceDistance = fileParentDistance
+            const matchFilePaths = matchingProjectRoot.matchFilePaths ?? []
+            if (!matchFilePaths.some(match => match.relativePath === filePath.relativePath)) {
+              matchFilePaths.push(filePath)
+            }
+            matchingProjectRoot.matchFilePaths = matchFilePaths
+          } else {
+            roots.push({
+              cwd,
+              cwdTarget,
+              rulesTarget: rootBefore.target,
+              relative: SISYPHUS_PROJECT_RULES_DIRECTORY,
+              rootKey: rootBefore.key,
+              pathInfo: rootBefore.pathInfo,
+              labelPrefix: '',
+            })
+          }
+        }
+      }
+    }
+  }
+  // Pinned user priorities: .omo -> .opencode -> .claude; deprecated user Sisyphus follows them.
   for (const rootPath of userOpenCodeRulesRoots) {
     const root = await getConfiguredUserRulesRoot(fs, rootPath, signal)
     if (!root) continue
@@ -871,7 +1327,22 @@ async function prepareRulesContext({
       labelPrefix: 'user/.claude/rules',
     })
   }
+  if (userSisyphusRulesRoot) {
+    const root = await getConfiguredUserRulesRoot(fs, userSisyphusRulesRoot, signal)
+    if (root) {
+      roots.push({
+        cwd: userSisyphusRulesRoot,
+        cwdTarget: root.target,
+        rulesTarget: root.target,
+        relative: '.',
+        rootKey: root.key,
+        pathInfo: root.pathInfo,
+        labelPrefix: 'user/.sisyphus/rules',
+      })
+    }
+  }
   if (roots.length === 0) return []
+  const orderedRoots = orderRuleRoots(roots, fileParentDistance)
 
   const scan = { directories: 0, entries: 0, bytes: 0, files: [], visited: new Set() }
   const walk = async (root, directoryRelative, directoryKey, depth) => {
@@ -902,7 +1373,7 @@ async function prepareRulesContext({
       if (body.trim() === '') return
       scan.files.push({
         key: contentHash(body),
-        relativePath: root.relative,
+        relativePath: root.displayRelativePath ?? root.relative,
         reason: 'copilot-instructions (always apply)',
         body,
       })
@@ -967,7 +1438,11 @@ async function prepareRulesContext({
       if (!parsed) continue
       let reason
       try {
-        reason = ruleMatch(parsed, filePath)
+        const matchFilePaths = root.matchFilePaths ?? [filePath]
+        for (const matchFilePath of matchFilePaths) {
+          reason = ruleMatch(parsed, matchFilePath)
+          if (reason) break
+        }
       } catch {
         // A malformed pattern invalidates this rule without blocking the native read.
         continue
@@ -993,7 +1468,31 @@ async function prepareRulesContext({
     }
   }
 
-  for (const root of roots) await walk(root, root.relative, root.rootKey, 0)
+  // Pinned candidates are globally path-sorted after discovery; sort each already-ordered root group likewise.
+  for (const root of orderedRoots) {
+    const firstCandidateIndex = scan.files.length
+    await walk(root, root.relative, root.rootKey, 0)
+    const rootCandidates = scan.files.splice(firstCandidateIndex)
+      .sort((left, right) => compareName(left.relativePath, right.relativePath))
+    scan.files.push(...rootCandidates)
+  }
+  const scannedProjectRoots = new Map()
+  for (const root of orderedRoots) {
+    if (root.configuredProjectRoot) scannedProjectRoots.set(root.configuredProjectRoot.path, root.configuredProjectRoot)
+  }
+  if (scannedProjectRoots.size > 0) {
+    const cwdAfter = await resolve(fs, cwd, cwd, signal)
+    assertNotAborted(signal)
+    if (safeTargetKey(cwdAfter) !== cwdTargetKey) throw LIMIT_REACHED
+    for (const scannedProjectRoot of scannedProjectRoots.values()) {
+      const projectRootAfter = await getExplicitProjectRoot(
+        fs, scannedProjectRoot.path, cwd, cwdAfter, signal,
+      )
+      if (!projectRootAfter || projectRootAfter.key !== scannedProjectRoot.key
+        || !metadataMatches(scannedProjectRoot.pathInfo, projectRootAfter.pathInfo)
+        || !metadataMatches(scannedProjectRoot.info, projectRootAfter.info)) throw LIMIT_REACHED
+    }
+  }
   assertNotAborted(signal)
   if (agentState.generation !== generation) return []
   const unique = []
@@ -1019,11 +1518,22 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs, use
   const includeProjectCursorRoot = options?.includeProjectCursorRoot === true
   const includeProjectGitHubInstructionsRoot = options?.includeProjectGitHubInstructionsRoot === true
   const includeProjectGitHubCopilotInstructionsFile = options?.includeProjectGitHubCopilotInstructionsFile === true
+  const includeProjectSisyphusRoot = options?.includeProjectSisyphusRoot === true
+  const normalizedProjectOmoRulesRoot = normalizeProjectOmoRulesRoot(options?.projectOmoRulesRoot)
+  const normalizedProjectClaudeRulesRoot = normalizeProjectClaudeRulesRoot(options?.projectClaudeRulesRoot)
+  const normalizedProjectCursorRulesRoot = normalizeProjectCursorRulesRoot(options?.projectCursorRulesRoot)
+  const normalizedProjectGitHubInstructionsRoot = normalizeProjectGitHubInstructionsRoot(options?.projectGitHubInstructionsRoot)
+  const normalizedProjectSisyphusRulesRoot = normalizeProjectSisyphusRulesRoot(options?.projectSisyphusRulesRoot)
   const normalizedUserClaudeRulesRoots = normalizeUserClaudeRulesRoots(userClaudeRulesRoots)
   const normalizedUserOpenCodeRulesRoots = normalizeUserOpenCodeRulesRoots(options?.userOpenCodeRulesRoots)
+  const normalizedUserSisyphusRulesRoot = normalizeUserSisyphusRulesRoot(options?.userSisyphusRulesRoot)
   const requiresListDir = includeProjectOmoRoot || includeProjectClaudeRoot || includeProjectCursorRoot
-    || includeProjectGitHubInstructionsRoot || normalizedUserClaudeRulesRoots.length > 0
-    || normalizedUserOpenCodeRulesRoots.length > 0
+    || includeProjectGitHubInstructionsRoot || includeProjectSisyphusRoot
+    || normalizedProjectOmoRulesRoot !== undefined
+    || normalizedProjectClaudeRulesRoot !== undefined
+    || normalizedProjectCursorRulesRoot !== undefined || normalizedProjectGitHubInstructionsRoot !== undefined
+    || normalizedProjectSisyphusRulesRoot !== undefined || normalizedUserClaudeRulesRoots.length > 0
+    || normalizedUserOpenCodeRulesRoots.length > 0 || normalizedUserSisyphusRulesRoot !== undefined
   assertFileSystem(fs, requiresListDir)
 
   const states = new WeakMap()
@@ -1112,8 +1622,15 @@ export function createClaudeRulesOnReadContextListener(agents, sessions, fs, use
         includeProjectCursorRoot,
         includeProjectGitHubInstructionsRoot,
         includeProjectGitHubCopilotInstructionsFile,
+        includeProjectSisyphusRoot,
         userClaudeRulesRoots: normalizedUserClaudeRulesRoots,
         userOpenCodeRulesRoots: normalizedUserOpenCodeRulesRoots,
+        userSisyphusRulesRoot: normalizedUserSisyphusRulesRoot,
+        projectOmoRulesRoot: normalizedProjectOmoRulesRoot,
+        projectClaudeRulesRoot: normalizedProjectClaudeRulesRoot,
+        projectCursorRulesRoot: normalizedProjectCursorRulesRoot,
+        projectGitHubInstructionsRoot: normalizedProjectGitHubInstructionsRoot,
+        projectSisyphusRulesRoot: normalizedProjectSisyphusRulesRoot,
       })
       assertNotAborted(linked.signal)
       if (messages.length === 0) return decision

@@ -415,6 +415,7 @@ test('clear/compact, Agent disposal, and plugin disposal erase grants', async ()
   assert.equal((await attemptWrite(guard, 'src/existing.txt')).decision.kind, 'deny')
 
   await readSuccessfully(guard, 'src/existing.txt')
+  agentsById.delete(agent.id)
   guard.onAgentDisposed({ agent })
   assert.equal((await attemptWrite(guard, 'src/existing.txt')).decision.kind, 'deny')
 
@@ -422,6 +423,23 @@ test('clear/compact, Agent disposal, and plugin disposal erase grants', async ()
   await readSuccessfully(other.guard, 'src/existing.txt')
   other.guard.dispose()
   assert.equal((await attemptWrite(other.guard, 'src/existing.txt')).decision.kind, 'allow')
+})
+
+test('stale same-ID lifecycle events cannot clear a replacement Agent overwrite grant', async () => {
+  const { guard, agentsById } = makeHarness()
+  const oldAgent = agentsById.get('agent-1')
+  await readSuccessfully(guard, 'src/existing.txt')
+
+  const replacement = { id: 'agent-1' }
+  agentsById.set(replacement.id, replacement)
+  guard.onAgentCreated({ agent: replacement })
+  await readSuccessfully(guard, 'src/existing.txt')
+
+  guard.onAgentCreated({ agent: oldAgent })
+  guard.onAgentDisposed({ agent: oldAgent })
+  const write = await attemptWrite(guard, 'src/existing.txt', { agentId: replacement.id })
+  assert.deepEqual(write.decision, { kind: 'allow' })
+  assert.equal(write.final, undefined)
 })
 
 test('bounds sessions, grants, and pending read candidates', async () => {

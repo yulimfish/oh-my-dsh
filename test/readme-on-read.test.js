@@ -9,6 +9,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { createRootAgentsContextListener } from '../src/agents-context.js'
 import { createRootReadmeContextListener } from '../src/readme-context.js'
 import {
+  createAgentsOnReadContextListener,
   createReadmeOnReadContextListener,
   registerAgentsOnReadContext,
   registerReadmeOnReadContext,
@@ -38,19 +39,40 @@ function normalizeRecord(value) {
   return { ...value, bytes: value.bytes instanceof Uint8Array ? value.bytes : encoder.encode(value.text ?? '') }
 }
 
-function makeFileSystem({ cwd = CWD, readmes = {}, outsideRead = false, onContains } = {}) {
+function makeFileSystem({ cwd = CWD, projectRoot, readmes = {}, projectReadmes = {}, outsideRead = false, onContains } = {}) {
   const calls = []
-  const records = new Map(Object.entries(readmes).map(([relative, record]) => [relative, normalizeRecord(record)]))
+  const projectBaseRelative = projectRoot === undefined ? undefined : '@project'
+  const relativeCwd = projectRoot === undefined ? '' : path.relative(projectRoot, cwd)
+  const cwdBaseRelative = projectRoot === undefined
+    ? ''
+    : relativeCwd === '' ? projectBaseRelative
+      : relativeCwd === '..' || relativeCwd.startsWith('../') ? '@outside/cwd'
+        : path.join(projectBaseRelative, relativeCwd)
+  const records = new Map(Object.entries(readmes).map(([relative, record]) => [
+    path.join(cwdBaseRelative, relative), normalizeRecord(record),
+  ]))
+  if (projectRoot !== undefined) {
+    for (const [relative, record] of Object.entries(projectReadmes)) {
+      records.set(path.join(projectBaseRelative, relative), normalizeRecord(record))
+    }
+  }
   const targets = new WeakMap()
   const directoryTargets = new Map()
   const fileTargets = new Map()
   let activeReadPath = 'src/nested/file.ts'
   let directoryPaths = new Set()
 
-  function rebuildDirectories() {
-    const segments = typeof activeReadPath === 'string' ? activeReadPath.split('/') : []
-    directoryPaths = new Set([''])
+  function addDirectoryParents(relativePath) {
+    const segments = relativePath.split('/')
     for (let index = 1; index < segments.length; index++) directoryPaths.add(segments.slice(0, index).join('/'))
+  }
+
+  function rebuildDirectories() {
+    directoryPaths = new Set([cwdBaseRelative])
+    if (projectBaseRelative !== undefined) directoryPaths.add(projectBaseRelative)
+    for (const relativePath of records.keys()) addDirectoryParents(relativePath)
+    const readPath = path.join(cwdBaseRelative, activeReadPath)
+    addDirectoryParents(readPath)
   }
 
   function makeTarget(relative, kind, record, { targetKey, outside = false, after = false } = {}) {
@@ -67,8 +89,12 @@ function makeFileSystem({ cwd = CWD, readmes = {}, outsideRead = false, onContai
     return target
   }
 
-  const rootTarget = makeTarget('', 'directory', undefined, { targetKey: `root:${cwd}` })
-  directoryTargets.set('', rootTarget)
+  const rootTarget = makeTarget(cwdBaseRelative, 'directory', undefined, { targetKey: `root:${cwd}` })
+  directoryTargets.set(cwdBaseRelative, rootTarget)
+  const projectRootTarget = projectRoot === undefined ? undefined
+    : projectRoot === cwd ? rootTarget
+      : makeTarget(projectBaseRelative, 'directory', undefined, { targetKey: `project-root:${projectRoot}` })
+  if (projectRootTarget) directoryTargets.set(projectBaseRelative, projectRootTarget)
 
   function getDirectoryTarget(relative) {
     let target = directoryTargets.get(relative)
@@ -103,21 +129,49 @@ function makeFileSystem({ cwd = CWD, readmes = {}, outsideRead = false, onContai
     return record.target
   }
 
+  function absoluteKey(value) {
+    if (typeof value !== 'string' || !path.isAbsolute(value)) return undefined
+    if (projectRoot !== undefined) {
+      const projectRelative = path.relative(projectRoot, value)
+      if (projectRelative === '') return projectBaseRelative
+      if (!path.isAbsolute(projectRelative) && projectRelative !== '..' && !projectRelative.startsWith('../')) {
+        return path.join(projectBaseRelative, projectRelative)
+      }
+    }
+    const cwdRelative = path.relative(cwd, value)
+    if (cwdRelative === '') return cwdBaseRelative
+    if (!path.isAbsolute(cwdRelative) && cwdRelative !== '..' && !cwdRelative.startsWith('../')) {
+      return path.join(cwdBaseRelative, cwdRelative)
+    }
+    return undefined
+  }
+
+  function relativeKey(value, basePath) {
+    if (typeof value !== 'string') return undefined
+    if (path.isAbsolute(value)) return absoluteKey(value)
+    let baseRelative
+    if (projectRoot !== undefined && basePath === projectRoot) baseRelative = projectBaseRelative
+    else if (basePath === undefined || basePath === cwd) baseRelative = cwdBaseRelative
+    else return undefined
+    return value === '' || value === '.' ? baseRelative : path.join(baseRelative, value)
+  }
+
+  function isRelativeContained(parent, child) {
+    return parent === '' || child === parent || child.startsWith(`${parent}/`)
+  }
+
   rebuildDirectories()
   const fs = {
     async resolve(pathValue, options = {}) {
       calls.push({ method: 'resolve', path: pathValue, options })
       if (pathValue === cwd) return rootTarget
-      if (options.cwd !== undefined && options.cwd !== cwd) {
+      if (projectRoot !== undefined && pathValue === projectRoot) return projectRootTarget
+      const relativePath = relativeKey(pathValue, options.cwd)
+      if (relativePath === undefined) {
         return makeTarget(String(pathValue), 'file', undefined, { targetKey: `outside:${String(pathValue)}`, outside: true })
       }
-      const relativePath = typeof pathValue === 'string' && path.isAbsolute(pathValue) ? path.relative(cwd, pathValue) : pathValue
-      if (relativePath === '') return rootTarget
-      if (typeof pathValue === 'string' && path.isAbsolute(pathValue)
-        && (relativePath === '..' || relativePath.startsWith('../') || path.isAbsolute(relativePath))) {
-        return makeTarget(String(pathValue), 'file', undefined, { targetKey: `outside:${String(pathValue)}`, outside: true })
-      }
-      if (relativePath === activeReadPath) {
+      const activeReadKey = path.join(cwdBaseRelative, activeReadPath)
+      if (relativePath === activeReadKey) {
         if (outsideRead) return makeTarget(relativePath, 'file', undefined, { targetKey: `outside:${cwd}:${relativePath}`, outside: true })
         return getFileTarget(relativePath, records.get(relativePath), 'read-file')
       }
@@ -131,8 +185,9 @@ function makeFileSystem({ cwd = CWD, readmes = {}, outsideRead = false, onContai
       const parentInfo = targets.get(parent)
       const childInfo = targets.get(child)
       onContains?.({ parentInfo, childInfo })
-      if (!parentInfo || !childInfo || parentInfo.kind !== 'directory' || parentInfo.relative !== ''
-        || childInfo.cwd !== cwd || childInfo.outside) return false
+      if (!parentInfo || !childInfo || parentInfo.kind !== 'directory'
+        || childInfo.cwd !== cwd || childInfo.outside
+        || !isRelativeContained(parentInfo.relative, childInfo.relative)) return false
       if (childInfo.after && childInfo.record?.afterContains !== undefined) return childInfo.record.afterContains === true
       if (childInfo.record?.replaced && childInfo.record.afterContains !== undefined && childInfo.after) {
         return childInfo.record.afterContains === true
@@ -141,8 +196,9 @@ function makeFileSystem({ cwd = CWD, readmes = {}, outsideRead = false, onContai
     },
     async lstat(relative, options = {}, signal) {
       calls.push({ method: 'lstat', path: relative, options, signal })
-      const record = records.get(relative)
-      if (!record) return undefined
+      const relativePath = relativeKey(relative, options.cwd)
+      const record = relativePath === undefined ? undefined : records.get(relativePath)
+      if (!record) return relativePath !== undefined && directoryPaths.has(relativePath) ? { type: 'directory' } : undefined
       record.lstatCalls = (record.lstatCalls ?? 0) + 1
       if (record.replaced && record.afterPathInfo !== undefined && record.lstatCalls > 1) return record.afterPathInfo
       return record.pathInfo ?? { type: 'file' }
@@ -192,7 +248,9 @@ async function makeHarness(options = {}) {
   const sessionService = { get: id => sessions.get(id) }
   const fileSystem = makeFileSystem({
     cwd: options.cwd ?? CWD,
+    projectRoot: options.projectRoot,
     readmes: options.readmes,
+    projectReadmes: options.projectReadmes,
     outsideRead: options.outsideRead,
     onContains: options.onContains,
   })
@@ -200,6 +258,10 @@ async function makeHarness(options = {}) {
   const listenerOptions = {
     ...(options.skipRoot === undefined ? {} : { skipRoot: options.skipRoot }),
     ...(options.rootSnapshotAvailable === undefined ? {} : { rootSnapshotAvailable: options.rootSnapshotAvailable }),
+    ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
+    ...(options.projectRootSnapshotAvailable === undefined
+      ? {} : { projectRootSnapshotAvailable: options.projectRootSnapshotAvailable }),
+    ...(options.includeCwd === undefined ? {} : { includeCwd: options.includeCwd }),
   }
   const featureFiber = await ctx.plugin(pluginCtx => registerContext(
     pluginCtx,
@@ -281,6 +343,20 @@ async function makeHarness(options = {}) {
     await agents.announce(agent, source)
   }
 
+  async function replaceAgent(agent, source) {
+    const id = agent.id
+    const cwd = sessions.get(id)?.header?.cwd ?? options.cwd ?? CWD
+    detachAgents.get(id)?.()
+    const replacement = { id, session: { id } }
+    const scope = createScope(ctx, replacement)
+    scopes.push(scope)
+    await scope.ctx.inject(['systemPrompt'], injected => { replacement.ctx = injected })
+    const detach = agents.enter(replacement, undefined)
+    detachAgents.set(id, detach)
+    await agents.announce(replacement, source)
+    return replacement
+  }
+
   async function executeRead(agent, args = { file_path: 'src/nested/file.ts' }, { signal = new AbortController().signal } = {}) {
     if (typeof args?.file_path === 'string') fileSystem.fs.setReadPath(args.file_path)
     callCount++
@@ -318,6 +394,7 @@ async function makeHarness(options = {}) {
     finalizerCalls,
     createAgent,
     reannounce,
+    replaceAgent,
     executeRead,
     disposeFeature,
     dispose,
@@ -380,13 +457,15 @@ async function beginConcurrentPendingDirectoryReads({ contextType = 'readme', se
   const secondReadTargetContained = deferred()
   const contextFileName = contextType === 'agents' ? 'AGENTS.md' : 'README.md'
   let readCount = 0
+  const readSignals = []
   let readTargetCount = 0
   const harness = await makeHarness({
     contextType,
     readmes: {
       [contextFileName]: {
         text: `# shared ${contextType}`,
-        readBytes() {
+        readBytes(_target, signal) {
+          readSignals.push(signal)
           readCount += 1
           if (readCount === 1) {
             firstReadStarted.resolve()
@@ -413,6 +492,7 @@ async function beginConcurrentPendingDirectoryReads({ contextType = 'readme', se
     first,
     second,
     firstReadGate,
+    readSignals,
     readCount: () => readCount,
   }
 }
@@ -511,6 +591,374 @@ test('injects root-to-nested AGENTS.md contexts after successful reads as untrus
   }
 })
 
+test('explicit project-root README context walks configured ancestors before a nested CWD', async () => {
+  const harness = await makeHarness({
+    contextType: 'readme',
+    cwd: '/workspace/apps/demo',
+    projectRoot: '/workspace',
+    includeCwd: false,
+    projectReadmes: {
+      'README.md': '# project README',
+      'apps/README.md': '# apps README',
+      'apps/demo/README.md': '# cwd README',
+      'apps/demo/src/README.md': '# src README',
+    },
+  })
+  try {
+    const agent = await harness.createAgent('project-readme-on-read', '/workspace/apps/demo')
+    const result = await harness.executeRead(agent, { file_path: 'src/nested/file.ts' })
+    assert.equal(result.isError, false)
+    assert.deepEqual(result.value, { body: 'body:src/nested/file.ts' })
+    assert.match(result.content[0].text, /finalized:canonical:body:src\/nested\/file\.ts/u)
+    const contexts = readmeTexts(result)
+    assert.deepEqual(contexts.map(text => text.match(/\[Project README: ([^;]+)/u)?.[1]), [
+      'README.md', 'apps/README.md', 'apps/demo/README.md', 'apps/demo/src/README.md',
+    ])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('explicit project-root README context is limited to top-level accepted reads', async () => {
+  const projectRoot = '/workspace'
+  const cwd = '/workspace/apps/demo'
+  const harness = await makeHarness({
+    contextType: 'readme', cwd, projectRoot, includeCwd: false,
+    projectReadmes: { 'README.md': '# project README' },
+  })
+  const listener = createReadmeOnReadContextListener(
+    harness.agents, harness.sessionService, harness.fileSystem.fs, { projectRoot, includeCwd: false },
+  )
+  try {
+    const agent = await harness.createAgent('nested-project-readme', cwd)
+    let nextCalls = 0
+    const result = await listener({
+      name: 'read',
+      arguments: { file_path: 'src/nested/file.ts' },
+      agent,
+      signal: new AbortController().signal,
+      parent: Symbol('nested-tool-call'),
+    }, { isError: false }, async () => {
+      nextCalls++
+      return { kind: 'accept', value: { body: 'native' }, content: [{ type: 'text', text: 'native' }] }
+    })
+    assert.equal(nextCalls, 1)
+    assert.deepEqual(readmeTexts(result), [])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'), false)
+  } finally {
+    listener.dispose()
+    await harness.dispose()
+  }
+})
+
+test('explicit project-root AGENTS context walks configured ancestors before a nested CWD', async () => {
+  const harness = await makeHarness({
+    contextType: 'agents',
+    cwd: '/workspace/apps/demo',
+    projectRoot: '/workspace',
+    includeCwd: false,
+    projectReadmes: {
+      'AGENTS.md': '# project instructions',
+      'apps/AGENTS.md': '# apps instructions',
+      'apps/demo/AGENTS.md': '# cwd instructions',
+      'apps/demo/src/AGENTS.md': '# src instructions',
+      'apps/demo/src/nested/AGENTS.md': '# nested instructions',
+    },
+    toolContext: true,
+    downstreamContext: true,
+  })
+  try {
+    const agent = await harness.createAgent('project-agents-on-read', '/workspace/apps/demo')
+    const result = await harness.executeRead(agent, { file_path: 'src/nested/file.ts' })
+    assert.equal(result.isError, false)
+    assert.deepEqual(result.value, { body: 'body:src/nested/file.ts' })
+    assert.match(result.content[0].text, /finalized:canonical:body:src\/nested\/file\.ts/u)
+    const contexts = result.additionalContexts ?? []
+    assert.equal(contexts[0].content[0].text, 'tool-owned deferred context')
+    assert.deepEqual(contexts[1], harness.downstreamContext)
+    const injected = contexts.slice(2)
+    assert.deepEqual(readmeTexts({ additionalContexts: injected }).map(text => text.match(/\[Project AGENTS\.md: ([^;]+)/u)?.[1]), [
+      'AGENTS.md',
+      'apps/AGENTS.md',
+      'apps/demo/AGENTS.md',
+      'apps/demo/src/AGENTS.md',
+      'apps/demo/src/nested/AGENTS.md',
+    ])
+    assert.ok(injected.every(message => message.role === 'user' && message.source.kind === 'user'))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('explicit project-root AGENTS scope fails open outside the root and on lexical identity mismatch', async () => {
+  const outside = await makeHarness({
+    contextType: 'agents',
+    cwd: '/workspace/other',
+    projectRoot: '/workspace/project',
+    includeCwd: false,
+    projectReadmes: { 'AGENTS.md': '# out-of-scope project instructions' },
+  })
+  try {
+    const agent = await outside.createAgent('outside-project-agents', '/workspace/other')
+    const result = await outside.executeRead(agent)
+    assert.deepEqual(readmeTexts(result), [])
+    assert.equal(outside.fileSystem.calls.some(call => call.method === 'readBytes'), false)
+  } finally {
+    await outside.dispose()
+  }
+
+  const mismatch = await makeHarness({
+    contextType: 'agents',
+    cwd: '/workspace/apps/demo',
+    projectRoot: '/workspace',
+    includeCwd: false,
+    projectReadmes: { 'AGENTS.md': '# mismatched identity must not be read' },
+  })
+  const originalResolve = mismatch.fileSystem.fs.resolve.bind(mismatch.fileSystem.fs)
+  mismatch.fileSystem.fs.resolve = async (pathValue, options = {}) => {
+    const target = await originalResolve(pathValue, options)
+    if (pathValue === 'apps/demo' && options.cwd === '/workspace') return { ...target, targetKey: 'different-cwd-identity' }
+    return target
+  }
+  try {
+    const agent = await mismatch.createAgent('mismatched-project-agents', '/workspace/apps/demo')
+    const result = await mismatch.executeRead(agent)
+    assert.deepEqual(readmeTexts(result), [])
+    assert.equal(mismatch.fileSystem.calls.some(call => call.method === 'readBytes'), false)
+  } finally {
+    await mismatch.dispose()
+  }
+})
+
+test('explicit project-root AGENTS refuses a symlink root before reading context', async () => {
+  const projectRoot = '/workspace'
+  const harness = await makeHarness({
+    contextType: 'agents',
+    cwd: '/workspace/apps/demo',
+    projectRoot,
+    includeCwd: false,
+    projectReadmes: { 'AGENTS.md': '# must not be read through a symlink root' },
+  })
+  const originalLstat = harness.fileSystem.fs.lstat.bind(harness.fileSystem.fs)
+  harness.fileSystem.fs.lstat = async (pathValue, options, signal) => {
+    if (pathValue === projectRoot) return { type: 'symlink' }
+    return originalLstat(pathValue, options, signal)
+  }
+  try {
+    const agent = await harness.createAgent('symlink-project-agents-root', '/workspace/apps/demo')
+    const result = await harness.executeRead(agent)
+    assert.deepEqual(readmeTexts(result), [])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('explicit project-root AGENTS context is limited to top-level accepted reads', async () => {
+  const projectRoot = '/workspace'
+  const cwd = '/workspace/apps/demo'
+  const harness = await makeHarness({
+    contextType: 'agents', cwd, projectRoot, includeCwd: false,
+    projectReadmes: { 'AGENTS.md': '# project instructions' },
+  })
+  const listener = createAgentsOnReadContextListener(
+    harness.agents,
+    harness.sessionService,
+    harness.fileSystem.fs,
+    { projectRoot, includeCwd: false },
+  )
+  try {
+    const agent = await harness.createAgent('nested-project-agents', cwd)
+    let nextCalls = 0
+    const result = await listener({
+      name: 'read',
+      arguments: { file_path: 'src/nested/file.ts' },
+      agent,
+      signal: new AbortController().signal,
+      parent: Symbol('nested-tool-call'),
+    }, { isError: false }, async () => {
+      nextCalls++
+      return { kind: 'accept', value: { body: 'native' }, content: [{ type: 'text', text: 'native' }] }
+    })
+    assert.equal(nextCalls, 1)
+    assert.deepEqual(readmeTexts(result), [])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'readBytes'), false)
+  } finally {
+    listener.dispose()
+    await harness.dispose()
+  }
+})
+
+test('explicit project-root AGENTS traversal retains the eight-directory cap', async () => {
+  const projectRoot = '/workspace'
+  const cwd = '/workspace/a/b/c/d/e/f/g/h/i'
+  const directoryNames = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']
+  const projectReadmes = { 'AGENTS.md': '# root' }
+  for (let depth = 1; depth <= directoryNames.length; depth++) {
+    projectReadmes[`${directoryNames.slice(0, depth).join('/')}/AGENTS.md`] = `# level ${depth}`
+  }
+  const harness = await makeHarness({
+    contextType: 'agents', cwd, projectRoot, includeCwd: false, projectReadmes,
+  })
+  try {
+    const agent = await harness.createAgent('project-agents-depth-cap', cwd)
+    const result = await harness.executeRead(agent)
+    assert.deepEqual(readmeTexts(result).map(text => text.match(/\[Project AGENTS\.md: ([^;]+)/u)?.[1]), [
+      'AGENTS.md',
+      ...directoryNames.slice(0, 7).map((_, index) => `${directoryNames.slice(0, index + 1).join('/')}/AGENTS.md`),
+    ])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('explicit project-root and CWD walks share the aggregate AGENTS byte cap', async () => {
+  const projectRoot = '/workspace'
+  const cwd = '/workspace/a/b/c/d/e/f/g/h/i'
+  const limitSizedText = 'x'.repeat(16_384)
+  const harness = await makeHarness({
+    contextType: 'agents',
+    cwd,
+    projectRoot,
+    includeCwd: true,
+    projectReadmes: {
+      'AGENTS.md': limitSizedText,
+      'a/AGENTS.md': limitSizedText,
+      'a/b/AGENTS.md': '# should exceed shared budget',
+      'a/b/c/d/e/f/g/h/i/AGENTS.md': '# cwd source should exceed shared budget',
+    },
+  })
+  try {
+    const agent = await harness.createAgent('project-agents-byte-cap', cwd)
+    const result = await harness.executeRead(agent)
+    assert.deepEqual(readmeTexts(result).map(text => text.match(/\[Project AGENTS\.md: ([^;]+)/u)?.[1]), [
+      'AGENTS.md', 'a/AGENTS.md',
+    ])
+    const readBytesCalls = harness.fileSystem.calls.filter(call => call.method === 'readBytes')
+    assert.equal(readBytesCalls.length, 2, 'the third project file and the CWD source are beyond the shared budget')
+    assert.ok(readBytesCalls.every(call => call.maxBytes <= 16_384))
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat'
+      && call.path === 'a/b/AGENTS.md' && call.options.cwd === projectRoot), false)
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat'
+      && call.path === 'AGENTS.md' && call.options.cwd === cwd), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('CWD README snapshot suppresses only the nested CWD directory in explicit-root traversal', async () => {
+  const projectRoot = '/workspace'
+  const cwd = '/workspace/apps/demo'
+  const harness = await makeHarness({
+    contextType: 'readme', cwd, projectRoot, skipRoot: true, includeCwd: true,
+    rootSnapshotAvailable: () => true,
+    projectReadmes: {
+      'README.md': '# project README',
+      'apps/README.md': '# apps README',
+      'apps/demo/README.md': '# cwd snapshot',
+      'apps/demo/src/README.md': '# src README',
+    },
+  })
+  try {
+    const agent = await harness.createAgent('nested-project-readme-snapshot', cwd)
+    const result = await harness.executeRead(agent)
+    assert.deepEqual(readmeTexts(result).map(text => text.match(/\[Project README: ([^;]+)/u)?.[1]), [
+      'README.md', 'apps/README.md', 'apps/demo/src/README.md',
+    ])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat'
+      && call.path === 'apps/demo/README.md' && call.options.cwd === projectRoot), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('project-root README aliases the CWD root without duplicating a successful snapshot', async () => {
+  const cwd = '/workspace/project'
+  const harness = await makeHarness({
+    contextType: 'readme',
+    cwd,
+    projectRoot: cwd,
+    skipRoot: true,
+    includeCwd: true,
+    rootSnapshotAvailable: () => true,
+    projectReadmes: {
+      'README.md': '# shared root snapshot',
+      'src/README.md': '# src README',
+      'src/nested/README.md': '# nested README',
+    },
+  })
+  try {
+    const agent = await harness.createAgent('project-readme-cwd-alias', cwd)
+    const result = await harness.executeRead(agent)
+    assert.deepEqual(readmeTexts(result).map(text => text.match(/\[Project README: ([^;]+)/u)?.[1]), [
+      'src/README.md', 'src/nested/README.md',
+    ])
+    assert.equal(harness.fileSystem.calls.some(call => call.method === 'lstat' && call.path === 'README.md'), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('explicit project-root and CWD Agent snapshots suppress only their exact directories', async () => {
+  const projectRoot = '/workspace'
+  const cwd = '/workspace/apps/demo'
+  const harness = await makeHarness({
+    contextType: 'agents',
+    cwd,
+    projectRoot,
+    skipRoot: true,
+    includeCwd: true,
+    rootSnapshotAvailable: () => true,
+    projectRootSnapshotAvailable: () => true,
+    projectReadmes: {
+      'AGENTS.md': '# project snapshot',
+      'apps/AGENTS.md': '# apps instructions',
+      'apps/demo/AGENTS.md': '# cwd snapshot',
+      'apps/demo/src/AGENTS.md': '# src instructions',
+      'apps/demo/src/nested/AGENTS.md': '# nested instructions',
+    },
+  })
+  try {
+    const agent = await harness.createAgent('project-agents-snapshots', cwd)
+    const result = await harness.executeRead(agent)
+    assert.deepEqual(readmeTexts(result).map(text => text.match(/\[Project AGENTS\.md: ([^;]+)/u)?.[1]), [
+      'apps/AGENTS.md', 'apps/demo/src/AGENTS.md', 'apps/demo/src/nested/AGENTS.md',
+    ])
+    const lstatPaths = harness.fileSystem.calls.filter(call => call.method === 'lstat').map(call => [call.path, call.options.cwd])
+    assert.equal(lstatPaths.some(([pathName, base]) => pathName === 'AGENTS.md' && base === projectRoot), false)
+    assert.equal(lstatPaths.some(([pathName, base]) => pathName === 'AGENTS.md' && base === cwd), false)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('project-root AGENTS aliases the CWD root without duplicating a successful snapshot', async () => {
+  const cwd = '/workspace/project'
+  const harness = await makeHarness({
+    contextType: 'agents',
+    cwd,
+    projectRoot: cwd,
+    includeCwd: true,
+    projectRootSnapshotAvailable: () => true,
+    projectReadmes: {
+      'AGENTS.md': '# shared root snapshot',
+      'src/AGENTS.md': '# src instructions',
+      'src/nested/AGENTS.md': '# nested instructions',
+    },
+  })
+  try {
+    const agent = await harness.createAgent('project-root-cwd-alias', cwd)
+    const result = await harness.executeRead(agent)
+    assert.deepEqual(readmeTexts(result).map(text => text.match(/\[Project AGENTS\.md: ([^;]+)/u)?.[1]), [
+      'src/AGENTS.md', 'src/nested/AGENTS.md',
+    ])
+    const rootReads = harness.fileSystem.calls.filter(call => call.method === 'lstat' && call.path === 'AGENTS.md')
+    assert.equal(rootReads.length, 0)
+  } finally {
+    await harness.dispose()
+  }
+})
+
 test('a failed pending README/AGENTS read lets one concurrent waiter retry', async () => {
   for (const contextType of ['readme', 'agents']) {
     const { results, after, readCount } = await runConcurrentDirectoryContextReads(contextType, true)
@@ -536,6 +984,7 @@ test('a pending directory waiter honors its own cancellation without canceling t
   const pair = await beginConcurrentPendingDirectoryReads({ secondSignal: controller.signal })
   try {
     controller.abort()
+    assert.equal(pair.readSignals[0].aborted, false, 'a cancelled follower does not abort the owner generation signal')
     const secondOutcome = await Promise.race([
       pair.second.then(value => ({ kind: 'result', value }), error => ({ kind: 'error', error })),
       new Promise(resolve => setImmediate(() => resolve({ kind: 'pending' }))),
@@ -553,27 +1002,131 @@ test('a pending directory waiter honors its own cancellation without canceling t
   }
 })
 
-test('clear and compact wake pending directory waiters and fence stale results', async () => {
+test('clear and compact abort pending README/AGENTS reads, wake waiters, and fence stale results', async () => {
+  for (const contextType of ['readme', 'agents']) {
+    for (const source of ['clear', 'compact']) {
+      const pair = await beginConcurrentPendingDirectoryReads({ contextType })
+      try {
+        await pair.harness.reannounce(pair.agent, source)
+        assert.equal(pair.readSignals[0].aborted, true, `${contextType} ${source} aborts the old filesystem read signal`)
+        const secondOutcome = await Promise.race([
+          pair.second.then(value => ({ kind: 'result', value }), error => ({ kind: 'error', error })),
+          new Promise(resolve => setImmediate(() => resolve({ kind: 'pending' }))),
+        ])
+        assert.notEqual(secondOutcome.kind, 'pending', `${contextType} ${source} settles old-generation waiters before the owner finishes`)
+        if (secondOutcome.kind === 'result') assert.deepEqual(readmeTexts(secondOutcome.value), [])
+        const firstOutcome = await Promise.race([
+          pair.first.then(value => ({ kind: 'result', value }), error => ({ kind: 'error', error })),
+          new Promise(resolve => setImmediate(() => resolve({ kind: 'pending' }))),
+        ])
+        assert.equal(firstOutcome.kind, 'result', `${contextType} ${source} settles the old owner before its backend read resolves`)
+        assert.deepEqual(readmeTexts(firstOutcome.value), [])
+
+        pair.firstReadGate.resolve(encoder.encode(`# shared ${contextType}`))
+        const firstResult = await pair.first
+        assert.deepEqual(readmeTexts(firstResult), [], `${contextType} ${source} prevents an old pending read from injecting`)
+        const after = await pair.harness.executeRead(pair.agent)
+        assert.equal(readmeTexts(after).length, 1, `${contextType} ${source} permits a fresh-generation context`)
+        assert.equal(pair.readCount(), 2, `${contextType} ${source} discards the stale attempt and reads the fresh generation once`)
+      } finally {
+        pair.firstReadGate.resolve(encoder.encode(`# shared ${contextType}`))
+        await pair.harness.dispose()
+      }
+    }
+  }
+})
+
+test('clear and compact abort only the exact Agent generation', async () => {
   for (const source of ['clear', 'compact']) {
-    const pair = await beginConcurrentPendingDirectoryReads()
+    const gates = [deferred(), deferred()]
+    const started = [deferred(), deferred()]
+    const readSignals = []
+    let readCount = 0
+    const harness = await makeHarness({
+      readmes: {
+        'README.md': {
+          text: '# shared context',
+          readBytes(_target, signal) {
+            const index = readCount++
+            readSignals[index] = signal
+            started[index].resolve()
+            return gates[index].promise
+          },
+        },
+      },
+    })
     try {
-      await pair.harness.reannounce(pair.agent, source)
-      const secondOutcome = await Promise.race([
-        pair.second.then(value => ({ kind: 'result', value }), error => ({ kind: 'error', error })),
+      const agentA = await harness.createAgent('agent-a')
+      const agentB = await harness.createAgent('agent-b')
+      const readA = harness.executeRead(agentA)
+      await started[0].promise
+      const readB = harness.executeRead(agentB)
+      await started[1].promise
+
+      await harness.reannounce(agentA, source)
+      assert.equal(readSignals[0].aborted, true, `${source} aborts Agent A's generation signal`)
+      assert.equal(readSignals[1].aborted, false, `${source} leaves Agent B's generation signal intact`)
+
+      const resultA = await readA
+      assert.deepEqual(readmeTexts(resultA), [], `${source} fences Agent A's stale read`)
+      gates[1].resolve(encoder.encode('# shared context'))
+      const resultB = await readB
+      assert.equal(readmeTexts(resultB).length, 1, `${source} permits Agent B's read to commit`)
+      assert.equal(readCount, 2)
+    } finally {
+      gates[0].resolve(encoder.encode('# Agent A context'))
+      gates[1].resolve(encoder.encode('# shared context'))
+      await harness.dispose()
+    }
+  }
+})
+
+test('clear and compact replace the Agent object and abort its prior same-ID read', async () => {
+  for (const source of ['clear', 'compact']) {
+    const gates = [deferred(), deferred()]
+    const started = [deferred(), deferred()]
+    const readSignals = []
+    let readCount = 0
+    const harness = await makeHarness({
+      readmes: {
+        'README.md': {
+          text: '# shared context',
+          readBytes(_target, signal) {
+            const index = readCount++
+            readSignals[index] = signal
+            started[index].resolve()
+            return gates[index].promise
+          },
+        },
+      },
+    })
+    try {
+      const original = await harness.createAgent('same-session-agent')
+      const oldRead = harness.executeRead(original)
+      await started[0].promise
+
+      const replacement = await harness.replaceAgent(original, source)
+      assert.notStrictEqual(replacement, original)
+      assert.equal(replacement.id, original.id)
+      assert.equal(readSignals[0].aborted, true, `${source} aborts the prior same-ID Agent's generation signal`)
+      const oldOutcome = await Promise.race([
+        oldRead.then(value => ({ kind: 'result', value }), error => ({ kind: 'error', error })),
         new Promise(resolve => setImmediate(() => resolve({ kind: 'pending' }))),
       ])
-      assert.notEqual(secondOutcome.kind, 'pending', `${source} settles old-generation waiters before the owner finishes`)
-      if (secondOutcome.kind === 'result') assert.deepEqual(readmeTexts(secondOutcome.value), [])
+      assert.equal(oldOutcome.kind, 'result', `${source} settles prior work before its backend read resolves`)
+      assert.deepEqual(readmeTexts(oldOutcome.value), [])
 
-      pair.firstReadGate.resolve(encoder.encode('# shared readme'))
-      const firstResult = await pair.first
-      assert.deepEqual(readmeTexts(firstResult), [], `${source} prevents an old pending read from injecting`)
-      const after = await pair.harness.executeRead(pair.agent)
-      assert.equal(readmeTexts(after).length, 1, `${source} permits a fresh-generation context`)
-      assert.equal(pair.readCount(), 2, `${source} discards the stale attempt and reads the fresh generation once`)
+      const newRead = harness.executeRead(replacement)
+      await started[1].promise
+      assert.equal(readSignals[1].aborted, false, `${source} leaves the replacement Agent's generation active`)
+      gates[1].resolve(encoder.encode('# shared context'))
+      const newResult = await newRead
+      assert.equal(readmeTexts(newResult).length, 1, `${source} allows the replacement Agent to commit fresh context`)
+      assert.equal(readCount, 2)
     } finally {
-      pair.firstReadGate.resolve(encoder.encode('# shared readme'))
-      await pair.harness.dispose()
+      gates[0].resolve(encoder.encode('# shared context'))
+      gates[1].resolve(encoder.encode('# shared context'))
+      await harness.dispose()
     }
   }
 })
@@ -582,6 +1135,7 @@ test('plugin disposal aborts waiters on a pending directory reservation', async 
   const pair = await beginConcurrentPendingDirectoryReads()
   try {
     await pair.harness.disposeFeature()
+    assert.equal(pair.readSignals[0].aborted, true, 'plugin disposal aborts the filesystem read signal')
     const outcomes = await Promise.race([
       Promise.all([pair.first, pair.second]).then(results => ({ kind: 'results', results }), error => ({ kind: 'error', error })),
       new Promise(resolve => setImmediate(() => resolve({ kind: 'pending' }))),
@@ -1011,12 +1565,21 @@ test('observes caller cancellation, applies one total five-second deadline, and 
   }
 })
 
-test('validates DSH dependencies and options, and feature disposal removes both listeners', async () => {
+test('validates DSH dependencies and options, and feature disposal unregisters all listeners', async () => {
   assert.throws(() => createReadmeOnReadContextListener({}, {}, {}), /agents\.get/u)
   assert.throws(() => createReadmeOnReadContextListener({ get() {} }, {}, {}), /sessions\.get/u)
   assert.throws(() => createReadmeOnReadContextListener({ get() {} }, { get() {} }, {}), /fs\.resolve/u)
   assert.throws(() => createReadmeOnReadContextListener({ get() {} }, { get() {} }, makeFileSystem().fs, { skipRoot: 'yes' }), /skipRoot.*boolean/u)
   assert.throws(() => createReadmeOnReadContextListener({ get() {} }, { get() {} }, makeFileSystem().fs, { rootSnapshotAvailable: true }), /rootSnapshotAvailable.*function/u)
+  assert.throws(() => createAgentsOnReadContextListener({ get() {} }, { get() {} }, makeFileSystem().fs, {
+    projectRoot: '/', includeCwd: false,
+  }), /projectRoot/u)
+  assert.throws(() => createReadmeOnReadContextListener({ get() {} }, { get() {} }, makeFileSystem().fs, {
+    projectRoot: '/workspace/a\\b', includeCwd: false,
+  }), /POSIX separators.*backslashes/u)
+  assert.throws(() => createAgentsOnReadContextListener({ get() {} }, { get() {} }, makeFileSystem().fs, {
+    includeCwd: false,
+  }), /without cwd requires projectRoot/u)
 
   const harness = await makeHarness({ readmes: { 'README.md': '# root' } })
   try {

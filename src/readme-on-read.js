@@ -1,5 +1,6 @@
 import { posix as path } from 'node:path'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { normalizeProjectRootPath } from './agents-context.js'
 
 const MAX_FILE_PATH_CHARS = 4_096
 const MAX_CWD_CHARS = 4_096
@@ -27,6 +28,14 @@ const DEDUPED = Symbol('directory context already injected')
 const DIRECTORY_COMMITTED = Symbol('directory context committed')
 const DIRECTORY_RELEASED = Symbol('directory context reservation released')
 const MAX_PENDING_DIRECTORY_RETRIES = 1
+
+export function normalizeProjectReadRoot(value, fieldName = 'projectRoot') {
+  const root = normalizeProjectRootPath(value, fieldName)
+  if (root !== undefined && root.includes('\\')) {
+    throw new TypeError(`${fieldName} must use POSIX separators without backslashes`)
+  }
+  return root
+}
 
 function isObject(value) {
   return value !== null && typeof value === 'object'
@@ -189,7 +198,7 @@ function escapePromptVariableSyntax(text) {
 function getAgentState(states, agent) {
   let state = states.get(agent)
   if (!state) {
-    state = { generation: 0, directories: new Map() }
+    state = { generation: 0, generationController: new AbortController(), directories: new Map() }
     states.set(agent, state)
   }
   return state
@@ -232,6 +241,37 @@ function resetDirectoryReservations(state) {
   state.directories.clear()
 }
 
+function advanceDirectoryGeneration(state) {
+  const previousController = state.generationController
+  state.generation += 1
+  state.generationController = new AbortController()
+  previousController.abort()
+  resetDirectoryReservations(state)
+}
+
+function trackActiveRead(activeReads, agent, state) {
+  const id = agent.id
+  let entry = activeReads.get(id)
+  if (entry && (entry.agent !== agent || entry.state !== state)) {
+    advanceDirectoryGeneration(entry.state)
+    if (activeReads.get(id) === entry) activeReads.delete(id)
+    entry = undefined
+  }
+  if (!entry) {
+    entry = { agent, state, readers: 0 }
+    activeReads.set(id, entry)
+  }
+  entry.readers += 1
+
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    entry.readers = Math.max(0, entry.readers - 1)
+    if (entry.readers === 0 && activeReads.get(id) === entry) activeReads.delete(id)
+  }
+}
+
 async function statTarget(fs, target, signal) {
   return awaitWithSignal(() => fs.stat(target, signal), signal)
 }
@@ -242,7 +282,7 @@ async function resolveTarget(fs, relativePath, cwd, signal) {
 
 async function readDirectoryContextFile(
   fs, cwd, rootTarget, readTargetKey, directory, state, generation, signal, aggregateBytes, contextFile,
-  retriesRemaining = MAX_PENDING_DIRECTORY_RETRIES,
+  localDirectories, retriesRemaining = MAX_PENDING_DIRECTORY_RETRIES,
 ) {
   assertNotAborted(signal)
   let directoryTarget
@@ -257,7 +297,11 @@ async function readDirectoryContextFile(
     if (directoryInfo?.type !== 'directory' || state.generation !== generation) return undefined
 
     const existing = state.directories.get(directoryKey)
-    if (existing === DEDUPED) return undefined
+    if (existing === DEDUPED) {
+      localDirectories.add(directoryKey)
+      return undefined
+    }
+    if (localDirectories.has(directoryKey)) return undefined
     if (existing) {
       // This call's linked signal bounds waiting; release permits one retry, commit dedupes.
       const settled = await awaitWithSignal(() => existing.settled, signal)
@@ -267,7 +311,7 @@ async function readDirectoryContextFile(
       if (settled !== DIRECTORY_RELEASED || retriesRemaining <= 0) return undefined
       return readDirectoryContextFile(
         fs, cwd, rootTarget, readTargetKey, directory, state, generation, signal,
-        aggregateBytes, contextFile, retriesRemaining - 1,
+        aggregateBytes, contextFile, localDirectories, retriesRemaining - 1,
       )
     }
 
@@ -279,6 +323,7 @@ async function readDirectoryContextFile(
 
     const reservation = createDirectoryReservation(directoryKey)
     state.directories.set(directoryKey, reservation)
+    localDirectories.add(directoryKey)
     try {
       const contextPath = directory.relative ? `${directory.relative}/${contextFile.fileName}` : contextFile.fileName
       const pathInfo = await awaitWithSignal(() => fs.lstat(contextPath, { cwd }, signal), signal)
@@ -368,36 +413,180 @@ async function readDirectoryContextFile(
   }
 }
 
-async function collectDirectoryContexts({ fs, cwd, filePath, segments, state, generation, signal, skipRoot, contextFile }) {
+function metadataMatches(before, after) {
+  return before?.type === after?.type
+    && (before?.version === undefined || after?.version === before.version)
+    && (before?.size === undefined || after?.size === before.size)
+}
+
+async function resolveExplicitProjectReadScope(fs, projectRoot, cwd, segments, cwdTarget, readTarget, signal) {
   assertNotAborted(signal)
-  const rootTarget = await resolveTarget(fs, cwd, cwd, signal)
+  if (typeof projectRoot !== 'string' || !path.isAbsolute(projectRoot) || projectRoot.includes('\\')
+    || !validateCwd(cwd) || cwd.includes('\\')) return undefined
+  const relativeCwd = path.relative(projectRoot, cwd)
+  if (relativeCwd.length > MAX_FILE_PATH_CHARS || (relativeCwd !== ''
+    && (path.isAbsolute(relativeCwd) || relativeCwd.split('/').some(segment => !segment || segment === '.' || segment === '..')))) {
+    return undefined
+  }
+
+  const projectRootPathInfo = await awaitWithSignal(() => fs.lstat(projectRoot, {}, signal), signal)
   assertNotAborted(signal)
-  if (!rootTarget || !safeTargetKey(rootTarget)) return { messages: [], reservations: [] }
-  const rootInfo = await statTarget(fs, rootTarget, signal)
+  if (projectRootPathInfo?.type !== 'directory') return undefined
+  const projectRootTarget = await resolveTarget(fs, projectRoot, undefined, signal)
   assertNotAborted(signal)
-  if (rootInfo?.type !== 'directory') return { messages: [], reservations: [] }
+  const projectRootKey = safeTargetKey(projectRootTarget)
+  const cwdTargetKey = safeTargetKey(cwdTarget)
+  const readTargetKey = safeTargetKey(readTarget)
+  if (!projectRootKey || !cwdTargetKey || !readTargetKey || !isContained(fs, projectRootTarget, cwdTarget)) return undefined
+
+  const projectRootInfo = await statTarget(fs, projectRootTarget, signal)
+  const cwdInfo = await statTarget(fs, cwdTarget, signal)
+  assertNotAborted(signal)
+  if (projectRootInfo?.type !== 'directory' || cwdInfo?.type !== 'directory'
+    || !metadataMatches(projectRootPathInfo, projectRootInfo)) return undefined
+
+  const lexicalCwdTarget = relativeCwd === ''
+    ? projectRootTarget
+    : await resolveTarget(fs, relativeCwd, projectRoot, signal)
+  assertNotAborted(signal)
+  if (safeTargetKey(lexicalCwdTarget) !== cwdTargetKey) return undefined
+
+  const rootRelativeReadPath = [...(relativeCwd === '' ? [] : relativeCwd.split('/')), ...segments].join('/')
+  const rootReadTarget = await resolveTarget(fs, rootRelativeReadPath, projectRoot, signal)
+  assertNotAborted(signal)
+  if (safeTargetKey(rootReadTarget) !== readTargetKey || !isContained(fs, projectRootTarget, rootReadTarget)) return undefined
+
+  return {
+    projectRootTarget,
+    projectRootKey,
+    projectRootPathInfo,
+    projectRootInfo,
+    cwdTargetKey,
+    cwdInfo,
+    readTargetKey,
+    relativeCwd,
+  }
+}
+
+async function explicitProjectReadScopeStillCurrent(fs, projectRoot, cwd, filePath, segments, previous, signal) {
+  try {
+    const cwdTarget = await resolveTarget(fs, cwd, cwd, signal)
+    assertNotAborted(signal)
+    if (safeTargetKey(cwdTarget) !== previous.cwdTargetKey) return false
+    const readTarget = await resolveTarget(fs, filePath, cwd, signal)
+    assertNotAborted(signal)
+    const current = await resolveExplicitProjectReadScope(
+      fs, projectRoot, cwd, segments, cwdTarget, readTarget, signal,
+    )
+    return current !== undefined
+      && current.projectRootKey === previous.projectRootKey
+      && current.cwdTargetKey === previous.cwdTargetKey
+      && current.readTargetKey === previous.readTargetKey
+      && current.relativeCwd === previous.relativeCwd
+      && metadataMatches(previous.projectRootPathInfo, current.projectRootPathInfo)
+      && metadataMatches(previous.projectRootInfo, current.projectRootInfo)
+      && metadataMatches(previous.cwdInfo, current.cwdInfo)
+  } catch {
+    if (signal.aborted) throw ABORTED
+    return false
+  }
+}
+
+async function collectDirectoryContexts({
+  fs, cwd, filePath, segments, state, generation, signal, skipRoot, contextFile,
+  projectRoot, includeCwd = true, skipProjectRoot = false, skipCwdRootForProject = false,
+}) {
+  assertNotAborted(signal)
+  const cwdRootTarget = await resolveTarget(fs, cwd, cwd, signal)
+  assertNotAborted(signal)
+  if (!cwdRootTarget || !safeTargetKey(cwdRootTarget)) return { messages: [], reservations: [] }
+  const cwdRootInfo = await statTarget(fs, cwdRootTarget, signal)
+  assertNotAborted(signal)
+  if (cwdRootInfo?.type !== 'directory') return { messages: [], reservations: [] }
 
   const readTarget = await resolveTarget(fs, filePath, cwd, signal)
   assertNotAborted(signal)
   const readTargetKey = safeTargetKey(readTarget)
-  if (!readTargetKey || !isContained(fs, rootTarget, readTarget)) return { messages: [], reservations: [] }
+  if (!readTargetKey || !isContained(fs, cwdRootTarget, readTarget)) return { messages: [], reservations: [] }
+
+  let projectScope
+  if (projectRoot !== undefined) {
+    try {
+      projectScope = await resolveExplicitProjectReadScope(
+        fs, projectRoot, cwd, segments, cwdRootTarget, readTarget, signal,
+      )
+    } catch (error) {
+      if (signal.aborted) throw ABORTED
+    }
+  }
+
+  const roots = []
+  if (projectScope) {
+    const projectSegments = [
+      ...(projectScope.relativeCwd === '' ? [] : projectScope.relativeCwd.split('/')),
+      ...segments,
+    ]
+    roots.push({
+      kind: 'project',
+      cwd: projectRoot,
+      rootTarget: projectScope.projectRootTarget,
+      segments: projectSegments,
+      relativeCwd: projectScope.relativeCwd,
+    })
+  }
+  if (includeCwd) {
+    roots.push({
+      kind: 'cwd',
+      cwd,
+      rootTarget: cwdRootTarget,
+      segments,
+      skipRoot: skipRoot || (projectScope !== undefined
+        && projectScope.projectRootKey === projectScope.cwdTargetKey && skipProjectRoot),
+    })
+  }
 
   const messages = []
   const reservations = []
+  // Root and CWD walks share one pending read; avoid waiting on our own reservations for overlapping directories.
+  const localDirectories = new Set()
   let aggregateBytes = 0
   try {
-    for (const directory of directoryAncestors(segments)) {
-      if (skipRoot && directory.depth === 0) continue
-      assertNotAborted(signal)
-      if (state.generation !== generation) {
-        releaseReservations(state, reservations)
-        return { messages: [], reservations: [] }
+    for (const root of roots) {
+      const messagesBefore = messages.length
+      const reservationsBefore = reservations.length
+      const bytesBefore = aggregateBytes
+      const localDirectoriesBefore = new Set(localDirectories)
+      for (const directory of directoryAncestors(root.segments)) {
+        if ((root.kind === 'cwd' && root.skipRoot && directory.depth === 0)
+          || (root.kind === 'project' && (skipProjectRoot
+            || (projectScope !== undefined && projectScope.projectRootKey === projectScope.cwdTargetKey && skipRoot))
+            && directory.depth === 0)
+          || (root.kind === 'project' && skipCwdRootForProject && directory.relative === root.relativeCwd)) continue
+        assertNotAborted(signal)
+        if (state.generation !== generation) {
+          releaseReservations(state, reservations)
+          return { messages: [], reservations: [] }
+        }
+        const outcome = await readDirectoryContextFile(
+          fs, root.cwd, root.rootTarget, readTargetKey, directory, state, generation, signal,
+          aggregateBytes, contextFile, localDirectories,
+        )
+        if (outcome) {
+          messages.push(outcome.message)
+          reservations.push(outcome.reservation)
+          aggregateBytes += outcome.sourceBytes
+        }
+        if (aggregateBytes >= MAX_TOTAL_SOURCE_BYTES) break
       }
-      const outcome = await readDirectoryContextFile(fs, cwd, rootTarget, readTargetKey, directory, state, generation, signal, aggregateBytes, contextFile)
-      if (outcome) {
-        messages.push(outcome.message)
-        reservations.push(outcome.reservation)
-        aggregateBytes += outcome.sourceBytes
+      if (root.kind === 'project' && !await explicitProjectReadScopeStillCurrent(
+        fs, projectRoot, cwd, filePath, segments, projectScope, signal,
+      )) {
+        releaseReservations(state, reservations.slice(reservationsBefore))
+        messages.length = messagesBefore
+        reservations.length = reservationsBefore
+        aggregateBytes = bytesBefore
+        localDirectories.clear()
+        for (const directoryKey of localDirectoriesBefore) localDirectories.add(directoryKey)
       }
       if (aggregateBytes >= MAX_TOTAL_SOURCE_BYTES) break
     }
@@ -421,29 +610,62 @@ function commitReservations(state, reservations) {
 }
 
 function validateOptions(options) {
-  if (options === undefined) return { skipRoot: false, rootSnapshotAvailable: undefined }
+  if (options === undefined) {
+    return {
+      skipRoot: false,
+      rootSnapshotAvailable: undefined,
+      projectRoot: undefined,
+      projectRootSnapshotAvailable: undefined,
+      includeCwd: true,
+    }
+  }
   if (!isPlainRecord(options)) throw new TypeError('directory context injection options must be a plain object')
-  let descriptor
-  let snapshotDescriptor
+  let skipRootDescriptor
+  let rootSnapshotDescriptor
+  let projectRootDescriptor
+  let projectRootSnapshotDescriptor
+  let includeCwdDescriptor
   try {
-    descriptor = Object.getOwnPropertyDescriptor(options, 'skipRoot')
-    snapshotDescriptor = Object.getOwnPropertyDescriptor(options, 'rootSnapshotAvailable')
+    skipRootDescriptor = Object.getOwnPropertyDescriptor(options, 'skipRoot')
+    rootSnapshotDescriptor = Object.getOwnPropertyDescriptor(options, 'rootSnapshotAvailable')
+    projectRootDescriptor = Object.getOwnPropertyDescriptor(options, 'projectRoot')
+    projectRootSnapshotDescriptor = Object.getOwnPropertyDescriptor(options, 'projectRootSnapshotAvailable')
+    includeCwdDescriptor = Object.getOwnPropertyDescriptor(options, 'includeCwd')
   } catch {
     throw new TypeError('directory context injection options must use data properties')
   }
-  if ((descriptor && !Object.hasOwn(descriptor, 'value'))
-    || (snapshotDescriptor && !Object.hasOwn(snapshotDescriptor, 'value'))) {
+  const descriptors = [skipRootDescriptor, rootSnapshotDescriptor, projectRootDescriptor,
+    projectRootSnapshotDescriptor, includeCwdDescriptor]
+  if (descriptors.some(descriptor => descriptor && !Object.hasOwn(descriptor, 'value'))) {
     throw new TypeError('directory context injection options must use data properties')
   }
-  const skipRoot = descriptor?.value
+  const skipRoot = skipRootDescriptor?.value
   if (skipRoot !== undefined && typeof skipRoot !== 'boolean') {
     throw new TypeError('directory context injection skipRoot must be a boolean')
   }
-  const rootSnapshotAvailable = snapshotDescriptor?.value
+  const rootSnapshotAvailable = rootSnapshotDescriptor?.value
   if (rootSnapshotAvailable !== undefined && typeof rootSnapshotAvailable !== 'function') {
     throw new TypeError('directory context injection rootSnapshotAvailable must be a function')
   }
-  return { skipRoot: skipRoot === true, rootSnapshotAvailable }
+  const projectRoot = normalizeProjectReadRoot(projectRootDescriptor?.value)
+  const projectRootSnapshotAvailable = projectRootSnapshotDescriptor?.value
+  if (projectRootSnapshotAvailable !== undefined && typeof projectRootSnapshotAvailable !== 'function') {
+    throw new TypeError('directory context injection projectRootSnapshotAvailable must be a function')
+  }
+  const includeCwd = includeCwdDescriptor?.value
+  if (includeCwd !== undefined && typeof includeCwd !== 'boolean') {
+    throw new TypeError('directory context injection includeCwd must be a boolean')
+  }
+  if (includeCwd === false && projectRoot === undefined) {
+    throw new TypeError('directory context injection without cwd requires projectRoot')
+  }
+  return {
+    skipRoot: skipRoot === true,
+    rootSnapshotAvailable,
+    projectRoot,
+    projectRootSnapshotAvailable,
+    includeCwd: includeCwd !== false,
+  }
 }
 
 function createDirectoryOnReadContextListener(agents, sessions, fs, options = {}, contextFile) {
@@ -453,8 +675,15 @@ function createDirectoryOnReadContextListener(agents, sessions, fs, options = {}
     || typeof fs.lstat !== 'function' || typeof fs.stat !== 'function' || typeof fs.readBytes !== 'function') {
     throw new TypeError('directory context injection requires DSH fs.resolve, contains, lstat, stat, and readBytes')
   }
-  const { skipRoot, rootSnapshotAvailable } = validateOptions(options)
+  const {
+    skipRoot,
+    rootSnapshotAvailable,
+    projectRoot,
+    projectRootSnapshotAvailable,
+    includeCwd,
+  } = validateOptions(options)
   const states = new WeakMap()
+  const activeReads = new Map()
   const lifecycle = new AbortController()
   let disposed = false
 
@@ -474,10 +703,29 @@ function createDirectoryOnReadContextListener(agents, sessions, fs, options = {}
     } catch {
       return
     }
+    const active = activeReads.get(id)
+    if (active && active.agent !== liveAgent) {
+      advanceDirectoryGeneration(active.state)
+      if (activeReads.get(id) === active) activeReads.delete(id)
+    }
     const state = states.get(liveAgent)
     if (!state) return
-    state.generation++
-    resetDirectoryReservations(state)
+    advanceDirectoryGeneration(state)
+  }
+
+  const onAgentDisposed = ({ agent } = {}) => {
+    if (disposed || !isObject(agent)) return
+    let id
+    try {
+      id = agent.id
+    } catch {
+      return
+    }
+    if (typeof id !== 'string' || id.length === 0) return
+    const active = activeReads.get(id)
+    if (!active || active.agent !== agent) return
+    advanceDirectoryGeneration(active.state)
+    if (activeReads.get(id) === active) activeReads.delete(id)
   }
 
   const listener = async (exec, result, next) => {
@@ -499,25 +747,40 @@ function createDirectoryOnReadContextListener(agents, sessions, fs, options = {}
     }
     const cwd = session?.header?.cwd
     if (session?.header?.id !== liveAgent.id || !validateCwd(cwd)) return decision
-    let skipRootForAgent = skipRoot
-    if (skipRoot && rootSnapshotAvailable) {
+    let cwdSnapshotForAgent = false
+    if (rootSnapshotAvailable) {
       try {
-        skipRootForAgent = rootSnapshotAvailable(liveAgent) === true
+        cwdSnapshotForAgent = rootSnapshotAvailable(liveAgent) === true
       } catch {
-        skipRootForAgent = false
+        cwdSnapshotForAgent = false
+      }
+    }
+    const skipRootForAgent = skipRoot && rootSnapshotAvailable ? cwdSnapshotForAgent : skipRoot
+    let projectRootSnapshotForAgent = false
+    if (projectRootSnapshotAvailable) {
+      try {
+        projectRootSnapshotForAgent = projectRootSnapshotAvailable(liveAgent) === true
+      } catch {
+        projectRootSnapshotForAgent = false
       }
     }
     const validatedPath = validateReadPath(exec.arguments, cwd)
     if (!validatedPath) return decision
+    const projectRootForRead = projectRoot !== undefined && exec.parent === undefined ? projectRoot : undefined
+    if (!includeCwd && projectRootForRead === undefined) return decision
 
     const state = getAgentState(states, liveAgent)
     const generation = state.generation
     let deadline
     let linked
+    let releaseActiveRead
     try {
       deadline = createDeadline(READ_PIPELINE_TIMEOUT_MS)
-      linked = linkSignals([exec.signal, lifecycle.signal, deadline.signal])
+      linked = linkSignals([exec.signal, lifecycle.signal, state.generationController.signal, deadline.signal])
+      releaseActiveRead = trackActiveRead(activeReads, liveAgent, state)
     } catch {
+      linked?.dispose()
+      releaseActiveRead?.()
       deadline?.dispose()
       return decision
     }
@@ -525,13 +788,25 @@ function createDirectoryOnReadContextListener(agents, sessions, fs, options = {}
     let outcome
     try {
       outcome = await collectDirectoryContexts({
-        fs, cwd, ...validatedPath, state, generation, signal: linked.signal, skipRoot: skipRootForAgent, contextFile,
+        fs,
+        cwd,
+        ...validatedPath,
+        state,
+        generation,
+        signal: linked.signal,
+        skipRoot: skipRootForAgent,
+        contextFile,
+        projectRoot: projectRootForRead,
+        includeCwd,
+        skipProjectRoot: projectRootSnapshotForAgent,
+        skipCwdRootForProject: cwdSnapshotForAgent,
       })
     } catch {
       outcome = { messages: [], reservations: [] }
     } finally {
       linked.dispose()
       deadline.dispose()
+      releaseActiveRead()
     }
 
     const stillCurrent = !disposed && !linked.signal.aborted && !exec.signal.aborted
@@ -557,10 +832,12 @@ function createDirectoryOnReadContextListener(agents, sessions, fs, options = {}
   }
 
   listener.onAgentCreated = onAgentCreated
+  listener.onAgentDisposed = onAgentDisposed
   listener.dispose = () => {
     if (disposed) return
     disposed = true
     lifecycle.abort()
+    activeReads.clear()
     return undefined
   }
   return listener
@@ -584,6 +861,7 @@ function registerDirectoryOnReadContext(ctx, agents, sessions, fs, options, cont
   try {
     ctx.on('tools/post-execute', listener)
     ctx.on('agent/created', listener.onAgentCreated)
+    ctx.on('agent/disposed', listener.onAgentDisposed)
     ctx.effect(() => listener.dispose, `dsh-omo directory ${contextFile.fileName} post-read context`)
   } catch (error) {
     listener.dispose()
@@ -592,12 +870,12 @@ function registerDirectoryOnReadContext(ctx, agents, sessions, fs, options, cont
   return listener.dispose
 }
 
-/** Register the README post-read adapter and reset dedupe after clear/compact. */
+/** Register the README adapter; clear/compact and same-ID Agent replacement cancel active reads. */
 export function registerReadmeOnReadContext(ctx, agents, sessions, fs, options = {}) {
   return registerDirectoryOnReadContext(ctx, agents, sessions, fs, options, README_CONTEXT_FILE)
 }
 
-/** Register the AGENTS.md post-read adapter and reset dedupe after clear/compact. */
+/** Register the AGENTS.md adapter; clear/compact and same-ID Agent replacement cancel active reads. */
 export function registerAgentsOnReadContext(ctx, agents, sessions, fs, options = {}) {
   return registerDirectoryOnReadContext(ctx, agents, sessions, fs, options, AGENTS_CONTEXT_FILE)
 }
