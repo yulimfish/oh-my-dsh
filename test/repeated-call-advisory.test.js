@@ -374,6 +374,22 @@ test('pending entries are removed even when abort listener removal throws', asyn
   assert.doesNotThrow(() => feature.dispose(), 'disposal must not retry a removed pending entry')
 })
 
+test('listener registration failure leaves no pending completion for later counting', async () => {
+  const { live, feature } = makeHarness()
+  const agent = { id: 'throwing-add' }
+  live.set(agent.id, agent)
+  const controller = new AbortController()
+  controller.signal.addEventListener = () => { throw new Error('private add failure') }
+  const exec = makeExec(agent, {}, { signal: controller.signal })
+  const decision = { kind: 'allow' }
+  assert.strictEqual(await feature.preExecute(exec, async () => decision), decision)
+  for (let index = 0; index < 2; index += 1) {
+    assert.equal(warningCount((await complete(feature, makeExec(agent))).returned), 0)
+  }
+  assert.equal(warningCount((await complete(feature, makeExec(agent))).returned), 1)
+  feature.dispose()
+})
+
 test('disposal during downstream execution fences reminders and clears pending abort listeners', async () => {
   const { live, feature } = makeHarness()
   const agent = { id: 'agent-dispose' }
