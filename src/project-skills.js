@@ -377,8 +377,12 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
   }
 
   const metadata = Object.create(null)
+  if (formatCompatibility && frontmatter.metadata !== undefined) {
+    assertJsonValue(frontmatter.metadata)
+    if (frontmatter.metadata !== null) Object.assign(metadata, frontmatter.metadata)
+  }
   for (const [key, value] of Object.entries(frontmatter)) {
-    if (FRONTMATTER_FIELDS.has(key)) continue
+    if (FRONTMATTER_FIELDS.has(key) || (formatCompatibility && key === 'metadata')) continue
     assertJsonValue(value)
     metadata[key] = value
   }

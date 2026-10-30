@@ -2965,6 +2965,29 @@ test('format compatibility treats an unclosed frontmatter opener as plain Markdo
   assert.equal(skill.content, source)
 })
 
+test('format compatibility exposes reserved metadata directly during list and cached get', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'flat.md', '---\nname: chosen\ndescription: Custom\nmetadata:\n  owner: atlas\n  rank: 2\n---\nBody.\n')
+  const { ctx } = makeRegistry(makeFileSystem().fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const listed = await provider.list({ cwd })
+  assert.equal(listed.complete, true)
+  const candidate = listed.candidates.find(item => item.name === 'chosen')
+  assert.ok(candidate)
+  assert.equal(candidate.metadata.owner, 'atlas')
+  assert.equal(candidate.metadata.rank, 2)
+  assert.equal(candidate.metadata.metadata, undefined)
+  const skill = await provider.get(candidate, { cwd })
+  assert.equal(skill.metadata.owner, 'atlas')
+  assert.equal(skill.metadata.rank, 2)
+  assert.equal(skill.metadata.metadata, undefined)
+  assert.equal(skill.content, 'Body.')
+})
+
 test('format compatibility accepts an explicitly empty null tag while preserving sibling metadata', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'empty-tagged-null.md', '---\nname: !!null ""\ndescription: Custom description\n---\nBody.\n')
@@ -2982,7 +3005,7 @@ test('format compatibility accepts explicit decimal integers with leading zeros'
   const skill = await registry.get('chosen', { cwd })
   assert.ok(skill)
   assert.equal(skill.description, '(opencode-project - Skill) From metadata')
-  assert.equal(skill.metadata.metadata.rank, 1)
+  assert.equal(skill.metadata.rank, 1)
   assert.equal(skill.content, 'Body.')
 })
 
@@ -2992,8 +3015,8 @@ test('format compatibility preserves explicit negative zero integer metadata', a
   const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
   const skill = await registry.get('chosen', { cwd })
   assert.ok(skill)
-  assert.equal(Object.is(skill.metadata.metadata.negative, -0), true)
-  assert.equal(Object.is(skill.metadata.metadata.positive, 0), true)
+  assert.equal(Object.is(skill.metadata.negative, -0), true)
+  assert.equal(Object.is(skill.metadata.positive, 0), true)
   assert.equal(skill.content, 'Body.')
 })
 
