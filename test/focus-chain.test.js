@@ -4,6 +4,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { createFocusChain, focusChainText } from '../src/focus-chain.js'
+import { quoteBoundedText } from '../src/prompt-text.js'
 
 const systemPromptRequire = createRequire(import.meta.resolve('@deepseek-ai/dsh-system-prompt'))
 const { createScope } = await import(systemPromptRequire.resolve('@deepseek-ai/dsh-scope'))
@@ -99,6 +100,20 @@ test('bounds the serialized objective even when JSON escaping expands the source
   assert.equal(JSON.parse(quoted).endsWith('…'), true)
   assert.equal(quoted.length <= 2_000, true)
   assert.equal(text.length < 3_000, true)
+})
+
+test('keeps JSON truncation valid across emoji, lone surrogates, and small budgets', () => {
+  for (const budget of [3, 4, 5, 8, 16, 2_000]) {
+    for (const value of ['😀'.repeat(1_000), '\ud800'.repeat(1_000), '"\\😀\ud800'.repeat(500)]) {
+      const quoted = quoteBoundedText(value, budget)
+      assert.equal(quoted.length <= budget, true)
+      assert.doesNotThrow(() => JSON.parse(quoted))
+    }
+  }
+  assert.equal(JSON.parse(quoteBoundedText('😀'.repeat(1_000), 4)).includes('😀'), false,
+    'a code point is never split to fill a small budget')
+  assert.equal(quoteBoundedText('ok', 4), '"ok"', 'an exact serialized fit needs no ellipsis')
+  assert.throws(() => quoteBoundedText('x', 2), RangeError)
 })
 
 test('registers for every Agent creation source and re-reads the exact current Goal on each render', async () => {
