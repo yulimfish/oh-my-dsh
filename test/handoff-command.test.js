@@ -912,6 +912,18 @@ test('converts marker-only stop reason metadata without creating another boundar
   }
 })
 
+test('normalizes mixed multiline stop reason markers into one metadata line', async () => {
+  const stopReason = 'x\n--- BEGIN CHILD EVIDENCE ---\n--- END CHILD EVIDENCE ---'
+  const { agent, queued, command } = fixture(failed({ stopReason }))
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  const line = prompt.split('\n').find(line => line.startsWith('Recorded status'))
+  assert.match(line, /\[child BEGIN CHILD EVIDENCE\].*\[child END CHILD EVIDENCE\]/u)
+  assert.equal((prompt.match(/--- BEGIN CHILD EVIDENCE ---/gu) || []).length, 1)
+  assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
+})
+
 test('removes control characters from stop reason metadata', async () => {
   const { agent, queued, command } = fixture(failed({ stopReason: 'timeout\u202e\nnext' }))
   const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
