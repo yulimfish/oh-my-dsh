@@ -390,6 +390,28 @@ test('listener registration failure leaves no pending completion for later count
   feature.dispose()
 })
 
+test('pending capacity evicts the oldest entry and removes its abort listener', async () => {
+  const { live, feature } = makeHarness()
+  const agent = { id: 'pending-capacity' }
+  live.set(agent.id, agent)
+  const controllers = Array.from({ length: 129 }, () => new AbortController())
+  const removals = controllers.map(() => 0)
+  controllers.forEach((controller, index) => {
+    const original = controller.signal.removeEventListener.bind(controller.signal)
+    controller.signal.removeEventListener = (...args) => {
+      removals[index] += 1
+      return original(...args)
+    }
+  })
+  for (const controller of controllers) {
+    await feature.preExecute(makeExec(agent, {}, { signal: controller.signal }), async () => ({ kind: 'allow' }))
+  }
+  assert.equal(removals[0], 1, 'the oldest pending listener is released at the 128-entry cap')
+  assert.equal(removals.slice(1).every(count => count === 0), true)
+  feature.dispose()
+  assert.equal(removals.slice(1).every(count => count === 1), true, 'all remaining listeners are released on disposal')
+})
+
 test('disposal during downstream execution fences reminders and clears pending abort listeners', async () => {
   const { live, feature } = makeHarness()
   const agent = { id: 'agent-dispose' }
