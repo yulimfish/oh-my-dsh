@@ -268,6 +268,26 @@ test('keeps newer local terminal state when an old persistence list resolves', a
   await registry.dispose()
 })
 
+test('prefers current local terminal state over a conflicting persisted snapshot', async () => {
+  const parent = agent('local-terminal-priority')
+  const stored = persistedResult(parent.id, 'shared-child')
+  stored.output = 'stale persisted output'
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => { throw new Error('persistence must not be read when local state exists') },
+      list: async () => [stored],
+    },
+  })
+  assert.equal(registry.recordStart(parent, stored.childId), true)
+  assert.equal(registry.recordResult(parent, stored.childId, { ...result, status: 'incomplete', output: 'current local output' }), true)
+  assert.equal((await registry.readAsync(parent, stored.childId)).output, 'current local output')
+  assert.equal((await registry.readAsync(parent, stored.childId)).status, 'incomplete')
+  await registry.dispose()
+})
+
 test('does not revive a cleared result when an old persistence list resolves', async () => {
   const parent = agent('restore-list-clear-race')
   const gate = deferred()
