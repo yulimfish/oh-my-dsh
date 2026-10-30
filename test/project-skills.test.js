@@ -3280,6 +3280,32 @@ test('format compatibility accepts bounded YAML aliases across metadata and rese
   assert.equal(await strict.registry.get('alias-demo', { cwd }), undefined)
 })
 
+test('format compatibility loads cyclic YAML aliases without recursive comparison overflow', async t => {
+  for (const field of ['metadata', 'agent']) {
+    const cwd = await makeWorkspace(t)
+    await writeCompatibilityDocument(cwd, 'cyclic/SKILL.md', `---\nname: cyclic\ndescription: Cyclic\n${field}: &shared\n  self: *shared\n---\nBody.\n`)
+    const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+    const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'], formatCompatibility: true })
+    t.after(() => registration.dispose())
+    const lifetime = new AbortController()
+    t.after(() => lifetime.abort())
+    const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+      projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+    })
+    const listed = await provider.list({ cwd })
+    assert.equal(listed.complete, true, field)
+    const candidate = listed.candidates.find(item => item.name === 'cyclic')
+    assert.ok(candidate, field)
+    const skill = await provider.get(candidate, { cwd })
+    assert.ok(skill, field)
+    assert.equal(skill.content, 'Body.')
+    assert.equal(skill[field].self, skill[field])
+    const registered = await registry.get('cyclic', { cwd })
+    assert.ok(registered, field)
+    assert.equal(registered[field].self, registered[field])
+  }
+})
+
 test('format compatibility exposes reserved metadata directly during list and cached get', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'flat.md', '---\nname: chosen\ndescription: Custom\nmetadata:\n  owner: atlas\n  rank: 2\n---\nBody.\n')

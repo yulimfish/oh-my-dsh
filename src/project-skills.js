@@ -546,16 +546,19 @@ function skillDescriptionScope(rootPath, userRoot) {
   return rootPath === '.opencode/skills' || rootPath === '.opencode/skill' ? 'opencode-project' : 'project'
 }
 
-function sameSkillField(left, right) {
+function sameSkillField(left, right, seen = new WeakMap()) {
   if (Object.is(left, right)) return true
   if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
+  if (seen.get(left)?.has(right)) return true
+  if (!seen.has(left)) seen.set(left, new WeakSet())
+  seen.get(left).add(right)
   if (Array.isArray(left) !== Array.isArray(right)) return false
   if (Array.isArray(left)) {
-    return left.length === right.length && left.every((value, index) => sameSkillField(value, right[index]))
+    return left.length === right.length && left.every((value, index) => sameSkillField(value, right[index], seen))
   }
   const leftKeys = Object.keys(left)
   const rightKeys = Object.keys(right)
-  return leftKeys.length === rightKeys.length && leftKeys.every(key => Object.hasOwn(right, key) && sameSkillField(left[key], right[key]))
+  return leftKeys.length === rightKeys.length && leftKeys.every(key => Object.hasOwn(right, key) && sameSkillField(left[key], right[key], seen))
 }
 
 function matchesCandidate(skill, candidate, disabledSkills) {
