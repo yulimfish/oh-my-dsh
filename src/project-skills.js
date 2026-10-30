@@ -391,7 +391,7 @@ async function isContainedSkillPath(ctx, { cwd, cwdTarget, rootPath, rootTarget,
   const fs = ctx.fs
   if (typeof fs.lstat !== 'function') return false
   const lexicalInfo = await fs.lstat(resolverPath, { cwd }, signal)
-  if (!lexicalInfo || lexicalInfo.type !== 'file') return false
+  if (!lexicalInfo || (lexicalInfo.type !== 'file' && lexicalInfo.type !== 'symlink')) return false
   const currentRoot = await fs.resolve(rootPath, { cwd, signal })
   const currentFile = await fs.resolve(resolverPath, { cwd, signal })
   return fs.contains(cwdTarget, currentRoot)
@@ -1064,7 +1064,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                   complete = false
                   continue
                 }
-                if (formatCompatibility && !await isContainedSkillPath(ctx, { cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal })) {
+                if (!await isContainedSkillPath(ctx, { cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal })) {
                   complete = false
                   continue
                 }
@@ -1149,7 +1149,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           invalidateObservation()
           return undefined
         }
-        if (formatCompatibility && !await isContainedSkillPath(ctx, {
+        if (!await isContainedSkillPath(ctx, {
           cwd: userRoot ? locator.rootPath : lookup.cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath: locator.rootPath, rootTarget, fileTarget, resolverPath: locator.resolverPath, signal,
         })) {
           invalidateObservation()
