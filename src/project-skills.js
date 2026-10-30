@@ -523,6 +523,10 @@ function skillDescriptionScope(rootPath, userRoot) {
   return rootPath === '.opencode/skills' || rootPath === '.opencode/skill' ? 'opencode-project' : 'project'
 }
 
+function sameSkillField(left, right) {
+  return Object.is(left, right) || JSON.stringify(left ?? null) === JSON.stringify(right ?? null)
+}
+
 function matchesCandidate(skill, candidate, disabledSkills) {
   const disabled = disabledSkills.has(skill.name)
   const invocation = {
@@ -536,9 +540,9 @@ function matchesCandidate(skill, candidate, disabledSkills) {
     && invocation.userInvocable === candidate.invocation.userInvocable
     && (Object.is(skill.metadata, candidate.metadata)
       || JSON.stringify(skill.metadata ?? null) === JSON.stringify(candidate.metadata ?? null))
-    && Object.is(skill.agent, candidate.agent) && Object.is(skill.subtask, candidate.subtask)
-    && Object.is(skill.argumentHint, candidate.argumentHint) && Object.is(skill.license, candidate.license)
-    && Object.is(skill.compatibility, candidate.compatibility)
+    && sameSkillField(skill.agent, candidate.agent) && sameSkillField(skill.subtask, candidate.subtask)
+    && sameSkillField(skill.argumentHint, candidate.argumentHint) && sameSkillField(skill.license, candidate.license)
+    && sameSkillField(skill.compatibility, candidate.compatibility)
 }
 
 function skillFormatPaths(rootPath, resolverPath) {

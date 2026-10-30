@@ -3125,6 +3125,29 @@ test('format compatibility preserves sibling reserved fields alongside explicit 
   }
 })
 
+test('format compatibility loads unchanged structured reserved fields through cached get and registry', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'structured/SKILL.md', '---\nname: structured\ndescription: Structured\nagent:\n  name: reviewer\nsubtask: [one, two]\nargument-hint:\n  ticket: 1\nlicense: MIT\ncompatibility: opencode\n---\nBody.\n')
+  const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+  const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'], formatCompatibility: true })
+  t.after(() => registration.dispose())
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'structured')
+  const skill = await provider.get(candidate, { cwd })
+  assert.ok(skill)
+  assert.deepEqual(skill.agent, { name: 'reviewer' })
+  assert.deepEqual(skill.subtask, ['one', 'two'])
+  assert.deepEqual(skill.argumentHint, { ticket: 1 })
+  const registered = await registry.get('structured', { cwd })
+  assert.ok(registered)
+  assert.deepEqual(registered.agent, { name: 'reviewer' })
+  assert.deepEqual(registered.subtask, ['one', 'two'])
+})
+
 test('format compatibility does not reject preferred skills for nonfinite direct reserved fields', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'shared.md', '---\nname: shared\ndescription: Preferred\nagent: !!float .NaN\n---\nPREFERRED_BODY\n')
