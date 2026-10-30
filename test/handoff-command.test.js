@@ -496,6 +496,33 @@ test('revalidates each repeated handoff from the current retained result', async
   await registry.dispose()
 })
 
+test('uses only the newest result when evidence changes between handoffs', async () => {
+  const agent = { id: 'parent-changed-between-handoffs' }
+  const registry = createTaskResultRegistry()
+  registry.recordStart(agent, 'child-1')
+  registry.recordResult(agent, 'child-1', {
+    status: 'incomplete', output: 'old attempt evidence', truncated: false, omittedNonText: false,
+  })
+  const queued = []
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  assert.equal((await command.handler({ agent, rawInput: 'child-1 inspect old' })).kind, 'success')
+  registry.clearAgent(agent)
+  registry.recordStart(agent, 'child-1')
+  registry.recordResult(agent, 'child-1', {
+    status: 'incomplete', output: 'new attempt evidence', truncated: true,
+    omittedNonText: true, stopReason: 'max-tokens',
+  })
+  assert.equal((await command.handler({ agent, rawInput: 'child-1 inspect new' })).kind, 'success')
+  assert.equal(queued.length, 2)
+  assert.match(queued[0][1], /old attempt evidence/u)
+  assert.doesNotMatch(queued[0][1], /new attempt evidence/u)
+  assert.match(queued[1][1], /new attempt evidence/u)
+  assert.doesNotMatch(queued[1][1], /old attempt evidence/u)
+  assert.match(queued[1][1], /output was truncated/u)
+  assert.match(queued[1][1], /Non-text result blocks were omitted/u)
+  await registry.dispose()
+})
+
 test('rejects over-TTL persisted results even before their expiry time', async () => {
   const agent = { id: 'parent-persisted-ttl' }
   for (const status of ['failed', 'incomplete']) {
