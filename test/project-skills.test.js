@@ -3115,6 +3115,23 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
   assert.equal(complex.description, '(opencode-project - Skill) Project skill complex-key')
   assert.equal(complex.metadata, undefined)
   assert.equal(await complexRegistry.get('chosen', { cwd }), undefined)
+  for (const [name, source] of [
+    ['nested-map.md', '---\nname: chosen\ndescription: Custom\nmetadata:\n  ? [a,b]\n  : c\n---\nBody.\n'],
+    ['nested-sequence.md', '---\nname: chosen\ndescription: Custom\nmetadata:\n  - ? [a,b]\n    : c\n---\nBody.\n'],
+  ]) {
+    await writeCompatibilityDocument(cwd, name, source)
+    const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+    const derived = name.replace(/\.md$/u, '')
+    const skill = await registry.get(derived, { cwd })
+    assert.equal(skill.content, 'Body.')
+    assert.equal(skill.description, `(opencode-project - Skill) Project skill ${derived}`)
+    assert.equal(skill.metadata, undefined)
+    assert.equal(await registry.get('chosen', { cwd }), undefined)
+  }
+  await writeCompatibilityDocument(cwd, 'infinity.md', '---\nname: chosen\ndescription: Custom\nmetadata:\n  score: !!float .inf\n---\nBody.\n')
+  const { registry: infinityRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
+  assert.equal(await infinityRegistry.get('chosen', { cwd }), undefined)
+  assert.equal(await infinityRegistry.get('infinity', { cwd }), undefined)
   await writeCompatibilityDocument(cwd, 'good.md', '---\nname: good\ndescription: !!bool TRUE\n---\nRecovered body.\n')
   const { registry: taggedRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
   const tagged = await taggedRegistry.get('good', { cwd })

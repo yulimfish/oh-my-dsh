@@ -54,6 +54,7 @@ const JSON_TAG_RESOLVERS = Object.freeze({
   },
   'tag:yaml.org,2002:float': (value, onError) => {
     if (value === '.nan' || value === '.NaN' || value === '.NAN') return Number.NaN
+    if (/^[+-]?\.(?:inf|Inf|INF)$/u.test(value)) return value.startsWith('-') ? -Infinity : Infinity
     if (!/^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/u.test(value)) {
       onError(`cannot resolve float scalar ${JSON.stringify(value)}`)
       return value
@@ -204,6 +205,18 @@ function parseYamlBoolean(value, field, defaultValue) {
   throw new SkillFormatError(`frontmatter field ${field} must be boolean`)
 }
 
+function hasComplexMappingKey(node, seen = new WeakSet()) {
+  if (!node || typeof node !== 'object' || seen.has(node)) return false
+  seen.add(node)
+  if (node.key && Array.isArray(node.key.items)) return true
+  if (!Array.isArray(node.items)) return false
+  return node.items.some(item => {
+    if (!item || typeof item !== 'object') return false
+    if (item.key && Array.isArray(item.key.items)) return true
+    return hasComplexMappingKey(item.key, seen) || hasComplexMappingKey(item.value, seen) || hasComplexMappingKey(item, seen)
+  })
+}
+
 function assertJsonValue(value, depth = 0) {
   if (depth > 12) throw new SkillFormatError('frontmatter metadata is too deeply nested')
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return
@@ -314,7 +327,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
       ? [
           ...document.errors.filter(error => error?.code !== 'TAG_RESOLVE_FAILED' || !String(error.message).startsWith('Unresolved plain scalar ')),
           ...document.warnings.filter(error => error?.code === 'TAG_RESOLVE_FAILED'),
-          ...((document.contents?.items ?? []).filter(item => item?.key && typeof item.key === 'object' && 'items' in item.key)),
+          ...(hasComplexMappingKey(document.contents) ? [new Error('complex mapping key') ] : []),
         ]
       : document.errors
     if (parseErrors.length > 0 && !(formatCompatibility && pinnedFrontmatter)) {
