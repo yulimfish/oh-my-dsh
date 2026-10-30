@@ -37,6 +37,25 @@ test('queues a bounded explicitly new-task handoff for an exact-Agent failed res
   assert.match(prompt, /This handoff itself started no worker and changed no Goal state/u)
 })
 
+test('enforces the same snapshot contract for read-only registries', async () => {
+  const valid = failed({ status: 'incomplete', output: 'read-only evidence' })
+  const validRegistry = { read: () => valid }
+  const validQueued = []
+  const validCommand = createHandoffCommand(validRegistry, { queueMessage: (...args) => validQueued.push(args) })
+  const accepted = await validCommand.handler({ agent: { id: 'parent-read-only-valid' }, rawInput: 'child-1 inspect' })
+  assert.equal(accepted.kind, 'success')
+  assert.match(validQueued[0][1], /read-only evidence/u)
+
+  const invalid = Object.assign([], valid)
+  const invalidRegistry = { read: () => invalid }
+  const invalidQueued = []
+  const invalidCommand = createHandoffCommand(invalidRegistry, { queueMessage: (...args) => invalidQueued.push(args) })
+  const rejected = await invalidCommand.handler({ agent: { id: 'parent-read-only-array' }, rawInput: 'child-1 inspect' })
+  assert.equal(rejected.kind, 'error')
+  assert.match(rejected.text, /failed or incomplete/u)
+  assert.equal(invalidQueued.length, 0)
+})
+
 test('accepts incomplete results and preserves truncation and omitted-block caveats', async () => {
   const { agent, queued, command } = fixture(failed({ status: 'incomplete', output: '', truncated: true, omittedNonText: true, stopReason: 'max-tokens' }))
   const response = await command.handler({ agent, rawInput: 'child-1' })
