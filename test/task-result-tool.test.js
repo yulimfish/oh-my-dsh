@@ -137,6 +137,8 @@ test('explicit persistence restores a terminal snapshot for a same-session Agent
 test('rejects cross-parent, empty-child, and running persisted snapshots', async () => {
   for (const difference of [
     { parentId: 'other-parent' },
+    { parentId: '' },
+    { parentId: 'x'.repeat(257) },
     { childId: '' },
     { status: 'running' },
   ]) {
