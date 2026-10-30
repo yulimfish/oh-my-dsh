@@ -2281,7 +2281,7 @@ test('format compatibility preserves bounded scanning and incomplete snapshots',
       await Promise.all(Array.from({ length: count }, (_, index) => {
         const file = path.join(root, `skill-${index}.md`)
         return mode === 'entries'
-          ? writeFile(file, '---\nname: [invalid\n---\n', 'utf8')
+          ? writeFile(file, '---\nname: [invalid\n', 'utf8')
           : writeSkill(file, { name: `skill-${index}`, content: mode === 'bytes' ? 'x'.repeat(200 * 1024) : 'body' })
       }))
       const { fs, calls } = makeFileSystem()
@@ -3009,7 +3009,7 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
     ['bad-name.md', '---\nname: invalid/name\n---\nPrivate body.'],
     ['blank-description.md', '---\ndescription: "   "\n---\nPrivate body.'],
     ['null-description.md', '---\ndescription: true\n---\nPrivate body.'],
-    ['malformed.md', '---\nname: [invalid\n---\nPrivate body.'],
+
     ['duplicate.md', '---\nname: first\nname: second\n---\nPrivate body.'],
     ['control.md', '---\nname: "bad\\u202evalue"\n---\nPrivate body.'],
     ['Bad Name.md', '---\nname: null\n---\nPrivate body.'],
@@ -3019,6 +3019,14 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
   const { fs } = makeFileSystem()
   const { registry } = compatibilityRegistry(t, fs)
   assert.deepEqual((await registry.snapshot({ cwd })).skills, [])
+  await writeCompatibilityDocument(cwd, 'broken.md', '---\nname: [invalid\n---\nRecovered body.\n')
+  const { registry: recoveredRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const recovered = await recoveredRegistry.get('broken', { cwd })
+  assert.equal(recovered.content, 'Recovered body.')
+  assert.equal(recovered.description, '(opencode-project - Skill) Project skill broken')
+  const strict = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills'] })
+  assert.equal(await strict.registry.get('broken', { cwd }), undefined)
 })
 
 test('format compatibility gives canonical SKILL.md priority over named files including invalid and symlink primaries', async t => {

@@ -265,10 +265,17 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
     } catch {
       throw new SkillFormatError('skill YAML frontmatter is invalid')
     }
-    if (document.errors.length > 0) throw new SkillFormatError('skill YAML frontmatter is invalid')
+    const duplicateKey = document.errors.some(error => error?.code === 'DUPLICATE_KEY')
+    if (duplicateKey || (document.errors.length > 0 && !formatCompatibility)) {
+      throw new SkillFormatError('skill YAML frontmatter is invalid')
+    }
     try {
-      frontmatter = document.toJS({ maxAliasCount: 0 })
-      if (formatCompatibility && (document.contents === null || frontmatter === null || typeof frontmatter !== 'object' || Array.isArray(frontmatter))) frontmatter = {}
+      if (document.errors.length > 0 && formatCompatibility && pinnedFrontmatter) {
+        // Pinned OpenCode discards malformed frontmatter and retains the body.
+      } else {
+        frontmatter = document.toJS({ maxAliasCount: 0 })
+        if (formatCompatibility && (document.contents === null || frontmatter === null || typeof frontmatter !== 'object' || Array.isArray(frontmatter))) frontmatter = {}
+      }
     } catch {
       throw new SkillFormatError('skill YAML frontmatter cannot be represented safely')
     }
