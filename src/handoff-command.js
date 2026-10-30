@@ -21,7 +21,9 @@ function clean(value, max) {
 }
 
 function cleanMetadata(value, max) {
-  return clean(value, max)
+  if (typeof value !== 'string') return ''
+  return value.replace(INVISIBLE_ID, ' ')
+    .replace(CONTROL_OR_BIDI_GLOBAL, ' ').replace(/\s+/gu, ' ').trim().slice(0, max)
     .replace(/--- BEGIN CHILD EVIDENCE ---/gu, '[child BEGIN CHILD EVIDENCE]')
     .replace(/--- END CHILD EVIDENCE ---/gu, '[child END CHILD EVIDENCE]')
 }
