@@ -1204,9 +1204,9 @@ function settlementSource(childId, summary) {
 }
 
 function deliverSettlementMessage(parent, message) {
-  // A running parent can admit the result at its next step without joining the
-  // wake-up queue. An idle parent still needs followup to start that step.
-  if (parent.status === 'running' && typeof parent.inject === 'function') parent.inject(message)
+  // A running parent may already have claimed its final pre-step batch. Steer
+  // so the result still wakes the driver; inject could remain parked in nextStep.
+  if (parent.status === 'running' && typeof parent.steer === 'function') parent.steer(message)
   else parent.followup(message)
 }
 

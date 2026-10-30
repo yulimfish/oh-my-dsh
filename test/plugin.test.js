@@ -1646,26 +1646,29 @@ test('mounts specialist controls and caps the untrusted worker body', async () =
   assert.deepEqual(fixture.disposals, ['child-1'])
 })
 
-test('injects one settled result into a running parent without queueing a wake-up', async () => {
+test('steers one settled result into a running parent without parking next-step context', async () => {
   const fixture = makeContext({ outputText: 'Running-parent evidence.' })
   apply(fixture.ctx, baseConfig)
+  const steered = []
   const injected = []
   const parent = {
     id: 'running-parent',
     status: 'running',
+    steer: message => steered.push(message),
     inject: message => injected.push(message),
     followup: message => fixture.followups.push(message),
   }
   await fixture.tools.get('dsh_omo_task').execute(
-    { role: 'explore', task: 'Settle while the parent is busy' },
+    { role: 'explore', task: 'Settle after the final pre-step batch was claimed' },
     { agent: parent, signal: new AbortController().signal },
   )
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(injected.length, 1)
-  assert.equal(injected[0].source.kind, 'agent-message')
-  assert.match(injected[0].content[0].text, /specialist result/)
-  assert.equal(injected[0].content[1].text, 'Running-parent evidence.')
-  assert.deepEqual(fixture.followups, [], 'a busy parent must not receive a queued wake-up')
+  assert.equal(steered.length, 1, 'a running parent must receive waking steering')
+  assert.equal(steered[0].source.kind, 'agent-message')
+  assert.match(steered[0].content[0].text, /specialist result/)
+  assert.equal(steered[0].content[1].text, 'Running-parent evidence.')
+  assert.deepEqual(injected, [], 'non-waking context could remain parked after the final pre-step')
+  assert.deepEqual(fixture.followups, [], 'a busy parent must not receive a next-turn follow-up')
 })
 
 test('mirrors accepted children into native Jobs without a second settlement delivery', async () => {
