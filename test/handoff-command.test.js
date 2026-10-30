@@ -1110,6 +1110,23 @@ test('rejects an over-budget output from the initial async result read', async (
   assert.equal(queued.length, 0)
 })
 
+test('rejects failed empty results with evidence caveats from the initial async read', async () => {
+  for (const caveats of [{ truncated: true }, { omittedNonText: true }, { truncated: true, omittedNonText: true }]) {
+    const snapshot = failed({ output: '', ...caveats })
+    let revalidated = false
+    const queued = []
+    const command = createHandoffCommand({
+      readAsync: async () => snapshot,
+      read() { revalidated = true; return snapshot },
+    }, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent: { id: 'parent-failed-empty-caveats-initial' }, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', JSON.stringify(caveats))
+    assert.match(response.text, /failed or incomplete/u)
+    assert.equal(revalidated, false, 'contradictory failed caveats never reach synchronous revalidation')
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('rejects array snapshots from the initial async result read', async () => {
   const snapshot = Object.assign([], failed({ status: 'incomplete', output: 'same evidence' }))
   let revalidated = false
