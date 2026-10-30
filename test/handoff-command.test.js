@@ -127,6 +127,37 @@ test('does not trust an unversioned async snapshot after same-child replacement'
   await registry.dispose()
 })
 
+test('reports post-delivery child replacement without claiming a stable handoff', async () => {
+  const agent = { id: 'parent-delivery-generation' }
+  const registry = createTaskResultRegistry()
+  registry.recordStart(agent, 'child-1')
+  registry.recordResult(agent, 'child-1', {
+    status: 'incomplete', output: 'attempt evidence', truncated: false, omittedNonText: false,
+  })
+  const queued = []
+  let release
+  const command = createHandoffCommand({
+    readAsync: registry.readAsync,
+    read: registry.read,
+  }, {
+    async queueMessage(...args) {
+      queued.push(args)
+      await new Promise(resolve => { release = resolve })
+      registry.clearAgent(agent)
+      registry.recordStart(agent, 'child-1')
+    },
+  })
+  const pending = command.handler({ agent, rawInput: 'child-1 retry' })
+  await new Promise(resolve => setImmediate(resolve))
+  release()
+  const response = await pending
+  assert.equal(response.kind, 'success', 'the message was already accepted; later replacement is not retroactively denied')
+  assert.match(response.text, /no child was resumed or started/u)
+  assert.equal(queued.length, 1)
+  assert.equal(registry.read(agent, 'child-1').status, 'running')
+  await registry.dispose()
+})
+
 test('rejects running, completed, unknown, cross-session, malformed, and service-failure results without queueing', async () => {
   for (const snapshot of [
     failed({ status: 'running' }),
