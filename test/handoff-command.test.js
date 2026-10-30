@@ -290,6 +290,23 @@ test('does not queue handoff after the exact parent is replaced during async res
   assert.equal(queued.length, 0)
 })
 
+test('does not queue handoff when the parent changes during synchronous revalidation', async () => {
+  const agent = { id: 'parent-revalidation-replaced' }
+  let current = true
+  const queued = []
+  const command = createHandoffCommand({
+    readAsync: async () => failed(),
+    read() {
+      current = false
+      return failed()
+    },
+  }, { queueMessage: (...args) => queued.push(args), isParentCurrent: () => current })
+  const response = await command.handler({ agent, rawInput: 'child-1 retry' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /parent Agent changed or was disposed/u)
+  assert.equal(queued.length, 0)
+})
+
 test('queues only after the exact live parent passes the post-read liveness check', async () => {
   const agent = { id: 'parent-live' }
   const queued = []
@@ -300,7 +317,7 @@ test('queues only after the exact live parent passes the post-read liveness chec
   })
   const response = await command.handler({ agent, rawInput: 'child-1' })
   assert.equal(response.kind, 'success')
-  assert.deepEqual(checks, [agent, agent], 'parent identity is checked both before and after asynchronous queue delivery')
+  assert.deepEqual(checks, [agent, agent, agent], 'parent identity is checked after reading, before enqueue, and after delivery')
   assert.equal(queued.length, 1)
   assert.strictEqual(queued[0][0], agent)
 })
