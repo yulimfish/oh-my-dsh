@@ -160,6 +160,28 @@ test('skipping an event window never presents an older list as current', () => {
   assert.match(projection.render(), /new list/u)
 })
 
+test('retains the current plan across unrelated Tool traffic below correlation saturation', () => {
+  const events = [
+    todoEvent(1, 'current', [{ content: 'current plan survives unrelated work', status: 'in_progress' }]),
+    resultEvent(2, 'current'),
+  ]
+  for (let index = 0; index < 32; index += 1) {
+    events.push({
+      seq: events.length + 1,
+      type: 'tool/call',
+      data: { callId: `read-${index}`, name: 'read', arguments: '{"file_path":"README.md"}' },
+    })
+    events.push(resultEvent(events.length + 1, `read-${index}`))
+  }
+  const projection = createProgressProjection(sessionWith(events))
+  assert.match(projection.render(), /current plan survives unrelated work/u)
+  events.push(todoEvent(events.length + 1, 'next', [{ content: 'next current plan', status: 'pending' }]))
+  events.push(resultEvent(events.length + 1, 'next'))
+  const next = projection.render()
+  assert.match(next, /next current plan/u)
+  assert.doesNotMatch(next, /current plan survives unrelated work/u)
+})
+
 test('recovers a recent successful todo inside the initial bounded window', () => {
   const events = []
   for (let seq = 1; seq <= 600; seq += 1) events.push({ seq, type: 'step/end', data: {} })
