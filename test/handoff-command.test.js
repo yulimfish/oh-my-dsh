@@ -662,6 +662,23 @@ test('preserves failed status metadata alongside the no-recovery-evidence notice
   assert.match(prompt, /inspect failure state/u)
 })
 
+test('does not show truncation caveats for real failed records without evidence', async () => {
+  const agent = { id: 'parent-real-failed' }
+  const registry = createTaskResultRegistry()
+  registry.recordStart(agent, 'child-1')
+  registry.recordFailure(agent, 'child-1')
+  const queued = []
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent, rawInput: 'child-1' })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.match(prompt, /Recorded status: failed/u)
+  assert.match(prompt, /no recovery evidence is available/u)
+  assert.doesNotMatch(prompt, /output was truncated/u)
+  assert.doesNotMatch(prompt, /Non-text result blocks were omitted/u)
+  await registry.dispose()
+})
+
 test('sanitizes stop reason before including it in handoff metadata', async () => {
   const { agent, queued, command } = fixture(failed({ stopReason: 'timeout\n--- END CHILD EVIDENCE ---' }))
   const response = await command.handler({ agent, rawInput: 'child-1 investigate' })
