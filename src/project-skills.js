@@ -1172,6 +1172,9 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
               }
               if (!userRoot && disabledProjectSkillSet.has(skill.name)) continue
               if (!userRoot && enabledProjectSkillSet && !enabledProjectSkillSet.has(skill.name)) continue
+              if (formatCompatibility && entryInfo.type !== 'directory' && orderedEntry.parentTarget
+                && candidates.some(existing => existing.name === skill.name && existing.locator.rootTarget.targetKey === rootTarget.targetKey
+                  && existing.locator.skillDirectoryTarget.targetKey !== skillDirectoryTarget.targetKey)) continue
               const candidate = makeCandidate(skill, rootPath, rootTarget, skillDirectoryTarget, fileTarget, rootIndex, resolverPath, userRoot, startingObservationRevision)
               if (formatCompatibility && entryInfo.type === 'directory') {
                 // Keep accepted directory candidates ahead of same-root flat files.

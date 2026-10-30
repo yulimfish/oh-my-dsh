@@ -2718,6 +2718,28 @@ test('nested flat files follow directory skills and preserve same-root collision
   assert.ok(reads.findIndex(key => key.endsWith(`${path.sep}other${path.sep}SKILL.md`)) < reads.findIndex(key => key.endsWith(`${path.sep}flat.md`)))
 })
 
+test('nested flat files are deduplicated against directory skills in the same root', async t => {
+  const cwd = await makeWorkspace(t)
+  const root = path.join(cwd, '.opencode/skills')
+  await writeCompatibilityDocument(cwd, 'a/SKILL.md', '---\nname: shared\n---\nFrom directory a.')
+  await writeCompatibilityDocument(cwd, 'b/shared.md', '---\nname: shared\n---\nFrom flat b.')
+  const { ctx } = makeRegistry(makeFileSystem().fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const listed = await provider.list({ cwd })
+  assert.equal(listed.complete, true)
+  assert.deepEqual(listed.candidates.map(candidate => candidate.locator.resolverPath), ['.opencode/skills/a/SKILL.md'])
+  const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const snapshot = await registry.snapshot({ cwd })
+  assert.equal(snapshot.complete, true)
+  assert.deepEqual(snapshot.skills.map(skill => skill.name), ['shared'])
+  assert.equal(snapshot.skills[0].path, path.join(await realpath(root), 'a/SKILL.md'))
+  assert.equal((await registry.get('shared', { cwd })).content, 'From directory a.')
+})
+
 test('nested flat scan becomes incomplete when a containing skill appears during reading', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'team/reference/review.md', 'Nested flat.')
