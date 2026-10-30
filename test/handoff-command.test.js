@@ -1543,6 +1543,19 @@ test('fails closed when the output accessor throws without leaking errors', asyn
   assert.equal(queued.length, 0)
 })
 
+test('fails closed when caveat accessors throw without leaking errors', async () => {
+  for (const field of ['truncated', 'omittedNonText']) {
+    const snapshot = failed({ status: 'incomplete', output: 'ordinary evidence' })
+    Object.defineProperty(snapshot, field, { get() { throw new Error(`private ${field} getter failure`) } })
+    const { agent, queued, command } = fixture(snapshot)
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', field)
+    assert.match(response.text, /failed or incomplete/u)
+    assert.equal(response.text.includes(`private ${field} getter failure`), false)
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('bounds the complete handoff prompt and marks additional evidence truncation', async () => {
   const { agent, queued, command } = fixture(failed({ output: 'x'.repeat(8_192) }))
   const response = await command.handler({ agent, rawInput: 'child-1' })
