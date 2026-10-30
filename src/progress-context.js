@@ -102,6 +102,7 @@ export function createProgressProjection(session) {
       }
       if (state.correlationSaturated) {
         state.current = undefined
+        state.currentCallId = undefined
         state.pending.clear()
         state.completedCallIds.clear()
         state.ambiguousCallIds.clear()
@@ -165,6 +166,14 @@ export function createProgressProjection(session) {
         }
       }
       state.offset = session.seq
+      if (state.correlationSaturated) {
+        state.current = undefined
+        state.currentCallId = undefined
+        state.pending.clear()
+        state.completedCallIds.clear()
+        state.ambiguousCallIds.clear()
+        return ''
+      }
     } catch {
       state = freshProjection(session, Number.isSafeInteger(session?.seq) ? session.seq : 0)
       return ''

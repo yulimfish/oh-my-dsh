@@ -291,6 +291,29 @@ test('retains the current plan when only its completed tombstone is evicted', ()
   assert.doesNotMatch(text, /still current plan/u)
 })
 
+test('fails closed in the same render that saturates correlation tombstones', () => {
+  const events = []
+  for (let index = 0; index < 256; index += 1) {
+    const id = `completed-${index}`
+    events.push(todoEvent(events.length + 1, id, [{ content: `plan ${index}`, status: 'in_progress' }]))
+    events.push(resultEvent(events.length + 1, id))
+  }
+  const projection = createProgressProjection(sessionWith(events))
+  assert.match(projection.render(), /plan 255/u)
+
+  for (let index = 0; index < 64; index += 1) {
+    const id = `ambiguous-${index}`
+    events.push(todoEvent(events.length + 1, id, [{ content: 'ambiguous', status: 'pending' }]))
+    events.push(todoEvent(events.length + 1, id, [{ content: 'duplicate', status: 'pending' }]))
+  }
+  assert.match(projection.render(), /plan 255/u, 'the tombstone budget is exactly full but not yet saturated')
+
+  events.push(todoEvent(events.length + 1, 'ambiguous-overflow', [{ content: 'ambiguous', status: 'pending' }]))
+  events.push(todoEvent(events.length + 1, 'ambiguous-overflow', [{ content: 'duplicate', status: 'pending' }]))
+  assert.equal(projection.render(), '', 'saturation must not leak the previous plan for one extra render')
+  assert.equal(projection.render(), '')
+})
+
 test('keeps the newest successful plan when a later call fails before an older result succeeds', () => {
   const projection = createProgressProjection(sessionWith([
     todoEvent(1, 'old-call', [{ content: 'old successful plan', status: 'in_progress' }]),
