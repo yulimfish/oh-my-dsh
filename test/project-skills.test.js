@@ -2841,6 +2841,7 @@ test('format compatibility derives flat and directory names for absent or falsy 
     ['description-only.md', '---\ndescription: Explicit description\n---\nDescription body.', 'description-only'],
     ['falsy-name.md', '---\nname: null\ndescription: null\n---\nFalsy body.', 'falsy-name'],
     ['falsy-values.md', '---\nname: false\ndescription: 0\n---\nFalsy body.', 'falsy-values'],
+    ['fallback.md', '---\nname: !!int "+0"\ndescription: Demo\n---\nFallback body.', 'fallback'],
     ['empty-name.md', '---\nname: ""\ndescription: ""\n---\nFalsy body.', 'empty-name'],
   ]
   for (const [relative, source] of documents) await writeCompatibilityDocument(cwd, relative, source)
@@ -2852,7 +2853,7 @@ test('format compatibility derives flat and directory names for absent or falsy 
   for (const [relative, , name] of documents) {
     const skill = await registry.get(name, { cwd })
     assert.ok(skill, relative)
-    assert.equal(skill.description, `(opencode-project - Skill) ${name === 'description-only' ? 'Explicit description' : name === 'scalar-demo' ? '0123' : `Project skill ${name}`}`)
+    assert.equal(skill.description, `(opencode-project - Skill) ${name === 'description-only' ? 'Explicit description' : name === 'scalar-demo' ? '0123' : name === 'fallback' ? 'Demo' : `Project skill ${name}`}`)
     assert.ok(skill.content.includes('body.'))
   }
   assert.equal((await registry.get('indented-guide', { cwd })).content, 'body.\r\n\tindented line')
@@ -3054,6 +3055,11 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
   const duplicate = await duplicateRegistry.get('duplicate', { cwd })
   assert.equal(duplicate.content, 'Recovered body.')
   assert.equal(duplicate.description, '(opencode-project - Skill) Project skill duplicate')
+  await writeCompatibilityDocument(cwd, 'good.md', '---\nname: good\ndescription: !!bool TRUE\n---\nRecovered body.\n')
+  const { registry: taggedRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const tagged = await taggedRegistry.get('good', { cwd })
+  assert.equal(tagged.content, 'Recovered body.')
+  assert.equal(tagged.description, '(opencode-project - Skill) Project skill good')
   const strict = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills'] })
   assert.equal(await strict.registry.get('broken', { cwd }), undefined)

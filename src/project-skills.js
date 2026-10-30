@@ -24,6 +24,43 @@ const FRONTMATTER_FIELDS = new Set([
   'user-invocable',
 ])
 
+const JSON_TAG_RESOLVERS = Object.freeze({
+  'tag:yaml.org,2002:str': value => value,
+  'tag:yaml.org,2002:null': (value, onError) => {
+    if (value === 'null') return null
+    onError(`cannot resolve null scalar ${JSON.stringify(value)}`)
+    return value
+  },
+  'tag:yaml.org,2002:bool': (value, onError) => {
+    if (value === 'true') return true
+    if (value === 'false') return false
+    onError(`cannot resolve boolean scalar ${JSON.stringify(value)}`)
+    return value
+  },
+  'tag:yaml.org,2002:int': (value, onError) => {
+    if (!/^[+-]?(?:0|[1-9][0-9]*|0x[0-9a-fA-F]+|0o[0-7]+|0b[01]+)$/u.test(value)) {
+      onError(`cannot resolve integer scalar ${JSON.stringify(value)}`)
+      return value
+    }
+    const normalized = value.replaceAll('_', '')
+    const negative = normalized.startsWith('-')
+    const unsigned = normalized.replace(/^[+-]/u, '')
+    if (unsigned === '0') return 0
+    const sign = negative ? -1 : 1
+    if (unsigned.startsWith('0x')) return sign * Number.parseInt(unsigned.slice(2), 16)
+    if (unsigned.startsWith('0o')) return sign * Number.parseInt(unsigned.slice(2), 8)
+    if (unsigned.startsWith('0b')) return sign * Number.parseInt(unsigned.slice(2), 2)
+    return sign * Number.parseInt(unsigned, 10)
+  },
+  'tag:yaml.org,2002:float': (value, onError) => {
+    if (!/^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/u.test(value)) {
+      onError(`cannot resolve float scalar ${JSON.stringify(value)}`)
+      return value
+    }
+    return Number.parseFloat(value)
+  },
+})
+
 class SkillFormatError extends Error {
   constructor(message, bytesRead = 0) {
     super(message)
@@ -265,12 +302,18 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
       document = parseDocument(pinnedFrontmatter ? pinnedFrontmatter[1] : lines.slice(1, end).join('\n'), {
         schema: formatCompatibility ? 'json' : 'core',
         uniqueKeys: true,
+        ...(formatCompatibility ? {
+          customTags: tags => tags.concat(Object.entries(JSON_TAG_RESOLVERS).map(([tag, resolve]) => ({ tag, default: false, resolve }))),
+        } : {}),
       })
     } catch {
       throw new SkillFormatError('skill YAML frontmatter is invalid')
     }
     const parseErrors = formatCompatibility
-      ? document.errors.filter(error => error?.code !== 'TAG_RESOLVE_FAILED' || !String(error.message).startsWith('Unresolved plain scalar '))
+      ? [
+          ...document.errors.filter(error => error?.code !== 'TAG_RESOLVE_FAILED' || !String(error.message).startsWith('Unresolved plain scalar ')),
+          ...document.warnings.filter(error => error?.code === 'TAG_RESOLVE_FAILED'),
+        ]
       : document.errors
     if (parseErrors.length > 0 && !(formatCompatibility && pinnedFrontmatter)) {
       throw new SkillFormatError('skill YAML frontmatter is invalid')
