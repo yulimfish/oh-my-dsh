@@ -1,5 +1,6 @@
 import { isSkillName } from '@deepseek-ai/dsh-skill'
 import { parseDocument } from 'yaml'
+import { readdir } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, normalize, parse as parsePath, posix, relative, win32 } from 'node:path'
 
 export const PROJECT_SKILL_PROVIDER = 'dsh-omo-project-skills'
@@ -622,8 +623,9 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     } catch (error) {
       if (signal?.aborted || error?.code !== 'ELOOP') throw error
       try {
-        await fs.stat(await fs.resolve(path, { cwd, signal }), signal)
-        return false
+        const target = await fs.resolve(path, { cwd, signal })
+        const info = await fs.stat(target, signal)
+        return info === undefined
       } catch (canonicalError) {
         if (signal?.aborted) throw canonicalError
         return canonicalError?.code === 'ELOOP' ? true : false
@@ -1176,13 +1178,21 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                   allChildren = await fs.listDir(skillDirectoryTarget, signal)
                 } catch (error) {
                   if (signal?.aborted || !formatCompatibility || error?.code !== 'ELOOP') throw error
-                  if (!danglingCanonical) {
-                    complete = false
-                    continue
-                  } else {
-                    const directoryName = relativeDirectoryPath.slice(relativeDirectoryPath.lastIndexOf('/') + 1)
-                    const namedTarget = await fs.resolve(`${rootPath}/${relativeDirectoryPath}/${directoryName}.md`, { cwd, signal })
-                    allChildren = [{ name: `${directoryName}.md`, target: namedTarget, type: 'file' }]
+                  const directoryName = relativeDirectoryPath.slice(relativeDirectoryPath.lastIndexOf('/') + 1)
+                  const entries = await readdir(fs.processPath(skillDirectoryTarget), { withFileTypes: true })
+                  allChildren = []
+                  for (const entry of entries) {
+                    try {
+                      allChildren.push({
+                        name: entry.name,
+                        type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other',
+                        target: await fs.resolve(`${rootPath}/${relativeDirectoryPath}/${entry.name}`, { cwd, signal }),
+                      })
+                    } catch (error) {
+                      if (signal?.aborted || error?.code !== 'ELOOP') throw error
+                      if (entry.name === 'SKILL.md') danglingCanonical = true
+                      else if (entry.name !== `${directoryName}.md`) complete = false
+                    }
                   }
                 }
                 const children = limitEntries(allChildren)
@@ -1190,15 +1200,17 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 let skillFileInfo
                 if (skillFile && formatCompatibility) {
                   if (danglingCanonical) skillFile = undefined
-                  else if (!fs.contains(rootTarget, skillFile.target)) continue
-                  try {
-                    skillFileInfo = await fs.stat(skillFile.target, signal)
-                  } catch (error) {
-                    if (signal?.aborted || error?.code !== 'ELOOP') throw error
-                  }
-                  if (!skillFileInfo) {
-                    danglingCanonical = true
-                    skillFile = undefined
+                  else {
+                    if (!fs.contains(rootTarget, skillFile.target)) continue
+                    try {
+                      skillFileInfo = await fs.stat(skillFile.target, signal)
+                    } catch (error) {
+                      if (signal?.aborted || error?.code !== 'ELOOP') throw error
+                    }
+                    if (!skillFileInfo) {
+                      danglingCanonical = true
+                      skillFile = undefined
+                    }
                   }
                 }
                 const directoryName = relativeDirectoryPath.slice(relativeDirectoryPath.lastIndexOf('/') + 1)
@@ -1213,7 +1225,11 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 }
                 if (skillFile && formatCompatibility && !skillFileInfo) {
                   if (!fs.contains(rootTarget, skillFile.target)) continue
-                  skillFileInfo = await fs.stat(skillFile.target, signal)
+                  try {
+                    skillFileInfo = await fs.stat(skillFile.target, signal)
+                  } catch (error) {
+                    if (signal?.aborted || error?.code !== 'ELOOP') throw error
+                  }
                   if (!skillFileInfo) skillFile = undefined
                 }
                 if (!skillFile) {
@@ -1248,6 +1264,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                         }
                       } catch (error) {
                         if (signal?.aborted) throw error
+                        if (error?.code === 'ELOOP' && child.name === `${directoryName}.md`) continue
                         complete = false
                         warn(ctx, 'dsh-omo could not classify a nested project skill directory')
                       }

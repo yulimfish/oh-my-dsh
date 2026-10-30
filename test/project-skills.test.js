@@ -84,6 +84,9 @@ function makeFileSystem(options = {}) {
       calls.push('contains')
       return isWithin(parent.targetKey, child.targetKey)
     },
+    processPath(target) {
+      return target.targetKey
+    },
     async lstat(filePath, options = {}, signal) {
       calls.push('lstat')
       if (signal?.aborted) throw signal.reason ?? new Error('lstat aborted')
@@ -3785,16 +3788,8 @@ test('format compatibility does not treat a sibling loop as canonical absence', 
       : '---\nname: "   "\n---\nINVALID_CANONICAL\n')
     await symlink('unrelated.md', path.join(cwd, '.opencode/skills/review/unrelated.md'))
     const { fs } = makeFileSystem()
-    const originalListDir = fs.listDir
-    const canonical = await realpath(path.join(cwd, '.opencode/skills/review/SKILL.md'))
-    fs.listDir = async (target, signal) => {
-      try {
-        return await originalListDir(target, signal)
-      } catch (error) {
-        if (error?.code !== 'ELOOP') throw error
-        return [{ name: 'SKILL.md', target: { targetKey: canonical, displayPath: canonical }, type: 'file' }]
-      }
-    }
+    // Keep the real sibling loop so production recovery must attribute it separately.
+    fs.listDir = fs.listDir.bind(fs)
     const { ctx } = makeRegistry(fs)
     const lifetime = new AbortController()
     t.after(() => lifetime.abort())
@@ -3803,7 +3798,7 @@ test('format compatibility does not treat a sibling loop as canonical absence', 
     })
     const listed = await provider.list({ cwd })
     if (canonicalValid) {
-      assert.equal(listed.complete, true, JSON.stringify(listed.candidates.map(candidate => candidate.locator.resolverPath)))
+      assert.equal(listed.complete, false, JSON.stringify(listed.candidates.map(candidate => candidate.locator.resolverPath)))
       assert.equal(listed.candidates.some(candidate => candidate.locator.resolverPath.endsWith('/SKILL.md')), true)
       assert.equal(listed.candidates.some(candidate => candidate.locator.resolverPath.endsWith('/review.md')), false)
     } else {
@@ -3844,6 +3839,45 @@ test('format compatibility falls through dangling directory-named files to neste
   assert.equal(snapshot.complete, true)
   assert.deepEqual(snapshot.skills.map(skill => skill.name), ['child'])
   assert.equal((await registry.get('child', { cwd })).content, 'Nested child after dangling named fallback.')
+})
+
+test('format compatibility treats self-looping named primaries as absent and discovers nested skills', async t => {
+  for (const loops of [['container.md'], ['SKILL.md', 'container.md']]) {
+    await t.test(loops.join(' and '), async t => {
+      const cwd = await makeWorkspace(t)
+      await writeCompatibilityDocument(cwd, 'container/child/SKILL.md', 'Nested child after inaccessible named fallback.')
+      for (const name of loops) await symlink(name, path.join(cwd, '.opencode/skills/container', name))
+      const { fs } = makeFileSystem()
+      if (loops.length === 2) {
+        // Also exercise named stat/classification when enumeration itself can return a looping entry.
+        fs.listDir = async target => {
+          const entries = await readdir(target.targetKey, { withFileTypes: true })
+          return entries.map(entry => ({
+            name: entry.name,
+            type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other',
+            target: { targetKey: path.join(target.targetKey, entry.name), displayPath: path.join(target.targetKey, entry.name) },
+          }))
+        }
+      }
+      const { ctx } = makeRegistry(fs)
+      const warnings = []
+      ctx.logger = { warn(message, error) { warnings.push(`${message} ${error?.stack ?? error ?? ''}`) } }
+      const lifetime = new AbortController()
+      t.after(() => lifetime.abort())
+      const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+        projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+      })
+      const listed = await provider.list({ cwd })
+      assert.equal(listed.complete, true, JSON.stringify(warnings))
+      assert.deepEqual(listed.candidates.map(candidate => candidate.name), ['child'])
+      assert.equal((await provider.get(listed.candidates[0], { cwd })).content, 'Nested child after inaccessible named fallback.')
+      const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+      const nativeList = await registry.list({ cwd })
+      assert.deepEqual(nativeList.map(skill => skill.name), ['child'])
+      assert.equal((await registry.get('child', { cwd })).content, 'Nested child after inaccessible named fallback.')
+      assert.equal((await registry.snapshot({ cwd })).complete, true)
+    })
+  }
 })
 
 test('format compatibility suppresses nested discovery for invalid and escaping directory-named primaries', async t => {
