@@ -1062,6 +1062,24 @@ test('rejects invalid status values from the initial async result read', async (
   }
 })
 
+test('rejects missing required fields from the initial async result read', async () => {
+  for (const field of ['childId', 'status', 'output']) {
+    const snapshot = failed({ status: 'incomplete', output: 'same evidence' })
+    delete snapshot[field]
+    let revalidated = false
+    const queued = []
+    const command = createHandoffCommand({
+      readAsync: async () => snapshot,
+      read() { revalidated = true; return snapshot },
+    }, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent: { id: 'parent-missing-field-initial' }, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', field)
+    assert.match(response.text, /failed or incomplete/u)
+    assert.equal(revalidated, false, 'missing required fields never reach synchronous revalidation')
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('rejects array snapshots from the initial async result read', async () => {
   const snapshot = Object.assign([], failed({ status: 'incomplete', output: 'same evidence' }))
   let revalidated = false
