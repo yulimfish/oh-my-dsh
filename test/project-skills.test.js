@@ -290,6 +290,29 @@ test('user Agents roots retain existing ranks and follow OpenCode and Claude in 
   assert.equal((await registry.get('agents-shared', {})).content, 'first agents root')
 })
 
+for (const projectRoot of ['.claude/skills', '.agents/skills']) {
+  test(`format compatibility ranks OpenCode user skills ahead of project skills: ${projectRoot}`, async t => {
+    const cwd = await makeWorkspace(t)
+    const userRoot = path.join(await makeWorkspace(t), 'skills')
+    await writeSkill(path.join(cwd, projectRoot, 'project/SKILL.md'), { name: 'shared', content: 'PROJECT_SKILL' })
+    await writeSkill(path.join(userRoot, 'global/SKILL.md'), { name: 'shared', content: 'OPENCODE_GLOBAL' })
+    const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+    const registration = registerProjectSkillProvider(ctx, {
+      projectSkillDirs: [projectRoot], userOpenCodeSkillRoots: [userRoot], formatCompatibility: true,
+    })
+    t.after(() => registration.dispose())
+    assert.equal((await registry.get('shared', { cwd })).content, 'OPENCODE_GLOBAL')
+    const lifetime = new AbortController()
+    t.after(() => lifetime.abort())
+    const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+      projectSkillDirs: [projectRoot], userOpenCodeSkillRoots: [userRoot], formatCompatibility: true,
+    })
+    const cached = (await provider.list({ cwd })).candidates.find(candidate => candidate.name === 'shared')
+    assert.equal(cached.source, 'user-opencode')
+    assert.equal((await provider.get(cached, { cwd })).content, 'OPENCODE_GLOBAL')
+  })
+}
+
 test('user Agents roots validate paths and reject forged locators and escaping or stale roots', async t => {
   const root = path.join(await makeWorkspace(t), 'skills')
   const other = path.join(await makeWorkspace(t), 'skills')
@@ -2050,6 +2073,23 @@ test('format compatibility top-level model sanitizer replaces nested model metad
     const skill = await provider.get(candidate, { cwd })
     assert.equal(skill.metadata.model, expected, model)
     assert.equal((await registry.get('chosen', { cwd })).metadata.model, expected, model)
+  }
+})
+
+test('format compatibility drops model metadata for Claude and Agents scopes', async t => {
+  for (const projectRoot of ['.claude/skills', '.agents/skills']) {
+    const cwd = await makeWorkspace(t)
+    await writeSkill(path.join(cwd, projectRoot, 'demo/SKILL.md'), { name: 'demo', description: 'Scoped model', frontmatter: 'metadata:\n  model: nested/model\nmodel: demo/model\n', content: 'Body.' })
+    const { ctx } = makeRegistry(makeFileSystem().fs)
+    const lifetime = new AbortController()
+    t.after(() => lifetime.abort())
+    const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+      projectSkillDirs: [projectRoot], formatCompatibility: true,
+    })
+    const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'demo')
+    assert.ok(candidate, projectRoot)
+    assert.equal(candidate.metadata?.model, undefined, projectRoot)
+    assert.equal((await provider.get(candidate, { cwd })).metadata?.model, undefined, projectRoot)
   }
 })
 
