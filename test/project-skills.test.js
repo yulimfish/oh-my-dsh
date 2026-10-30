@@ -3291,9 +3291,15 @@ test('format compatibility candidate matching distinguishes nullish, nonfinite, 
     const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'chosen')
     assert.equal(await provider.get({ ...candidate, metadata }, { cwd }), undefined, String(metadata))
   }
-  for (const agent of [null, Number.NaN, Infinity, -Infinity, -0, { value: Number.NaN }, { value: -0 }]) {
+  for (const agent of [null, Number.NaN, Infinity, -Infinity, -0]) {
     const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'chosen')
     assert.equal(await provider.get({ ...candidate, agent }, { cwd }), undefined, String(agent))
+  }
+  for (const [originalValue, tamperedValue] of [[null, Number.NaN], [0, -0]]) {
+    await writeCompatibilityDocument(cwd, 'chosen.md', `---\nname: chosen\ndescription: Custom\nagent:\n  value: ${originalValue === null ? 'null' : originalValue}\n---\nBody.\n`)
+    const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'chosen')
+    assert.deepEqual(candidate.agent, { value: originalValue })
+    assert.equal(await provider.get({ ...candidate, agent: { value: tamperedValue } }, { cwd }), undefined)
   }
   const strictProvider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
     projectSkillDirs: ['.opencode/skills'], formatCompatibility: false,
