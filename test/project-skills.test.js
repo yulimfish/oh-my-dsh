@@ -2020,6 +2020,28 @@ test('format compatibility rejects malformed allowed-tools so a valid fallback c
   assert.equal((await strict.registry.get('shared', { cwd })).content, 'Bad wins.\n')
 })
 
+test('format compatibility exposes normalized allowed-tools as inert metadata during list and get', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'tools-demo.md', '---\nname: tools-demo\ndescription: Tools demo\nallowed-tools: " read   bash_*  "\n---\nBody.\n')
+  await writeCompatibilityDocument(cwd, 'array-tools.md', '---\nname: array-tools\ndescription: Array tools\nallowed-tools: [" read ", "", "bash_*"]\n---\nArray body.\n')
+  const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+  const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'], formatCompatibility: true })
+  t.after(() => registration.dispose())
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  for (const [name, expected, content] of [['tools-demo', ['read', 'bash_*'], 'Body.'], ['array-tools', ['read', 'bash_*'], 'Array body.']]) {
+    const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === name)
+    assert.deepEqual(candidate.allowedTools, expected)
+    const skill = await provider.get(candidate, { cwd })
+    assert.deepEqual(skill.allowedTools, expected)
+    assert.equal(skill.content, content)
+    assert.deepEqual((await registry.get(name, { cwd })).allowedTools, expected)
+  }
+})
+
 test('format compatibility treats falsy NaN allowed-tools as absent during list and get', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'shared.md', '---\nname: shared\ndescription: Valid winner\nallowed-tools: !!float .NaN\n---\nValid wins.\n')

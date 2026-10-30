@@ -419,6 +419,9 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
     && (!Array.isArray(allowedTools) || allowedTools.some(tool => typeof tool !== 'string'))) {
     throw new SkillFormatError('skill frontmatter allowed-tools must be a string or an array of strings')
   }
+  const parsedAllowedTools = formatCompatibility && allowedTools
+    ? (Array.isArray(allowedTools) ? allowedTools.map(tool => tool.trim()) : allowedTools.split(/\s+/u)).filter(Boolean)
+    : undefined
 
   const compatibleMetadataKeys = new Set([
     'model', 'agent', 'subtask', 'argument-hint', 'license', 'compatibility',
@@ -458,6 +461,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
       argumentHint: frontmatter['argument-hint'],
       license: frontmatter.license,
       compatibility: frontmatter.compatibility,
+      allowedTools: parsedAllowedTools,
     } : {}),
     invocation,
     content: formatCompatibility
@@ -598,7 +602,7 @@ function matchesCandidate(skill, candidate, disabledSkills) {
     && sameSkillField(skill.metadata, candidate.metadata)
     && sameSkillField(skill.agent, candidate.agent) && sameSkillField(skill.subtask, candidate.subtask)
     && sameSkillField(skill.argumentHint, candidate.argumentHint) && sameSkillField(skill.license, candidate.license)
-    && sameSkillField(skill.compatibility, candidate.compatibility)
+    && sameSkillField(skill.compatibility, candidate.compatibility) && sameSkillField(skill.allowedTools, candidate.allowedTools)
 }
 
 function skillFormatPaths(rootPath, resolverPath) {
@@ -1009,7 +1013,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       ...(skill.metadata !== undefined ? { metadata: skill.metadata } : {}),
       ...(formatCompatibility ? {
         agent: skill.agent, subtask: skill.subtask, argumentHint: skill.argumentHint,
-        license: skill.license, compatibility: skill.compatibility,
+        license: skill.license, compatibility: skill.compatibility, allowedTools: skill.allowedTools,
       } : {}),
     }
   }
@@ -1509,7 +1513,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           ...(skill.metadata !== undefined ? { metadata: skill.metadata } : {}),
           ...(formatCompatibility ? {
             agent: skill.agent, subtask: skill.subtask, argumentHint: skill.argumentHint,
-            license: skill.license, compatibility: skill.compatibility,
+            license: skill.license, compatibility: skill.compatibility, allowedTools: skill.allowedTools,
           } : {}),
         }
       } catch (error) {
