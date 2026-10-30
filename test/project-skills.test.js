@@ -3231,6 +3231,31 @@ test('format compatibility preserves nonfinite reserved metadata without changin
   }
 })
 
+test('format compatibility preserves untagged overflowing JSON numbers as strings', async t => {
+  for (const [field, expected] of [['name', '1e400'], ['description', '1e400'], ['metadata', '1e400']]) {
+    const cwd = await makeWorkspace(t)
+    const frontmatter = field === 'metadata'
+      ? 'name: scalar\ndescription: Demo\nmetadata:\n  rank: 1e400\n'
+      : `name: ${field === 'name' ? '1e400' : 'scalar'}\ndescription: ${field === 'description' ? '1e400' : 'Demo'}\n`
+    await writeCompatibilityDocument(cwd, 'scalar.md', `---\n${frontmatter}---\nBody.\n`)
+    const { ctx } = makeRegistry(makeFileSystem().fs)
+    const lifetime = new AbortController()
+    t.after(() => lifetime.abort())
+    const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+      projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+    })
+    const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === (field === 'name' ? '1e400' : 'scalar'))
+    assert.ok(candidate, field)
+    if (field === 'name') assert.equal(candidate.name, '1e400')
+    if (field === 'description') assert.equal(candidate.description, '(opencode-project - Skill) 1e400')
+    if (field === 'metadata') assert.equal(candidate.metadata.rank, '1e400')
+    const skill = await provider.get(candidate, { cwd })
+    if (field === 'name') assert.equal(skill.name, '1e400')
+    if (field === 'description') assert.equal(skill.description, '(opencode-project - Skill) 1e400')
+    if (field === 'metadata') assert.equal(skill.metadata.rank, '1e400')
+  }
+})
+
 test('format compatibility accepts bounded YAML aliases across metadata and reserved fields', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'aliased/SKILL.md', '---\nname: alias-demo\ndescription: Aliased metadata\nmetadata: &shared\n  owner: atlas\nagent: *shared\n---\nBody.\n')

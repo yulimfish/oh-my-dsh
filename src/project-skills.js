@@ -218,6 +218,23 @@ function parseYamlBoolean(value, field, defaultValue, formatCompatibility = fals
   throw new SkillFormatError(`frontmatter field ${field} must be boolean`)
 }
 
+function preserveOverflowingPlainNumbers(node, seen = new WeakSet()) {
+  if (!node || typeof node !== 'object' || seen.has(node)) return
+  seen.add(node)
+  if (node.type === 'PLAIN' && node.tag === undefined && typeof node.value === 'number' && !Number.isFinite(node.value) && typeof node.source === 'string') {
+    node.value = node.source
+  }
+  if (Array.isArray(node.items)) {
+    for (const item of node.items) {
+      if (item && typeof item === 'object') {
+        preserveOverflowingPlainNumbers(item.key, seen)
+        preserveOverflowingPlainNumbers(item.value, seen)
+        preserveOverflowingPlainNumbers(item, seen)
+      }
+    }
+  }
+}
+
 function hasComplexMappingKey(node, seen = new WeakSet()) {
   if (!node || typeof node !== 'object' || seen.has(node)) return false
   seen.add(node)
@@ -350,6 +367,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
       if (parseErrors.length > 0 && formatCompatibility && pinnedFrontmatter) {
         // Pinned OpenCode discards malformed frontmatter and retains the body.
       } else {
+        if (formatCompatibility) preserveOverflowingPlainNumbers(document.contents)
         frontmatter = document.toJS(formatCompatibility ? {} : { maxAliasCount: 0 })
         if (formatCompatibility && (document.contents === null || frontmatter === null || typeof frontmatter !== 'object' || Array.isArray(frontmatter))) frontmatter = {}
       }
