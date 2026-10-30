@@ -205,6 +205,19 @@ test('rejects running, completed, unknown, cross-session, malformed, and service
   assert.equal(response.text.includes('private registry failure'), false)
 })
 
+test('fails closed without leaking errors when synchronous handoff revalidation fails', async () => {
+  const queued = []
+  const command = createHandoffCommand({
+    readAsync: async () => failed(),
+    read() { throw new Error('private revalidation failure') },
+  }, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent: { id: 'parent-revalidation-error' }, rawInput: 'child-1 retry' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /Could not confirm the current one-shot result/u)
+  assert.equal(response.text.includes('private revalidation failure'), false)
+  assert.equal(queued.length, 0)
+})
+
 test('validates input, Agent, cancellation, and registry contracts before queueing', async () => {
   const { agent, queued, command } = fixture(failed())
   for (const rawInput of ['', '   ', 'child-1\nchild-2', 'child-1\u202e', `${'x'.repeat(2_049)}`]) {
