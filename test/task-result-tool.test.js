@@ -151,6 +151,27 @@ test('a storage failure before clearAgent cannot return evidence after clearAgen
   }
 })
 
+test('storage failures after dispose do not return disposed evidence', async () => {
+  for (const kind of ['read', 'list']) {
+    const parent = agent(`failure-dispose-${kind}`)
+    const gate = deferred()
+    const registry = createTaskResultRegistry({
+      now: () => 100,
+      persistentStore: {
+        put: async () => true,
+        delete: async () => true,
+        read: async () => gate.promise,
+        list: async () => gate.promise,
+      },
+    })
+    const pending = kind === 'read' ? registry.readAsync(parent, 'disposed-child') : registry.listAsync(parent)
+    await registry.dispose()
+    gate.resolve(Promise.reject(new Error('storage unavailable')))
+    assert.equal(await pending, undefined, 'disposed read/list calls never return disposed evidence')
+    assert.equal(registry.read(parent, 'disposed-child'), undefined)
+  }
+})
+
 test('explicit persistence restores a terminal snapshot for a same-session Agent after the old cache clears', async () => {
   const old = agent('shared-session')
   const replacement = agent('shared-session')
