@@ -346,6 +346,18 @@ test('clearing an unreadable Agent ID also releases its bounded state slot', asy
   feature.dispose()
 })
 
+test('pending entries are removed even when abort listener removal throws', async () => {
+  const { live, feature } = makeHarness()
+  const agent = { id: 'throwing-remove' }
+  live.set(agent.id, agent)
+  const controller = new AbortController()
+  controller.signal.removeEventListener = () => { throw new Error('private remove failure') }
+  const exec = makeExec(agent, {}, { signal: controller.signal })
+  await feature.preExecute(exec, async () => ({ kind: 'allow' }))
+  assert.doesNotThrow(() => feature.clearAgent(agent))
+  assert.doesNotThrow(() => feature.dispose(), 'disposal must not retry a removed pending entry')
+})
+
 test('disposal during downstream execution fences reminders and clears pending abort listeners', async () => {
   const { live, feature } = makeHarness()
   const agent = { id: 'agent-dispose' }
