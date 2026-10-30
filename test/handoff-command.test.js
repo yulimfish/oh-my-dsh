@@ -288,6 +288,14 @@ test('rejects handoff snapshots without an output field', async () => {
   assert.equal(queued.length, 0)
 })
 
+test('rejects handoff snapshots with non-boolean truncation metadata', async () => {
+  const { agent, queued, command } = fixture(failed({ truncated: 'yes' }))
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /failed or incomplete/u)
+  assert.equal(queued.length, 0)
+})
+
 test('preserves exact child identity when preparing handoff evidence', async () => {
   const { agent, queued, calls, command } = fixture(failed({ childId: 'child-unicode-任务' }))
   const response = await command.handler({ agent, rawInput: 'child-unicode-任务 inspect next' })
