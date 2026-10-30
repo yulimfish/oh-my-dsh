@@ -416,6 +416,32 @@ test('rejects malformed persisted incomplete evidence instead of sanitizing it i
   }
 })
 
+test('rejects over-TTL persisted results even before their expiry time', async () => {
+  const agent = { id: 'parent-persisted-ttl' }
+  for (const status of ['failed', 'incomplete']) {
+    const stored = {
+      parentId: agent.id, childId: 'child-1', status, output: 'over-TTL evidence',
+      truncated: false, omittedNonText: false, settledAt: 900, expiresAt: 900 + 30 * 60 * 1_000 + 1,
+    }
+    const registry = createTaskResultRegistry({
+      now: () => 1_000,
+      persistentStore: {
+        put: async () => true,
+        delete: async () => true,
+        read: async () => stored,
+        list: async () => [stored],
+      },
+    })
+    const queued = []
+    const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', status)
+    assert.match(response.text, /failed or incomplete/u)
+    assert.equal(queued.length, 0, status)
+    await registry.dispose()
+  }
+})
+
 test('does not trust an unversioned async snapshot after same-child replacement', async () => {
   const agent = { id: 'parent-unversioned-stale' }
   const registry = createTaskResultRegistry()
