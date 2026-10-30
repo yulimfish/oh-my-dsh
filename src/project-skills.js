@@ -314,6 +314,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
       ? [
           ...document.errors.filter(error => error?.code !== 'TAG_RESOLVE_FAILED' || !String(error.message).startsWith('Unresolved plain scalar ')),
           ...document.warnings.filter(error => error?.code === 'TAG_RESOLVE_FAILED'),
+          ...((document.contents?.items ?? []).filter(item => item?.key && typeof item.key === 'object' && 'items' in item.key)),
         ]
       : document.errors
     if (parseErrors.length > 0 && !(formatCompatibility && pinnedFrontmatter)) {
