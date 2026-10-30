@@ -261,6 +261,14 @@ test('does not hand off a completed result as recovery work', async () => {
   assert.equal(queued.length, 0)
 })
 
+test('quotes child identity in handoff metadata without allowing line injection', async () => {
+  const { agent, queued, command } = fixture(failed({ childId: 'child"quoted' }))
+  const response = await command.handler({ agent, rawInput: 'child"quoted inspect' })
+  assert.equal(response.kind, 'success')
+  assert.match(queued[0][1], /Previous one-shot child ID: "child\\"quoted"/u)
+  assert.equal(queued[0][1].includes('child"quoted\n'), false)
+})
+
 test('sanitizes untrusted output and preserves bounded next-step text', async () => {
   const { agent, queued, command } = fixture(failed({ output: `line one\nline two\u202e`, stopReason: 'failed' }))
   const response = await command.handler({ agent, rawInput: `child-1 next\u202e` })
