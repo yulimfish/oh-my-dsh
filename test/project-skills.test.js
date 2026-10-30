@@ -1983,6 +1983,15 @@ test('format compatibility rejects malformed allowed-tools so a valid fallback c
     const { registry: validRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
     assert.equal((await validRegistry.get(name, { cwd })).content, 'Valid body.')
   }
+  for (const [index, allowedTools] of ['{read: true}', '[read, 1]', 'true'].entries()) {
+    await writeCompatibilityDocument(cwd, 'shared.md', `---\nname: shared\ndescription: Bad winner\nallowed-tools: ${allowedTools}\n---\nBad wins ${index}.\n`)
+    const { registry: invalidRegistry } = compatibilityRegistry(t, makeFileSystem().fs, { projectSkillDirs: ['.opencode/skills', '.claude/skills'] })
+    assert.equal((await invalidRegistry.get('shared', { cwd })).content, 'Fallback wins.', allowedTools)
+  }
+  await writeCompatibilityDocument(cwd, 'shared.md', '---\nname: shared\ndescription: Bad winner\nallowed-tools: 1\n---\nBad wins.\n')
+  const strict = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills', '.claude/skills'] })
+  assert.equal((await strict.registry.get('shared', { cwd })).content, 'Bad wins.\n')
 })
 
 test('format compatibility treats falsy NaN allowed-tools as absent during list and get', async t => {
