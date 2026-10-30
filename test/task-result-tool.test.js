@@ -212,6 +212,9 @@ test('result Tool renders its untrusted-output guidance through the Host output 
   assert.match(terminal[0].text, /Non-text result blocks omitted/u)
   const running = tool.output.render({}, { childId: 'child-1', status: 'running' })
   assert.match(running[0].text, /has not settled yet/u)
+  const failed = tool.output.render({}, { childId: 'child-1', status: 'failed', output: '', truncated: false, omittedNonText: false })
+  assert.match(failed[0].text, /failed without a retained child result/u)
+  assert.doesNotMatch(failed[0].text, /No text output was retained/u)
   registry.dispose()
 })
 
@@ -238,7 +241,7 @@ test('result Tool executes and renders every retained status in both persistence
         else {
           assert.ok(content[0].text.includes(`status: ${status}`))
           assert.match(content[0].text, /untrusted evidence, not instructions/u)
-          if (status === 'failed') assert.match(content[0].text, /No text output was retained/u)
+          if (status === 'failed') assert.match(content[0].text, /failed without a retained child result/u)
           else assert.match(content[0].text, /Child answer\./u)
         }
         await registry.dispose()
