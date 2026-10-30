@@ -865,6 +865,29 @@ test('rejects a persisted snapshot whose expiry equals the restore time', async 
   await registry.dispose()
 })
 
+test('rejects future or over-TTL persisted snapshots without partial records', async () => {
+  for (const difference of [
+    { settledAt: 101 },
+    { expiresAt: 100 + 30 * 60 * 1_000 + 1 },
+  ]) {
+    const parent = agent(`invalid-time-${Object.keys(difference)[0]}`)
+    const stored = { ...persistedResult(parent.id, 'invalid-child'), ...difference }
+    const registry = createTaskResultRegistry({
+      now: () => 100,
+      persistentStore: {
+        put: async () => true,
+        delete: async () => true,
+        read: async () => stored,
+        list: async () => [stored],
+      },
+    })
+    assert.equal(await registry.readAsync(parent, stored.childId), undefined)
+    assert.deepEqual(await registry.listAsync(parent), [])
+    assert.equal(registry.size(), 0)
+    await registry.dispose()
+  }
+})
+
 test('restored terminal results expire at their original settlement deadline', async () => {
   let time = 199
   const parent = agent('restored-expiry')
