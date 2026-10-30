@@ -498,6 +498,28 @@ test('concurrent replacement notifications install only one progress provider', 
   assert.equal(replacement.calls.contextDisposals, 1)
 })
 
+test('reentrant notification during context creation cannot overwrite a pending progress registration', async () => {
+  const live = new Map()
+  const feature = createProgressContext({ get: () => undefined }, { get: id => live.get(id) })
+  const agent = makeAgent('reentrant-progress')
+  live.set(agent.id, agent)
+  let reentered = false
+  let second
+  agent.ctx.systemPrompt.context = entry => {
+    agent.calls.contexts.push(entry)
+    if (!reentered) {
+      reentered = true
+      second = feature.listener({ agent, source: 'compact' })
+    }
+    return () => { agent.calls.contextDisposals += 1 }
+  }
+  await feature.listener({ agent })
+  await second
+  assert.equal(agent.calls.contexts.length, 1)
+  await feature.dispose()
+  assert.equal(agent.calls.contextDisposals, 1)
+})
+
 test('real SessionStore and systemPrompt recover accepted progress in the matching Agent scope', async t => {
   const ctx = new Context()
   const promptFiber = await ctx.plugin(SystemPrompt)

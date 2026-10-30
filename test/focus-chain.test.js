@@ -291,6 +291,28 @@ test('concurrent replacement notifications install only one prompt provider', as
   assert.equal(replacement.calls.contextDisposals, 1)
 })
 
+test('reentrant notification during context creation cannot overwrite a pending registration', async () => {
+  const { live, service } = makeService()
+  const feature = createFocusChain({ get: () => activeGoal() }, service)
+  const agent = makeAgent('reentrant-registration')
+  live.set(agent.id, agent)
+  let reentered = false
+  let second
+  agent.ctx.systemPrompt.context = entry => {
+    agent.calls.contexts.push(entry)
+    if (!reentered) {
+      reentered = true
+      second = notify(feature, agent, 'compact')
+    }
+    return () => { agent.calls.contextDisposals += 1 }
+  }
+  await notify(feature, agent)
+  await second
+  assert.equal(agent.calls.contexts.length, 1)
+  await feature.dispose()
+  assert.equal(agent.calls.contextDisposals, 1)
+})
+
 test('plugin disposal joins Agent-scope cleanup and removes its prompt context', async () => {
   const { live, service } = makeService()
   const feature = createFocusChain({ get: () => activeGoal() }, service)

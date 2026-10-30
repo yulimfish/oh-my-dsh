@@ -278,6 +278,8 @@ export function createProgressContext(sessionsService, agentsService) {
       const effect = agentContext.effect
       if (!isObject(systemPrompt) || typeof context !== 'function' || typeof effect !== 'function') return
 
+      registration = { agent, contextDispose: undefined, trackingDispose: undefined, disposed: false }
+      registrations.set(agentId, registration)
       let projection
       const text = () => {
         try {
@@ -302,8 +304,7 @@ export function createProgressContext(sessionsService, agentsService) {
         return
       }
 
-      registration = { agent, contextDispose, trackingDispose: undefined, disposed: false }
-      registrations.set(agentId, registration)
+      registration.contextDispose = contextDispose
       const trackingDispose = effect.call(agentContext, () => () => {
         if (registrations.get(agentId) === registration) registrations.delete(agentId)
         return trackDisposal(registration)

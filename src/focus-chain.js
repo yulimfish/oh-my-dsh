@@ -133,6 +133,8 @@ export function createFocusChain(goalsService, agentsService) {
       if (!isObject(systemPrompt) || typeof context !== 'function' || typeof effect !== 'function') return
       if (disposed || signal?.aborted === true || !exactLiveAgent(agentsService, agentId, agent)) return
 
+      registration = { agent, contextDispose: undefined, trackingDispose: undefined, disposed: false }
+      registrations.set(agentId, registration)
       const text = () => {
         try {
           if (disposed || registration?.disposed || !exactLiveAgent(agentsService, agentId, agent)) return ''
@@ -158,8 +160,7 @@ export function createFocusChain(goalsService, agentsService) {
         return
       }
 
-      registration = { agent, contextDispose, trackingDispose: undefined, disposed: false }
-      registrations.set(agentId, registration)
+      registration.contextDispose = contextDispose
       const trackingDispose = effect.call(agentContext, () => () => {
         if (registrations.get(agentId) === registration) registrations.delete(agentId)
         return trackDisposal(registration, true)

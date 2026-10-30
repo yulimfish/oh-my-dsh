@@ -81,7 +81,7 @@ Goose has moved to `aaif-goose/goose`; the source snapshot is pinned to [`361003
 
 - Add default-off `enableFocusChain` scoped prompt context for exact live Agents.
 - Re-read `goals.get(agent)` on every assembly; show only an active Goal, with bounded sanitized objective and concise anti-drift guidance.
-- Re-register for fresh/resumed/compacted Agent scopes; isolate same-ID replacements; recheck the slot after asynchronous old-scope cleanup so concurrent notifications cannot install duplicate providers; cap registrations; dispose with both Agent and plugin scopes.
+- Re-register for fresh/resumed/compacted Agent scopes; isolate same-ID replacements; claim the slot before Host context creation and recheck it after asynchronous old-scope cleanup so concurrent or reentrant notifications cannot install duplicate providers; cap registrations; dispose with both Agent and plugin scopes.
 - Unit tests plus real DSH prompt-assembly coverage: no Goal, active/paused/complete Goal, updates, malformed Host data, exact identity, compaction recreation, and cleanup.
 - Gate: focused tests, full syntax/tests, reviewed diff, standalone commit.
 
@@ -97,7 +97,7 @@ Goose has moved to `aaif-goose/goose`; the source snapshot is pinned to [`361003
 
 ### Phase 3 — Session-log progress context
 
-**Implemented in this phase:** default-off `enableProgressContext` adds `dsh-omo:progress-context` in each exact live Agent scope. It incrementally folds the DSH session log and shows only the latest successful `todo_write`, directly adapting Cline's checklist continuity and Goose's MOIM planning notes without a second task store. Pending/failed writes leave the last valid list intact; an accepted empty list clears it; malformed or skipped windows emit no stale list. Content is bounded, sanitized, and JSON-quoted. The provider replaces its projection when a compacted or restored Session has a new identity or resets its sequence cursor, and rechecks registration after asynchronous replacement cleanup to prevent duplicate prompt providers. Real `SessionStore` plus prompt-assembly tests verify the durable event shape and scoped cleanup.
+**Implemented in this phase:** default-off `enableProgressContext` adds `dsh-omo:progress-context` in each exact live Agent scope. It incrementally folds the DSH session log and shows only the latest successful `todo_write`, directly adapting Cline's checklist continuity and Goose's MOIM planning notes without a second task store. Pending/failed writes leave the last valid list intact; an accepted empty list clears it; malformed or skipped windows emit no stale list. Content is bounded, sanitized, and JSON-quoted. The provider replaces its projection when a compacted or restored Session has a new identity or resets its sequence cursor, claims registration before Host context creation and rechecks it after asynchronous replacement cleanup to prevent duplicate prompt providers. Real `SessionStore` plus prompt-assembly tests verify the durable event shape and scoped cleanup.
 
 - Use accepted Tool events rather than wall-clock polling or a parallel todo database.
 - Keep current progress near the Goal, while warning that checked items are not proof of user-task completion.
