@@ -609,6 +609,23 @@ test('rejects metadata-only changes between async read and synchronous revalidat
   }
 })
 
+test('rejects stop reason presence changes during handoff revalidation', async () => {
+  for (const initialStopReason of ['max-tokens', undefined]) {
+    const stale = failed({ status: 'incomplete', output: 'same evidence', stopReason: initialStopReason })
+    const current = { ...stale, stopReason: initialStopReason === undefined ? 'timeout' : undefined }
+    const agent = { id: 'parent-stop-reason-presence' }
+    const queued = []
+    const command = createHandoffCommand({
+      readAsync: async () => stale,
+      read: () => current,
+    }, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', String(initialStopReason))
+    assert.match(response.text, /result changed while handoff was being prepared/u)
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('does not trust an unversioned async snapshot after same-child replacement', async () => {
   const agent = { id: 'parent-unversioned-stale' }
   const registry = createTaskResultRegistry()
