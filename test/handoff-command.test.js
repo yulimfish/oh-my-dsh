@@ -457,6 +457,22 @@ test('bounds escaped next-step JSON and the complete handoff prompt', async () =
   }
 })
 
+test('retains explicit omission and evidence edges under combined multibyte pressure', async () => {
+  const childId = `child-${'c'.repeat(250)}`
+  const output = `${'h'.repeat(4_100)}${'t'.repeat(4_092)}`
+  const { agent, queued, command } = fixture(failed({ childId, output }))
+  const response = await command.handler({ agent, rawInput: `${childId} ${'汉'.repeat(1_000)}` })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.ok(prompt.length <= 6_000)
+  assert.ok(Buffer.byteLength(prompt, 'utf8') <= 6_000)
+  const evidence = prompt.split('--- BEGIN CHILD EVIDENCE ---\n')[1].split('\n--- END CHILD EVIDENCE ---')[0]
+  assert.match(evidence, /additional evidence omitted for prompt budget/u)
+  assert.ok(evidence.startsWith('hhh'))
+  assert.ok(evidence.endsWith('ttt'))
+  assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
+})
+
 test('labels failed handoff with no retained output and stop reason', async () => {
   const { agent, queued, command } = fixture(failed({ output: '', stopReason: 'timeout' }))
   const response = await command.handler({ agent, rawInput: 'child-1 investigate timeout' })

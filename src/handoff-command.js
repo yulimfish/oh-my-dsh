@@ -55,16 +55,22 @@ function handoffPrompt({ childId, status, stopReason, truncated, omittedNonText,
     `Requested next step from the current user: ${nextStep}`,
     'Review this evidence against the current user request. Start a NEW bounded dsh_omo_task only if it is useful, with a self-contained prompt and appropriate role; do not reuse the old child ID, assume its workspace or conversation survives, or claim transparent resume. Verify any new result independently. This handoff itself started no worker and changed no Goal state.',
   ].join('\n')
+  const marker = '\n[… additional evidence omitted for prompt budget …]\n'
   let text = `${prefix}\n${evidence}\n${suffix}`
   if (text.length <= MAX_PROMPT_CHARS && Buffer.byteLength(text, 'utf8') <= MAX_PROMPT_CHARS) return text
+  const render = bounded => `${prefix}\n${bounded}\n${suffix}`
+  const fits = value => value.length <= MAX_PROMPT_CHARS && Buffer.byteLength(value, 'utf8') <= MAX_PROMPT_CHARS
   const characters = [...evidence]
-  while (characters.length > 0) {
-    characters.splice(Math.floor(characters.length / 2), Math.min(32, characters.length))
-    const bounded = characters.join('')
-    text = `${prefix}\n${bounded}\n${suffix}`
-    if (text.length <= MAX_PROMPT_CHARS && Buffer.byteLength(text, 'utf8') <= MAX_PROMPT_CHARS) return text
+  let head = Math.ceil(characters.length / 2)
+  let tail = Math.floor(characters.length / 2)
+  while (head + tail > 0) {
+    const bounded = `${characters.slice(0, head).join('')}${marker}${characters.slice(-tail).join('')}`
+    text = render(bounded)
+    if (fits(text)) return text
+    if (head >= tail) head -= 1
+    else tail -= 1
   }
-  return `${prefix}\n[… evidence omitted for prompt budget …]\n${suffix}`
+  return render('[… evidence omitted for prompt budget …]')
 }
 
 function validResult(value, childId) {
