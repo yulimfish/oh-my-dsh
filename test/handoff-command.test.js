@@ -626,6 +626,21 @@ test('rejects stop reason presence changes during handoff revalidation', async (
   }
 })
 
+test('rejects a child identity change during synchronous handoff revalidation', async () => {
+  const stale = failed({ status: 'incomplete', output: 'same evidence' })
+  const current = { ...stale, childId: 'another-child' }
+  const agent = { id: 'parent-child-identity-revalidation' }
+  const queued = []
+  const command = createHandoffCommand({
+    readAsync: async () => stale,
+    read: () => current,
+  }, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /result changed while handoff was being prepared/u)
+  assert.equal(queued.length, 0)
+})
+
 test('does not trust an unversioned async snapshot after same-child replacement', async () => {
   const agent = { id: 'parent-unversioned-stale' }
   const registry = createTaskResultRegistry()
