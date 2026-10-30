@@ -350,7 +350,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
       if (parseErrors.length > 0 && formatCompatibility && pinnedFrontmatter) {
         // Pinned OpenCode discards malformed frontmatter and retains the body.
       } else {
-        frontmatter = document.toJS({ maxAliasCount: 0 })
+        frontmatter = document.toJS(formatCompatibility ? {} : { maxAliasCount: 0 })
         if (formatCompatibility && (document.contents === null || frontmatter === null || typeof frontmatter !== 'object' || Array.isArray(frontmatter))) frontmatter = {}
       }
     } catch {
@@ -600,7 +600,13 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       entries = await fs.listDir(directory, signal)
     } catch (error) {
       if (signal?.aborted || error?.code !== 'ELOOP') throw error
-      return true
+      try {
+        await fs.stat(await fs.resolve(path, { cwd, signal }), signal)
+        return false
+      } catch (canonicalError) {
+        if (signal?.aborted) throw canonicalError
+        return canonicalError?.code === 'ELOOP' ? true : false
+      }
     }
     // Directory entries preserve exact case even when lstat is case-insensitive.
     if (!Array.isArray(entries)) return false
@@ -611,7 +617,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     try {
       return !await fs.stat(primary.target, signal)
     } catch (error) {
-      if (signal?.aborted) throw error
+      if (signal?.aborted || error?.code !== 'ELOOP') throw error
       return true
     }
   }
@@ -1082,6 +1088,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 info = await fs.stat(entry.target, signal)
               } catch (error) {
                 if (signal?.aborted) throw error
+                if (error?.code === 'ELOOP') complete = false
                 complete = false
                 warn(ctx, 'dsh-omo could not classify a project skill entry')
                 continue
@@ -1132,20 +1139,30 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 if (!await ensureWatch(skillDirectoryTarget, signal, startingWatchRevision, false, true)) complete = false
                 let allChildren
                 let danglingCanonical = false
+                if (formatCompatibility) {
+                  const canonicalPath = `${rootPath}/${relativeDirectoryPath}/SKILL.md`
+                  try {
+                    await fs.stat(await fs.resolve(canonicalPath, { cwd, signal }), signal)
+                  } catch (error) {
+                    if (signal?.aborted || error?.code !== 'ELOOP') {
+                      if (signal?.aborted) throw error
+                    } else {
+                      danglingCanonical = true
+                    }
+                  }
+                }
                 try {
                   allChildren = await fs.listDir(skillDirectoryTarget, signal)
                 } catch (error) {
                   if (signal?.aborted || !formatCompatibility || error?.code !== 'ELOOP') throw error
-                  const directoryName = relativeDirectoryPath.slice(relativeDirectoryPath.lastIndexOf('/') + 1)
-                  let namedTarget
-                  try {
-                    namedTarget = await fs.resolve(`${rootPath}/${relativeDirectoryPath}/${directoryName}.md`, { cwd, signal })
-                  } catch (resolveError) {
-                    if (signal?.aborted) throw resolveError
-                    namedTarget = { targetKey: `${rootPath}/${relativeDirectoryPath}/${directoryName}.md`, displayPath: `${rootPath}/${relativeDirectoryPath}/${directoryName}.md` }
+                  if (!danglingCanonical) {
+                    complete = false
+                    continue
+                  } else {
+                    const directoryName = relativeDirectoryPath.slice(relativeDirectoryPath.lastIndexOf('/') + 1)
+                    const namedTarget = await fs.resolve(`${rootPath}/${relativeDirectoryPath}/${directoryName}.md`, { cwd, signal })
+                    allChildren = [{ name: `${directoryName}.md`, target: namedTarget, type: 'file' }]
                   }
-                  danglingCanonical = true
-                  allChildren = [{ name: `${directoryName}.md`, target: namedTarget, type: 'file' }]
                 }
                 const children = limitEntries(allChildren)
                 let skillFile = children.find(child => child.name === 'SKILL.md')
@@ -1156,7 +1173,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                   try {
                     skillFileInfo = await fs.stat(skillFile.target, signal)
                   } catch (error) {
-                    if (signal?.aborted) throw error
+                    if (signal?.aborted || error?.code !== 'ELOOP') throw error
                   }
                   if (!skillFileInfo) {
                     danglingCanonical = true

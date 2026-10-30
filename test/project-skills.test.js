@@ -3231,6 +3231,30 @@ test('format compatibility preserves nonfinite reserved metadata without changin
   }
 })
 
+test('format compatibility accepts bounded YAML aliases across metadata and reserved fields', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'aliased/SKILL.md', '---\nname: alias-demo\ndescription: Aliased metadata\nmetadata: &shared\n  owner: atlas\nagent: *shared\n---\nBody.\n')
+  const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+  const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'], formatCompatibility: true })
+  t.after(() => registration.dispose())
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'alias-demo')
+  assert.ok(candidate)
+  assert.deepEqual(candidate.metadata, { owner: 'atlas' })
+  assert.deepEqual(candidate.agent, { owner: 'atlas' })
+  const skill = await provider.get(candidate, { cwd })
+  assert.deepEqual(skill.metadata, { owner: 'atlas' })
+  assert.deepEqual(skill.agent, { owner: 'atlas' })
+  assert.equal((await registry.get('alias-demo', { cwd })).content, 'Body.')
+  const strict = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills'] })
+  assert.equal(await strict.registry.get('alias-demo', { cwd }), undefined)
+})
+
 test('format compatibility exposes reserved metadata directly during list and cached get', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'flat.md', '---\nname: chosen\ndescription: Custom\nmetadata:\n  owner: atlas\n  rank: 2\n---\nBody.\n')
@@ -3693,6 +3717,65 @@ test('format compatibility falls through an inaccessible canonical self-loop to 
   assert.equal(listed.complete, true, JSON.stringify(warnings))
   assert.deepEqual(listed.candidates.map(candidate => candidate.name), ['review'])
   assert.equal((await provider.get(cached, { cwd })).content, 'NAMED_FALLBACK')
+})
+
+test('format compatibility does not treat a sibling loop as canonical absence', async t => {
+  for (const canonicalValid of [false, true]) {
+    const cwd = await makeWorkspace(t)
+    await writeCompatibilityDocument(cwd, 'review/review.md', '---\nname: review\ndescription: Named fallback\n---\nNAMED_FALLBACK\n')
+    await writeCompatibilityDocument(cwd, 'review/SKILL.md', canonicalValid
+      ? '---\nname: review\ndescription: Canonical\n---\nCANONICAL\n'
+      : '---\nname: "   "\n---\nINVALID_CANONICAL\n')
+    await symlink('unrelated.md', path.join(cwd, '.opencode/skills/review/unrelated.md'))
+    const { fs } = makeFileSystem()
+    const originalListDir = fs.listDir
+    const canonical = await realpath(path.join(cwd, '.opencode/skills/review/SKILL.md'))
+    fs.listDir = async (target, signal) => {
+      try {
+        return await originalListDir(target, signal)
+      } catch (error) {
+        if (error?.code !== 'ELOOP') throw error
+        return [{ name: 'SKILL.md', target: { targetKey: canonical, displayPath: canonical }, type: 'file' }]
+      }
+    }
+    const { ctx } = makeRegistry(fs)
+    const lifetime = new AbortController()
+    t.after(() => lifetime.abort())
+    const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+      projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+    })
+    const listed = await provider.list({ cwd })
+    if (canonicalValid) {
+      assert.equal(listed.complete, true, JSON.stringify(listed.candidates.map(candidate => candidate.locator.resolverPath)))
+      assert.equal(listed.candidates.some(candidate => candidate.locator.resolverPath.endsWith('/SKILL.md')), true)
+      assert.equal(listed.candidates.some(candidate => candidate.locator.resolverPath.endsWith('/review.md')), false)
+    } else {
+      assert.equal(listed.candidates.some(candidate => candidate.locator.resolverPath.endsWith('/review.md')), false)
+    }
+    assert.equal(listed.candidates.some(candidate => candidate.locator.resolverPath.endsWith('/review.md')), false, String(canonicalValid))
+  }
+})
+
+test('format compatibility does not treat canonical EACCES as absence', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'review/review.md', '---\nname: review\ndescription: Named fallback\n---\nNAMED_FALLBACK\n')
+  await writeCompatibilityDocument(cwd, 'review/SKILL.md', '---\nname: "   "\n---\nINVALID_CANONICAL\n')
+  const { fs } = makeFileSystem()
+  const originalStat = fs.stat
+  const canonical = await realpath(path.join(cwd, '.opencode/skills/review/SKILL.md'))
+  fs.stat = async (target, signal) => {
+    if (target.targetKey === canonical) throw Object.assign(new Error('canonical denied'), { code: 'EACCES' })
+    return originalStat(target, signal)
+  }
+  const { ctx } = makeRegistry(fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const listed = await provider.list({ cwd })
+  assert.equal(listed.complete, false)
+  assert.deepEqual(listed.candidates, [])
 })
 
 test('format compatibility falls through dangling directory-named files to nested skills', async t => {
