@@ -471,6 +471,20 @@ test('bounds escaped next-step JSON and the complete handoff prompt', async () =
   }
 })
 
+test('keeps truncated next-step JSON valid and outside child evidence', async () => {
+  const { agent, queued, command } = fixture(failed({ output: 'child evidence' }))
+  const response = await command.handler({ agent, rawInput: `child-1 ${String.fromCharCode(92).repeat(1_000)}` })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  const nextStep = prompt.match(/Requested next step from the current user: (".*")\nReview this evidence/u)?.[1]
+  assert.ok(nextStep)
+  assert.equal(nextStep.length <= 1_000, true)
+  assert.equal(JSON.parse(nextStep).endsWith('…'), true)
+  const evidence = prompt.split('--- BEGIN CHILD EVIDENCE ---\n')[1].split('\n--- END CHILD EVIDENCE ---')[0]
+  assert.equal(evidence, 'child evidence')
+  assert.match(prompt, /Start a NEW bounded dsh_omo_task/u)
+})
+
 test('retains explicit omission and evidence edges under combined multibyte pressure', async () => {
   const childId = `child-${'c'.repeat(250)}`
   const output = `${'h'.repeat(4_100)}${'t'.repeat(4_092)}`
