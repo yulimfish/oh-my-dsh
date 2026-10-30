@@ -3177,7 +3177,7 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
   const cwd = await makeWorkspace(t)
   const invalid = [
     ['blank-name.md', '---\nname: "   "\n---\nPrivate body.'],
-    ['null-name.md', '---\nname: 1\n---\nPrivate body.'],
+    ['null-name.md', '---\nname: null\ndescription: "   "\n---\nPrivate body.'],
     ['bad-name.md', '---\nname: invalid/name\n---\nPrivate body.'],
     ['blank-description.md', '---\ndescription: "   "\n---\nPrivate body.'],
     ['null-description.md', '---\ndescription: true\n---\nPrivate body.'],
@@ -3189,6 +3189,15 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
   const { fs } = makeFileSystem()
   const { registry } = compatibilityRegistry(t, fs)
   assert.deepEqual((await registry.snapshot({ cwd })).skills, [])
+  for (const [file, value] of [['numeric-name.md', '1'], ['boolean-name.md', 'true']]) {
+    await writeCompatibilityDocument(cwd, file, `---\nname: ${value}\ndescription: Demo\n---\nBody.\n`)
+    const { registry: scalarRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
+    assert.equal((await scalarRegistry.get(value, { cwd })).content, 'Body.')
+  }
+  const strictNames = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strictNames.ctx, { projectSkillDirs: ['.opencode/skills'] })
+  assert.equal(await strictNames.registry.get('1', { cwd }), undefined)
+  assert.equal(await strictNames.registry.get('true', { cwd }), undefined)
   await writeCompatibilityDocument(cwd, 'broken.md', '---\nname: [invalid\n---\nRecovered body.\n')
   const { registry: recoveredRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
   const recovered = await recoveredRegistry.get('broken', { cwd })
