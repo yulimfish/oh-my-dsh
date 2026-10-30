@@ -234,6 +234,20 @@ test('parallel completions use completion order and cannot corrupt per-Agent run
   feature.dispose()
 })
 
+test('result notification before post-execute only cleans pending state without counting a completion', async () => {
+  const { live, feature } = makeHarness()
+  const agent = { id: 'result-before-post' }
+  live.set(agent.id, agent)
+  const exec = makeExec(agent)
+  await feature.preExecute(exec, async () => ({ kind: 'allow' }))
+  feature.onResult(exec)
+  const { returned } = await complete(feature, makeExec(agent))
+  assert.equal(warningCount(returned), 0, 'a result observer cannot create an accepted completion before post-execute')
+  assert.equal(warningCount((await complete(feature, makeExec(agent))).returned), 0)
+  assert.equal(warningCount((await complete(feature, makeExec(agent))).returned), 1)
+  feature.dispose()
+})
+
 test('same-ID replacement starts fresh and late old-Agent disposal preserves its state', async () => {
   const { live, feature } = makeHarness()
   const oldAgent = { id: 'reused-id' }
