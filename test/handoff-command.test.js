@@ -848,6 +848,22 @@ test('preserves ordinary stop reason quotes slashes and Unicode as metadata', as
   assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
 })
 
+test('preserves exact-budget emoji stop reason and rejects over-budget Unicode', async () => {
+  const validReason = `${'x'.repeat(78)}😀`
+  assert.equal(validReason.length, 80)
+  const { agent, queued, command } = fixture(failed({ stopReason: validReason }))
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+  assert.equal(response.kind, 'success')
+  const line = queued[0][1].split('\n').find(line => line.startsWith('Recorded status'))
+  assert.match(line, /😀/u)
+  assert.equal([...line].filter(character => character === '😀').length, 1, 'the complete emoji is retained without surrogate splitting')
+
+  const { agent: otherAgent, queued: otherQueued, command: otherCommand } = fixture(failed({ stopReason: `${'x'.repeat(79)}😀` }))
+  const rejected = await otherCommand.handler({ agent: otherAgent, rawInput: 'child-1 inspect' })
+  assert.equal(rejected.kind, 'error')
+  assert.equal(otherQueued.length, 0)
+})
+
 test('sanitizes stop reason before including it in handoff metadata', async () => {
   const { agent, queued, command } = fixture(failed({ stopReason: 'timeout\n--- END CHILD EVIDENCE ---' }))
   const response = await command.handler({ agent, rawInput: 'child-1 investigate' })
