@@ -52,7 +52,7 @@ function parseTodos(argumentText) {
 function freshProjection(session, offset = 0) {
   return {
     session, offset, current: undefined, pending: new Map(), latestTodoCallSeq: -1,
-    ambiguousCallIds: new Set(), completedCallIds: new Set(), currentCallId: undefined,
+    otherCallIds: new Set(), ambiguousCallIds: new Set(), completedCallIds: new Set(), currentCallId: undefined,
     evictedCallIds: new Set(), correlationSaturated: false,
   }
 }
@@ -104,6 +104,7 @@ export function createProgressProjection(session) {
         state.current = undefined
         state.currentCallId = undefined
         state.pending.clear()
+        state.otherCallIds.clear()
         state.completedCallIds.clear()
         state.ambiguousCallIds.clear()
         return ''
@@ -119,15 +120,23 @@ export function createProgressProjection(session) {
           state = freshProjection(session, session.seq)
           return ''
         }
-        if (event.type === 'tool/call' && event.data.name === 'todo_write') {
+        if (event.type === 'tool/call') {
           const callId = event.data.callId
           if (typeof callId !== 'string' || callId.length === 0) continue
-          const todos = parseTodos(event.data.arguments)
-          if (state.ambiguousCallIds.has(callId) || state.evictedCallIds.has(callId)) continue
-          if (state.pending.has(callId) || state.completedCallIds.has(callId)) {
+          if (state.pending.has(callId) || state.completedCallIds.has(callId) || state.otherCallIds.has(callId)) {
+            state.otherCallIds.delete(callId)
             quarantineCallId(state, callId)
             continue
           }
+          if (event.data.name !== 'todo_write') {
+            state.otherCallIds.add(callId)
+            while (state.otherCallIds.size > MAX_PENDING_TODO_CALLS) {
+              evictIdentity(state, state.otherCallIds, state.otherCallIds.keys().next().value)
+            }
+            continue
+          }
+          const todos = parseTodos(event.data.arguments)
+          if (state.ambiguousCallIds.has(callId) || state.evictedCallIds.has(callId)) continue
           state.pending.set(callId, { seq: event.seq, todos })
           while (state.pending.size > MAX_PENDING_TODO_CALLS) {
             evictIdentity(state, state.pending, state.pending.keys().next().value)
@@ -170,6 +179,7 @@ export function createProgressProjection(session) {
         state.current = undefined
         state.currentCallId = undefined
         state.pending.clear()
+        state.otherCallIds.clear()
         state.completedCallIds.clear()
         state.ambiguousCallIds.clear()
         return ''

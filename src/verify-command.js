@@ -99,6 +99,7 @@ export function collectBashResults(events) {
   if (!Array.isArray(events)) throw new TypeError('Session events are not an array.')
   const calls = new Map()
   const completedCallIds = new Set()
+  const otherCallIds = new Set()
   const malformedCallIds = new Set()
   const ambiguousCallIds = new Set()
   const evictedCallIds = new Set()
@@ -114,12 +115,12 @@ export function collectBashResults(events) {
       continue
     }
     if (!event || typeof event !== 'object' || !Number.isSafeInteger(event.seq)) throw new TypeError('Invalid session event metadata.')
-    if (event.type === 'tool/call' && event.data?.name === 'bash') {
+    if (event.type === 'tool/call') {
       const callId = event.data.callId
       if (typeof callId !== 'string' || !callId) continue
-      if (ambiguousCallIds.has(callId) || evictedCallIds.has(callId)) continue
-      if (malformedCallIds.has(callId) || completedCallIds.has(callId) || calls.has(callId)) {
+      if (malformedCallIds.has(callId) || completedCallIds.has(callId) || calls.has(callId) || otherCallIds.has(callId)) {
         calls.delete(callId)
+        otherCallIds.delete(callId)
         ambiguousCallIds.delete(callId)
         ambiguousCallIds.add(callId)
         if (ambiguousCallIds.size > MAX_COMPLETED_CALL_IDS) {
@@ -133,6 +134,17 @@ export function collectBashResults(events) {
         }
         continue
       }
+      if (event.data?.name !== 'bash') {
+        otherCallIds.add(callId)
+        if (otherCallIds.size > MAX_COMPLETED_CALL_IDS) {
+          const evicted = otherCallIds.keys().next().value
+          otherCallIds.delete(evicted)
+          evictedCallIds.add(evicted)
+          correlationComplete = false
+        }
+        continue
+      }
+      if (ambiguousCallIds.has(callId) || evictedCallIds.has(callId)) continue
       let args
       try { args = JSON.parse(event.data.arguments) } catch { args = undefined }
       if (!args || typeof args.command !== 'string' || args.command.length > 4_096) {

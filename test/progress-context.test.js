@@ -240,6 +240,21 @@ test('quarantines a todo call ID reused after its first result completed', () =>
   assert.match(unrelated.render(), /second current plan/u)
 })
 
+test('quarantines a todo call ID reused by another tool before its result', () => {
+  const projection = createProgressProjection(sessionWith([
+    todoEvent(1, 'shared-call', [{ content: 'must not be attributed to read', status: 'in_progress' }]),
+    { seq: 2, type: 'tool/call', data: { callId: 'shared-call', name: 'read', arguments: '{"file_path":"README.md"}' } },
+    resultEvent(3, 'shared-call'),
+  ]))
+  assert.equal(projection.render(), '')
+  const reverse = createProgressProjection(sessionWith([
+    { seq: 1, type: 'tool/call', data: { callId: 'shared-call', name: 'read', arguments: '{"file_path":"README.md"}' } },
+    todoEvent(2, 'shared-call', [{ content: 'must not be attributed to read', status: 'in_progress' }]),
+    resultEvent(3, 'shared-call'),
+  ]))
+  assert.equal(reverse.render(), '')
+})
+
 test('quarantines duplicate results for one todo call ID', () => {
   const projection = createProgressProjection(sessionWith([
     todoEvent(1, 'duplicate-result', [{ content: 'ambiguous completed plan', status: 'in_progress' }]),

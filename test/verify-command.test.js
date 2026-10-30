@@ -89,6 +89,16 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
     resultEvent(4, 'stale-duplicate', 'stale duplicate first result'),
     resultEvent(5, 'stale-duplicate', 'second result'),
   ]), [], 'a stale duplicate result makes the reused generation ambiguous and is discarded')
+  assert.deepEqual(collectBashResults([
+    call(1, 'cross-tool', 'pnpm test'),
+    { seq: 2, type: 'tool/call', data: { callId: 'cross-tool', name: 'read', arguments: '{"file_path":"README.md"}' } },
+    resultEvent(3, 'cross-tool', 'readme contents'),
+  ]), [], 'another tool reusing the ID cannot complete the pending bash call')
+  assert.deepEqual(collectBashResults([
+    { seq: 1, type: 'tool/call', data: { callId: 'cross-tool', name: 'read', arguments: '{"file_path":"README.md"}' } },
+    call(2, 'cross-tool', 'pnpm test'),
+    resultEvent(3, 'cross-tool', 'readme contents'),
+  ]), [], 'a bash call cannot reuse an ID already claimed by another tool')
   const nonText = collectBashResults([
     call(1, 'image', 'pnpm test'),
     { seq: 2, type: 'tool/result', data: { message: { toolCallId: 'image', isError: false, content: [{ type: 'image', data: 'binary' }] } } },
