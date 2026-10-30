@@ -880,6 +880,17 @@ test('removes control characters from stop reason metadata', async () => {
   assert.match(queued[0][1], /stop reason: timeout next/u)
 })
 
+test('omits stop reason that becomes empty after invisible cleanup', async () => {
+  for (const stopReason of ['\u200b', '\ufeff', '\u200b\ufeff']) {
+    const { agent, queued, command } = fixture(failed({ stopReason }))
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'success')
+    const line = queued[0][1].split('\n').find(line => line.startsWith('Recorded status'))
+    assert.equal(line, 'Recorded status: failed')
+    assert.doesNotMatch(queued[0][1], /stop reason:/u)
+  }
+})
+
 test('omits blank stop reason metadata in handoff', async () => {
   const { agent, queued, command } = fixture(failed({ stopReason: '   ' }))
   const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
