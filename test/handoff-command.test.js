@@ -443,6 +443,35 @@ test('accepts persisted results at the exact TTL boundary', async () => {
   }
 })
 
+test('does not extend restored handoff evidence beyond its original expiry', async () => {
+  let time = 1_000
+  const agent = { id: 'parent-restored-expiry' }
+  const stored = {
+    parentId: agent.id, childId: 'child-1', status: 'incomplete', output: 'restored evidence',
+    truncated: false, omittedNonText: false, settledAt: 900, expiresAt: 2_000,
+  }
+  const registry = createTaskResultRegistry({
+    now: () => time,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => stored,
+      list: async () => [stored],
+    },
+  })
+  const queued = []
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  const first = await command.handler({ agent, rawInput: 'child-1 inspect' })
+  assert.equal(first.kind, 'success')
+  assert.equal(queued.length, 1)
+  time = 2_000
+  const second = await command.handler({ agent, rawInput: 'child-1 inspect again' })
+  assert.equal(second.kind, 'error')
+  assert.match(second.text, /failed or incomplete/u)
+  assert.equal(queued.length, 1, 'the original expiry is not extended by restored-cache reads')
+  await registry.dispose()
+})
+
 test('rejects over-TTL persisted results even before their expiry time', async () => {
   const agent = { id: 'parent-persisted-ttl' }
   for (const status of ['failed', 'incomplete']) {
