@@ -596,6 +596,25 @@ test('storage failure falls back to current local state rather than the pre-I/O 
   await registry.dispose()
 })
 
+test('storage read failure preserves a child that starts while the read is pending', async () => {
+  const parent = agent('failure-start-race')
+  const gate = deferred()
+  const registry = createTaskResultRegistry({
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => { await gate.promise; throw new Error('storage unavailable') },
+      list: async () => [],
+    },
+  })
+  const reading = registry.readAsync(parent, 'shared-child')
+  assert.equal(registry.recordStart(parent, 'shared-child'), true)
+  gate.resolve()
+  assert.deepEqual(await reading, { childId: 'shared-child', status: 'running' })
+  assert.deepEqual(registry.read(parent, 'shared-child'), { childId: 'shared-child', status: 'running' })
+  await registry.dispose()
+})
+
 test('storage read and list failures return no restored result when memory is empty', async () => {
   const parent = agent('empty-storage-failure')
   const registry = createTaskResultRegistry({
