@@ -253,6 +253,14 @@ test('quarantines a todo call ID reused by another tool before its result', () =
     resultEvent(3, 'shared-call'),
   ]))
   assert.equal(reverse.render(), '')
+  const afterQuarantine = createProgressProjection(sessionWith([
+    todoEvent(1, 'shared-call', [{ content: 'first ambiguous plan', status: 'in_progress' }]),
+    todoEvent(2, 'shared-call', [{ content: 'second ambiguous plan', status: 'in_progress' }]),
+    { seq: 3, type: 'tool/call', data: { callId: 'shared-call', name: 'read', arguments: '{"file_path":"README.md"}' } },
+    todoEvent(4, 'shared-call', [{ content: 'must stay quarantined', status: 'in_progress' }]),
+    resultEvent(5, 'shared-call'),
+  ]))
+  assert.equal(afterQuarantine.render(), '')
 })
 
 test('quarantines duplicate results for one todo call ID', () => {

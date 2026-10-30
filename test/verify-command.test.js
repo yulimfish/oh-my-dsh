@@ -99,6 +99,13 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
     call(2, 'cross-tool', 'pnpm test'),
     resultEvent(3, 'cross-tool', 'readme contents'),
   ]), [], 'a bash call cannot reuse an ID already claimed by another tool')
+  assert.deepEqual(collectBashResults([
+    call(1, 'cross-tool', 'pnpm test -- first'),
+    call(2, 'cross-tool', 'pnpm test -- second'),
+    { seq: 3, type: 'tool/call', data: { callId: 'cross-tool', name: 'read', arguments: '{"file_path":"README.md"}' } },
+    call(4, 'cross-tool', 'pnpm test -- third'),
+    resultEvent(5, 'cross-tool', 'readme contents'),
+  ]), [], 'cross-tool reuse must not readmit an already quarantined ID')
   const nonText = collectBashResults([
     call(1, 'image', 'pnpm test'),
     { seq: 2, type: 'tool/result', data: { message: { toolCallId: 'image', isError: false, content: [{ type: 'image', data: 'binary' }] } } },
