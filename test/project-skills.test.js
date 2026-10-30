@@ -3192,6 +3192,27 @@ test('format compatibility suppresses nested discovery for invalid and escaping 
   }
 })
 
+test('format compatibility ignores flat Markdown symlinks and rejects a regular-to-symlink locator transition', async t => {
+  const cwd = await makeWorkspace(t)
+  const target = await writeCompatibilityDocument(cwd, 'actual.txt', '---\nname: linked-flat\ndescription: Contained\n---\nContained body.')
+  const link = path.join(cwd, '.opencode/skills/alias.md')
+  await symlink(target, link)
+  const { ctx } = makeRegistry(makeFileSystem().fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  assert.deepEqual((await provider.list({ cwd })).candidates, [])
+  await unlink(link)
+  await writeCompatibilityDocument(cwd, 'alias.md', '---\nname: linked-flat\ndescription: Contained\n---\nContained body.')
+  const listed = (await provider.list({ cwd })).candidates.find(candidate => candidate.name === 'linked-flat')
+  assert.ok(listed)
+  await rename(link, path.join(cwd, '.opencode/skills/regular.txt'))
+  await symlink(target, link)
+  assert.equal(await provider.get(listed, { cwd }), undefined)
+})
+
 test('strict mode loads contained skill symlinks and rejects escapes and stale targets', async t => {
   const cwd = await makeWorkspace(t)
   const target = path.join(cwd, '.opencode/skills/linked/actual.txt')

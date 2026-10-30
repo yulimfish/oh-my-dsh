@@ -438,11 +438,11 @@ function sourceForDirectory(directory) {
   return 'project-local'
 }
 
-async function isContainedSkillPath(ctx, { cwd, cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal }) {
+async function isContainedSkillPath(ctx, { cwd, cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal, allowSymlink = true }) {
   const fs = ctx.fs
   if (typeof fs.lstat !== 'function') return false
   const lexicalInfo = await fs.lstat(resolverPath, { cwd }, signal)
-  if (!lexicalInfo || (lexicalInfo.type !== 'file' && lexicalInfo.type !== 'symlink')) return false
+  if (!lexicalInfo || (lexicalInfo.type !== 'file' && lexicalInfo.type !== 'symlink') || (!allowSymlink && lexicalInfo.type === 'symlink')) return false
   const currentRoot = await fs.resolve(rootPath, { cwd, signal })
   const currentFile = await fs.resolve(resolverPath, { cwd, signal })
   return fs.contains(cwdTarget, currentRoot)
@@ -847,7 +847,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     return true
   }
 
-  const makeCandidate = (skill, rootPath, rootTarget, skillDirectoryTarget, fileTarget, rootIndex, resolverPath, userRoot, revision) => {
+  const makeCandidate = (skill, rootPath, rootTarget, skillDirectoryTarget, fileTarget, rootIndex, resolverPath, userRoot, revision, allowSymlink = true) => {
     const invocation = {
       modelInvocable: skill.invocation.modelInvocable && !disabledSkills.has(skill.name),
       userInvocable: skill.invocation.userInvocable && !disabledSkills.has(skill.name),
@@ -865,7 +865,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       invocation,
       rank: userRoot ? userRoot.rank : PROJECT_SKILL_RANK + rootIndex,
       userRoot: userRoot?.source,
-      locator: { rootTarget, skillDirectoryTarget, fileTarget, rootPath, resolverPath, userRoot: userRoot?.source, observationRevision: revision },
+      locator: { rootTarget, skillDirectoryTarget, fileTarget, rootPath, resolverPath, userRoot: userRoot?.source, observationRevision: revision, allowSymlink },
       ...(skill.metadata ? { metadata: skill.metadata } : {}),
     }
   }
@@ -1140,7 +1140,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                   complete = false
                   continue
                 }
-                if (!await isContainedSkillPath(ctx, { cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal })) {
+                if (!await isContainedSkillPath(ctx, { cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal, allowSymlink: !formatCompatibility || entryInfo.type !== 'file' })) {
                   complete = false
                   continue
                 }
@@ -1150,7 +1150,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                   complete = false
                   continue
                 }
-                if (!await isContainedSkillPath(ctx, { cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal })) {
+                if (!await isContainedSkillPath(ctx, { cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal, allowSymlink: !formatCompatibility || entryInfo.type !== 'file' })) {
                   complete = false
                   continue
                 }
@@ -1175,7 +1175,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
               if (formatCompatibility && entryInfo.type !== 'directory' && orderedEntry.parentTarget
                 && candidates.some(existing => existing.name === skill.name && existing.locator.rootTarget.targetKey === rootTarget.targetKey
                   && existing.locator.skillDirectoryTarget.targetKey !== skillDirectoryTarget.targetKey)) continue
-              const candidate = makeCandidate(skill, rootPath, rootTarget, skillDirectoryTarget, fileTarget, rootIndex, resolverPath, userRoot, startingObservationRevision)
+              const candidate = makeCandidate(skill, rootPath, rootTarget, skillDirectoryTarget, fileTarget, rootIndex, resolverPath, userRoot, startingObservationRevision, !formatCompatibility || entryInfo.type !== 'file')
               if (formatCompatibility && entryInfo.type === 'directory') {
                 // Keep accepted directory candidates ahead of same-root flat files.
                 candidates.splice(directoryCandidateEnd, 0, candidate)
@@ -1232,7 +1232,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           return undefined
         }
         if (!await isContainedSkillPath(ctx, {
-          cwd: userRoot ? locator.rootPath : lookup.cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath: locator.rootPath, rootTarget, fileTarget, resolverPath: locator.resolverPath, signal,
+          cwd: userRoot ? locator.rootPath : lookup.cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath: locator.rootPath, rootTarget, fileTarget, resolverPath: locator.resolverPath, signal, allowSymlink: locator.allowSymlink ?? true,
         })) {
           invalidateObservation()
           return undefined
@@ -1250,6 +1250,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           fileTarget,
           resolverPath: locator.resolverPath,
           signal,
+          allowSymlink: locator.allowSymlink ?? true,
         })) {
           invalidateObservation()
           return undefined
