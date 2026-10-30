@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHandoffCommand } from '../src/handoff-command.js'
+import { createTaskResultRegistry } from '../src/task-result-tool.js'
 
 function fixture(snapshot, { asyncRead = false } = {}) {
   const agent = { id: 'parent-1' }
@@ -46,6 +47,22 @@ test('accepts incomplete results and preserves truncation and omitted-block cave
   assert.match(prompt, /Non-text result blocks were omitted/u)
   assert.match(prompt, /no retained child output/u)
   assert.match(prompt, /Inspect the evidence, identify the unfinished work/u)
+})
+
+test('does not hand off stale failure evidence after the same child ID starts new work', async () => {
+  const agent = { id: 'parent-generation' }
+  const registry = createTaskResultRegistry()
+  assert.equal(registry.recordStart(agent, 'child-1'), true)
+  assert.equal(registry.recordFailure(agent, 'child-1'), true)
+  assert.equal(registry.clearAgent(agent), true)
+  assert.equal(registry.recordStart(agent, 'child-1'), true)
+  const queued = []
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent, rawInput: 'child-1 retry the failed investigation' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /failed or incomplete/u)
+  assert.equal(queued.length, 0)
+  await registry.dispose()
 })
 
 test('rejects running, completed, unknown, cross-session, malformed, and service-failure results without queueing', async () => {
