@@ -473,6 +473,27 @@ test('retains explicit omission and evidence edges under combined multibyte pres
   assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
 })
 
+test('preserves boundaries and guidance when fixed metadata approaches the byte cap', async () => {
+  const childId = 'c'.repeat(256)
+  const { agent, queued, command } = fixture(failed({
+    childId,
+    status: 'incomplete',
+    output: '汉'.repeat(8_192),
+    truncated: true,
+    omittedNonText: true,
+    stopReason: 'x'.repeat(80),
+  }))
+  const response = await command.handler({ agent, rawInput: `${childId} ${'汉'.repeat(1_000)}` })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.ok(prompt.length <= 6_000)
+  assert.ok(Buffer.byteLength(prompt, 'utf8') <= 6_000)
+  assert.match(prompt, /evidence omitted for prompt budget/u)
+  assert.match(prompt, /Requested next step from the current user:/u)
+  assert.match(prompt, /Start a NEW bounded dsh_omo_task/u)
+  assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
+})
+
 test('labels failed handoff with no retained output and stop reason', async () => {
   const { agent, queued, command } = fixture(failed({ output: '', stopReason: 'timeout' }))
   const response = await command.handler({ agent, rawInput: 'child-1 investigate timeout' })
