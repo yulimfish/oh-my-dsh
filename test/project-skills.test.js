@@ -3034,8 +3034,6 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
     ['bad-name.md', '---\nname: invalid/name\n---\nPrivate body.'],
     ['blank-description.md', '---\ndescription: "   "\n---\nPrivate body.'],
     ['null-description.md', '---\ndescription: true\n---\nPrivate body.'],
-
-    ['duplicate.md', '---\nname: first\nname: second\n---\nPrivate body.'],
     ['control.md', '---\nname: "bad\\u202evalue"\n---\nPrivate body.'],
     ['Bad Name.md', '---\nname: null\n---\nPrivate body.'],
     ['bad name/bad name.md', '---\nname: ""\n---\nPrivate body.'],
@@ -3049,9 +3047,15 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
   const recovered = await recoveredRegistry.get('broken', { cwd })
   assert.equal(recovered.content, 'Recovered body.')
   assert.equal(recovered.description, '(opencode-project - Skill) Project skill broken')
+  await writeCompatibilityDocument(cwd, 'duplicate.md', '---\nname: first\nname: second\n---\nRecovered body.\n')
+  const { registry: duplicateRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const duplicate = await duplicateRegistry.get('duplicate', { cwd })
+  assert.equal(duplicate.content, 'Recovered body.')
+  assert.equal(duplicate.description, '(opencode-project - Skill) Project skill duplicate')
   const strict = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills'] })
   assert.equal(await strict.registry.get('broken', { cwd }), undefined)
+  assert.equal(await strict.registry.get('duplicate', { cwd }), undefined)
   await writeCompatibilityDocument(cwd, 'cr-malformed.md', '---\rname: "good"\rdescription: "valid"\ragent: [invalid\r---\rRecovered body.\r')
   const { registry: crRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
   assert.equal(await crRegistry.get('cr-malformed', { cwd }), undefined)
