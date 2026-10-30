@@ -141,6 +141,22 @@ test('isolates same-ID replacements and does not evict live Agent state at capac
   review.dispose()
 })
 
+test('clearing an unreadable Agent ID also releases its Goal review slot', async () => {
+  const { live, review } = harness()
+  const agents = Array.from({ length: 257 }, (_value, index) => ({
+    id: `agent-${index}`,
+    messages: [],
+    steer(message) { this.messages.push(message) },
+  }))
+  for (const agent of agents) live.set(agent.id, agent)
+  for (const agent of agents.slice(0, 256)) await review.listener(payload(agent))
+  Object.defineProperty(agents[0], 'id', { get() { throw new Error('private id failure') } })
+  assert.doesNotThrow(() => review.clearAgent(agents[0]))
+  await review.listener(payload(agents[256]))
+  assert.equal(agents[256].messages.length, 1, 'an unreadable ID cannot leave a review slot occupied forever')
+  review.dispose()
+})
+
 test('does not consume a Goal review when steer is unavailable', async () => {
   const { live, review } = harness()
   const messages = []
