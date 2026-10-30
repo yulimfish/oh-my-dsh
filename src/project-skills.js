@@ -66,7 +66,12 @@ const JSON_TAG_RESOLVERS = Object.freeze({
       onError(`cannot resolve float scalar ${JSON.stringify(value)}`)
       return value
     }
-    return Number.parseFloat(value)
+    const result = Number.parseFloat(value)
+    if (!Number.isFinite(result)) {
+      onError(`cannot resolve float scalar ${JSON.stringify(value)}`)
+      return value
+    }
+    return result
   },
 })
 
