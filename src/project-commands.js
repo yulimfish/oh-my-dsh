@@ -607,7 +607,7 @@ export function parseProjectCommandDocument(name, input, source = 'opencode', op
     || (!malformedFrontmatter && document.contents !== null && !isMap(document.contents))) {
     throw new TypeError('Project command YAML frontmatter must be a valid mapping.')
   }
-  const allowedFrontmatterKeys = new Set(['description', 'argument-hint'])
+  const allowedFrontmatterKeys = new Set(['description', 'argument-hint', 'name'])
   for (const pair of malformedFrontmatter ? [] : document.contents?.items ?? []) {
     if (!isScalar(pair?.key) || !allowedFrontmatterKeys.has(pair.key.value)
       || pair.key.tag !== undefined || pair.key.anchor !== undefined) {
