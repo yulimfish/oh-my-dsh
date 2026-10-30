@@ -201,6 +201,14 @@ test('does not claim no delivery when queueing fails after partial acceptance', 
   assert.doesNotMatch(response.text, /no handoff was queued/iu)
 })
 
+test('rejects a thenable from the synchronous registry adapter without queueing', async () => {
+  const { agent, queued, command } = fixture(Promise.resolve(failed()))
+  const response = await command.handler({ agent, rawInput: 'child-1' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /failed or incomplete/u)
+  assert.equal(queued.length, 0)
+})
+
 test('bounds the complete handoff prompt and marks additional evidence truncation', async () => {
   const { agent, queued, command } = fixture(failed({ output: 'x'.repeat(8_192) }))
   const response = await command.handler({ agent, rawInput: 'child-1' })
