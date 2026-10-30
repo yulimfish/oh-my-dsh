@@ -206,7 +206,7 @@ export function resolveCompatibleSkillReferences(content, basePath) {
     if (nextCharacter === '#' || nextCharacter === '\\' || (windows && nextCharacter === ':')) continue
     const resolved = pathApi.resolve(base, reference)
     const relativePath = pathApi.relative(base, resolved)
-    if (relativePath === '..' || relativePath.startsWith(`..${pathApi.sep}`) || pathApi.isAbsolute(relativePath)) continue
+    if (relativePath.startsWith('..') || pathApi.isAbsolute(relativePath)) continue
     const displayPath = windows ? resolved.replaceAll('\\', '/') : resolved
     const replacement = `${displayPath}${reference.endsWith('/') && !displayPath.endsWith('/') ? '/' : ''}`
     if (Buffer.byteLength(result) + Buffer.byteLength(content.slice(cursor, match.index)) + Buffer.byteLength(replacement) > MAX_SKILL_BYTES) {

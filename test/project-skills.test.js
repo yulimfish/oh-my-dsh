@@ -2890,7 +2890,7 @@ test('format compatibility rewrites only bounded nonescaping file-like reference
   const { registry } = compatibilityRegistry(t, fs)
   const loaded = await registry.get('guide', { cwd })
   const canonicalDirectory = await realpath(path.join(cwd, '.opencode/skills/guide'))
-  assert.equal(loaded.content, `Consult ${canonicalDirectory}/references/guide.md and @docs/.\nKeep @../outside.md, @not-a-path, and mail@example.com.\nKeep @data/#/../../../../outside.txt and @data/file.md\\..\\..\\outside.txt.\nKeep ${canonicalDirectory}/..cache/file.md now.\nConsult ${canonicalDirectory}/references/guide.md now.`)
+  assert.equal(loaded.content, `Consult ${canonicalDirectory}/references/guide.md and @docs/.\nKeep @../outside.md, @not-a-path, and mail@example.com.\nKeep @data/#/../../../../outside.txt and @data/file.md\\..\\..\\outside.txt.\nKeep @docs/../..cache/file.md now.\nConsult ${canonicalDirectory}/references/guide.md now.`)
   const padded = `${'@references/guide.md '.repeat(65)}`
   await writeCompatibilityDocument(cwd, 'many/SKILL.md', padded)
   const { fs: manyFs } = makeFileSystem()
@@ -2919,6 +2919,9 @@ test('reference compatibility refuses Windows alternate-stream suffixes while pr
     assert.equal(resolveCompatibleSkillReferences('See @docs/readme.md now.', base), `See ${base.replaceAll('\\', '/')}/docs/readme.md now.`)
   }
   assert.equal(resolveCompatibleSkillReferences('See @docs/readme.md:note now.', '/skills/guide'), 'See /skills/guide/docs/readme.md:note now.')
+  for (const base of ['/skills/guide', 'C:\\skills\\guide']) {
+    assert.equal(resolveCompatibleSkillReferences('See @docs/../..cache/file.md now.', base), 'See @docs/../..cache/file.md now.')
+  }
 })
 
 test('format compatibility preserves literal POSIX backslashes in canonical display bases', async t => {
