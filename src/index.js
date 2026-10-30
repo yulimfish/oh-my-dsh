@@ -57,6 +57,7 @@ import { createProgressContext } from './progress-context.js'
 import { registerGoalCompletionReview } from './goal-completion-review.js'
 import { createVerifyCommand } from './verify-command.js'
 import { createHandoffCommand } from './handoff-command.js'
+import { createLongHorizonConfigService } from './long-horizon-config-service.js'
 import { createGeneralToolResultPruningListener, createSearchToolResultPruningListener, normalizeAdditionalToolResultPruningNames } from './search-tool-result-pruning.js'
 import { createManualContextPruningHandler } from './manual-context-pruning-command.js'
 import { normalizeImageQueryRoute, registerImageQueryTool } from './image-query-tool.js'
@@ -3332,6 +3333,10 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
 }
 
 export function apply(ctx, rawConfig) {
+  if (typeof ctx.get === 'function' && ctx.get('configEditor')) {
+    const settings = createLongHorizonConfigService(ctx.get('configEditor'))
+    ctx.provide('longHorizonConfig', settings)
+  }
   const config = rawConfig
   const userOpenCodeCommandRoots = normalizeUserOpenCodeCommandRoots(config.userOpenCodeCommandRoots)
   const userClaudeCommandRoots = normalizeUserClaudeCommandRoots(config.userClaudeCommandRoots)

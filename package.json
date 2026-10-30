@@ -10,6 +10,7 @@
   },
   "exports": {
     ".": "./src/index.js",
+    "./client": "./client.js",
     "./roles": "./src/roles.js",
     "./skills": "./src/skills.js",
     "./specialist-preset-policy": "./src/specialist-preset-policy.js",
@@ -21,6 +22,7 @@
   },
   "files": [
     "src/",
+    "client.js",
     "test/",
     "scripts/",
     "docs/",
@@ -39,6 +41,10 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
     }
   },
   "dependencies": {
