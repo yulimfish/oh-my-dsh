@@ -1299,6 +1299,18 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           invalidateObservation()
           return undefined
         }
+        if (formatCompatibility) {
+          const fresh = await provider.list({ cwd: lookup.cwd, signal })
+          throwIfAborted(signal)
+          const current = fresh.candidates.find(item => item.name === candidate.name)
+          if (!fresh.complete || !current
+            || current.locator.rootPath !== locator.rootPath || current.locator.resolverPath !== locator.resolverPath
+            || current.locator.fileTarget.targetKey !== locator.fileTarget.targetKey) {
+            invalidateObservation()
+            return undefined
+          }
+          if (locator.observationRevision !== observationRevision) return undefined
+        }
         return {
           name: candidate.name,
           description: candidate.description,

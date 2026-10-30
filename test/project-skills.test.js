@@ -2600,6 +2600,26 @@ test('nested flat discovery rejects file symlinks and escaping container symlink
   assert.equal(reads.some(key => key.includes('secret.md')), false)
 })
 
+test('format compatibility cached flat skill is invalidated when a same-name directory skill appears without watcher delivery', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'shared.md', '---\nname: shared\ndescription: Same\n---\nFLAT')
+  const { ctx } = makeRegistry(makeFileSystem().fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const initial = await provider.list({ cwd })
+  const cached = initial.candidates.find(candidate => candidate.name === 'shared')
+  assert.equal((await provider.get(cached, { cwd })).content, 'FLAT')
+  await writeCompatibilityDocument(cwd, 'directory/SKILL.md', '---\nname: shared\ndescription: Same\n---\nDIRECTORY')
+  assert.equal(await provider.get(cached, { cwd }), undefined)
+  const fresh = await provider.list({ cwd })
+  const directory = fresh.candidates.find(candidate => candidate.name === 'shared')
+  assert.equal(directory.locator.resolverPath, '.opencode/skills/directory/SKILL.md')
+  assert.equal((await provider.get(directory, { cwd })).content, 'DIRECTORY')
+})
+
 for (const timing of ['before', 'during']) {
   test(`delivered directory change ${timing} provider loading rejects the stale candidate`, async t => {
     const cwd = await makeWorkspace(t)
