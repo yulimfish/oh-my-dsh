@@ -461,6 +461,35 @@ test('plugin disposal joins replacement cleanup without self-await or duplicate 
   assert.equal(replacement.calls.contexts.length, 0)
 })
 
+test('concurrent replacement notifications install only one progress provider', async () => {
+  const live = new Map()
+  const feature = createProgressContext({ get: () => undefined }, { get: id => live.get(id) })
+  const original = makeAgent('progress-replacement')
+  let releaseTracking
+  const trackingReady = new Promise(resolve => { releaseTracking = resolve })
+  let trackingStartedResolve
+  const trackingStarted = new Promise(resolve => { trackingStartedResolve = resolve })
+  original.ctx.effect = execute => {
+    execute()
+    return async () => {
+      trackingStartedResolve()
+      await trackingReady
+    }
+  }
+  live.set(original.id, original)
+  await feature.listener({ agent: original })
+  const replacement = makeAgent(original.id)
+  live.set(replacement.id, replacement)
+  const first = feature.listener({ agent: replacement, source: 'compact' })
+  const second = feature.listener({ agent: replacement, source: 'resume' })
+  await trackingStarted
+  releaseTracking()
+  await Promise.all([first, second])
+  assert.equal(replacement.calls.contexts.length, 1)
+  await feature.dispose()
+  assert.equal(replacement.calls.contextDisposals, 1)
+})
+
 test('real SessionStore and systemPrompt recover accepted progress in the matching Agent scope', async t => {
   const ctx = new Context()
   const promptFiber = await ctx.plugin(SystemPrompt)

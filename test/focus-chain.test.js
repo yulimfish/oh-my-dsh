@@ -262,6 +262,35 @@ test('plugin disposal joins an in-flight same-ID replacement cleanup', async () 
   assert.equal(replacement.calls.contexts.length, 0)
 })
 
+test('concurrent replacement notifications install only one prompt provider', async () => {
+  const { live, service } = makeService()
+  const feature = createFocusChain({ get: () => activeGoal() }, service)
+  const original = makeAgent('same-id')
+  let releaseTracking
+  const trackingReady = new Promise(resolve => { releaseTracking = resolve })
+  let trackingStartedResolve
+  const trackingStarted = new Promise(resolve => { trackingStartedResolve = resolve })
+  original.ctx.effect = execute => {
+    execute()
+    return async () => {
+      trackingStartedResolve()
+      await trackingReady
+    }
+  }
+  live.set(original.id, original)
+  await notify(feature, original)
+  const replacement = makeAgent(original.id)
+  live.set(replacement.id, replacement)
+  const first = notify(feature, replacement, 'compact')
+  const second = notify(feature, replacement, 'resume')
+  await trackingStarted
+  releaseTracking()
+  await Promise.all([first, second])
+  assert.equal(replacement.calls.contexts.length, 1)
+  await feature.dispose()
+  assert.equal(replacement.calls.contextDisposals, 1)
+})
+
 test('plugin disposal joins Agent-scope cleanup and removes its prompt context', async () => {
   const { live, service } = makeService()
   const feature = createFocusChain({ get: () => activeGoal() }, service)

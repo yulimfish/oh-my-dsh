@@ -119,6 +119,9 @@ export function createFocusChain(goalsService, agentsService) {
         await trackDisposal(existing)
         if (disposed || signal?.aborted === true || !exactLiveAgent(agentsService, agentId, agent)) return
       }
+      const current = registrations.get(agentId)
+      if (current?.agent === agent && !current.disposed) return
+      if (current) return
       // Never evict a live Agent's anchor merely to admit another Agent.
       if (registrations.size >= MAX_AGENT_STATES) return
 
