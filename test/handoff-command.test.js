@@ -472,6 +472,30 @@ test('does not extend restored handoff evidence beyond its original expiry', asy
   await registry.dispose()
 })
 
+test('revalidates each repeated handoff from the current retained result', async () => {
+  const agent = { id: 'parent-repeated-handoff' }
+  const registry = createTaskResultRegistry()
+  registry.recordStart(agent, 'child-1')
+  registry.recordResult(agent, 'child-1', {
+    status: 'incomplete', output: 'current retained evidence', truncated: false,
+    omittedNonText: false, stopReason: 'max-tokens',
+  })
+  const queued = []
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  const first = await command.handler({ agent, rawInput: 'child-1 inspect first' })
+  const second = await command.handler({ agent, rawInput: 'child-1 inspect second' })
+  assert.equal(first.kind, 'success')
+  assert.equal(second.kind, 'success')
+  assert.equal(queued.length, 2)
+  assert.notStrictEqual(queued[0][1], queued[1][1])
+  for (const [index, nextStep] of ['inspect first', 'inspect second'].entries()) {
+    assert.match(queued[index][1], /current retained evidence/u)
+    assert.match(queued[index][1], new RegExp(nextStep, 'u'))
+    assert.strictEqual(queued[index][0], agent)
+  }
+  await registry.dispose()
+})
+
 test('rejects over-TTL persisted results even before their expiry time', async () => {
   const agent = { id: 'parent-persisted-ttl' }
   for (const status of ['failed', 'incomplete']) {
