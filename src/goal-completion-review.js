@@ -1,4 +1,5 @@
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { quoteBoundedText } from './prompt-text.js'
 
 const MAX_AGENT_STATES = 256
 const MAX_AGENT_ID_CHARS = 256
@@ -53,7 +54,7 @@ function activeGoal(goals, agent) {
     return {
       id: goal.id,
       revision: goal.revision,
-      objective: objective.length > MAX_OBJECTIVE_CHARS ? `${objective.slice(0, MAX_OBJECTIVE_CHARS - 1)}…` : objective,
+      objective: quoteBoundedText(objective, MAX_OBJECTIVE_CHARS),
     }
   } catch {
     return undefined
@@ -65,7 +66,7 @@ function reviewMessage(goal) {
     source: { kind: 'goal-completion-review', form: 'notice', summary: boundContextSummary('Review the active Goal before closing this turn') },
     content: [{
       type: 'text',
-      text: `[DSH Goal completion review]\n\nBefore closing this turn, check the current native Goal against evidence already gathered: ${JSON.stringify(goal.objective)}\n\nIf requested work remains, continue it now rather than merely describing it as done. If recent exploration has added no new information, change strategy instead of repeating it. If the objective is genuinely satisfied, finish concisely. This one-time review grants no permissions and does not change, complete, pause, resume, or clear the Goal.`,
+      text: `[DSH Goal completion review]\n\nBefore closing this turn, check the current native Goal against evidence already gathered: ${goal.objective}\n\nIf requested work remains, continue it now rather than merely describing it as done. If recent exploration has added no new information, change strategy instead of repeating it. If the objective is genuinely satisfied, finish concisely. This one-time review grants no permissions and does not change, complete, pause, resume, or clear the Goal.`,
     }],
   })
 }

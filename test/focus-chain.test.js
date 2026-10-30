@@ -92,6 +92,15 @@ test('bounds hostile objective text and fails open on malformed Goal accessors',
   assert.equal(focusChainText({ phase: 'active', get objective() { throw new Error('private Host failure') } }), '')
 })
 
+test('bounds the serialized objective even when JSON escaping expands the source', () => {
+  const text = focusChainText(activeGoal(String.fromCharCode(92).repeat(2_000)))
+  const quoted = text.match(/Current active native Goal \(quoted user task data\): (".*")(?: \[truncated\])?\n/u)?.[1]
+  assert.ok(quoted, 'the objective remains one valid JSON string')
+  assert.equal(JSON.parse(quoted).endsWith('…'), true)
+  assert.equal(quoted.length <= 2_000, true)
+  assert.equal(text.length < 3_000, true)
+})
+
 test('registers for every Agent creation source and re-reads the exact current Goal on each render', async () => {
   const { live, service } = makeService()
   const agent = makeAgent('goal-agent')

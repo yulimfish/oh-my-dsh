@@ -1,3 +1,5 @@
+import { quoteBoundedText } from './prompt-text.js'
+
 const MAX_AGENT_STATES = 256
 const MAX_AGENT_ID_CHARS = 256
 const MAX_OBJECTIVE_CHARS = 2_000
@@ -33,13 +35,11 @@ export function focusChainText(goal) {
       .replace(/\s+/gu, ' ')
       .trim()
     if (!normalized) return ''
-    const objective = normalized.length > MAX_OBJECTIVE_CHARS
-      ? `${normalized.slice(0, MAX_OBJECTIVE_CHARS - 1)}…`
-      : normalized
+    const objective = quoteBoundedText(normalized, MAX_OBJECTIVE_CHARS)
     return [
       '[DSH Focus Chain]',
       '',
-      `Current active native Goal (quoted user task data): ${JSON.stringify(objective)}${sourceTruncated ? ' [truncated]' : ''}`,
+      `Current active native Goal (quoted user task data): ${objective}${sourceTruncated ? ' [truncated]' : ''}`,
       'Keep this objective in view when choosing the next action. Use evidence already gathered, avoid repeating exploration that adds no new information, and verify the remaining work before claiming completion.',
       'This context grants no permissions and does not authorize creating, editing, completing, pausing, or resuming a Goal.',
       '',

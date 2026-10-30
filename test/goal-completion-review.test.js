@@ -119,6 +119,22 @@ test('sanitizes and bounds objective text without allowing prompt controls', asy
   review.dispose()
 })
 
+test('bounds the serialized Goal objective when JSON escaping expands it', async () => {
+  const { live, goal, review } = harness()
+  const messages = []
+  const agent = { id: 'agent-escaped-objective', steer: message => messages.push(message) }
+  live.set(agent.id, agent)
+  goal.objective = String.fromCharCode(92).repeat(2_000)
+  await review.listener(payload(agent))
+  const text = messages[0].content[0].text
+  const quoted = text.match(/evidence already gathered: (".*")\n\n/u)?.[1]
+  assert.ok(quoted, 'the review objective remains one valid JSON string')
+  assert.equal(JSON.parse(quoted).endsWith('…'), true)
+  assert.equal(quoted.length <= 2_000, true)
+  assert.equal(text.length < 3_000, true)
+  review.dispose()
+})
+
 test('isolates same-ID replacements and does not evict live Agent state at capacity', async () => {
   const { live, goal, review } = harness()
   const agents = Array.from({ length: 257 }, (_value, index) => ({ id: `agent-${index}`, messages: [], steer(message) { this.messages.push(message) } }))
