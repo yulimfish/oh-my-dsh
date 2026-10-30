@@ -638,6 +638,30 @@ test('restored terminal results expire at their original settlement deadline', a
   await registry.dispose()
 })
 
+test('restore capacity failure leaves no partial running record', async () => {
+  const parent = agent('restore-capacity')
+  const stored = persistedResult(parent.id, 'stored-child')
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => stored,
+      list: async () => [stored],
+    },
+  })
+  for (let index = 0; index < 32; index += 1) assert.equal(registry.recordStart(parent, `active-${index}`), true)
+  assert.equal(await registry.readAsync(parent, stored.childId), undefined)
+  assert.equal(registry.read(parent, stored.childId), undefined)
+  assert.equal(registry.size(), 32)
+  assert.equal(registry.recordResult(parent, 'active-0', result), true)
+  assert.equal((await registry.readAsync(parent, stored.childId))?.status, 'completed', 'a terminal record may be evicted to admit the stored result')
+  assert.equal(registry.read(parent, stored.childId)?.status, 'completed')
+  assert.equal(registry.read(parent, 'active-0'), undefined, 'the oldest completed record was evicted rather than leaving partial running state')
+  assert.equal(registry.size(), 32)
+  await registry.dispose()
+})
+
 test('caps each parent and refuses excess active records without expiring live work', () => {
   let time = 100
   const registry = createTaskResultRegistry({ now: () => time })
