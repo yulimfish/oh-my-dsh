@@ -1510,6 +1510,17 @@ test('fails closed when the then accessor throws without leaking backend errors'
   assert.equal(queued.length, 0)
 })
 
+test('fails closed when the child identity accessor throws without leaking errors', async () => {
+  const snapshot = failed({ status: 'incomplete', output: 'ordinary evidence' })
+  Object.defineProperty(snapshot, 'childId', { get() { throw new Error('private childId getter failure') } })
+  const { agent, queued, command } = fixture(snapshot)
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /failed or incomplete/u)
+  assert.equal(response.text.includes('private childId getter failure'), false)
+  assert.equal(queued.length, 0)
+})
+
 test('bounds the complete handoff prompt and marks additional evidence truncation', async () => {
   const { agent, queued, command } = fixture(failed({ output: 'x'.repeat(8_192) }))
   const response = await command.handler({ agent, rawInput: 'child-1' })
