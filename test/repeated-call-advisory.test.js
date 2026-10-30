@@ -426,6 +426,22 @@ test('an evicted entry abort callback cannot remove a newer pending entry', asyn
   feature.dispose()
 })
 
+test('reusing a pending token with different arguments does not overwrite its signature', async () => {
+  const { live, feature } = makeHarness()
+  const agent = { id: 'token-reuse' }
+  live.set(agent.id, agent)
+  const token = Symbol('shared-call')
+  const first = makeExec(agent, { path: 'first' }, { token })
+  const second = makeExec(agent, { path: 'second' }, { token })
+  await feature.preExecute(first, async () => ({ kind: 'allow' }))
+  await feature.preExecute(second, async () => ({ kind: 'allow' }))
+  const firstResult = await feature.listener(first, { isError: false }, async () => ({ kind: 'accept', value: {} }))
+  assert.equal(warningCount(firstResult), 0)
+  const secondResult = await feature.listener(second, { isError: false }, async () => ({ kind: 'accept', value: {} }))
+  assert.equal(warningCount(secondResult), 0, 'a reused token cannot bridge a different-argument run')
+  feature.dispose()
+})
+
 test('disposal during downstream execution fences reminders and clears pending abort listeners', async () => {
   const { live, feature } = makeHarness()
   const agent = { id: 'agent-dispose' }
