@@ -2921,6 +2921,17 @@ test('format compatibility accepts an explicitly empty null tag while preserving
   assert.equal(skill.content, 'Body.')
 })
 
+test('format compatibility accepts explicit decimal integers with leading zeros', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'leading-zero.md', '---\nname: chosen\ndescription: From metadata\nmetadata:\n  rank: !!int "01"\n---\nBody.\n')
+  const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const skill = await registry.get('chosen', { cwd })
+  assert.ok(skill)
+  assert.equal(skill.description, '(opencode-project - Skill) From metadata')
+  assert.equal(skill.metadata.metadata.rank, 1)
+  assert.equal(skill.content, 'Body.')
+})
+
 test('format compatibility rewrites only bounded nonescaping file-like references', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'guide/SKILL.md', 'Consult @references/guide.md and @docs/.\nKeep @../outside.md, @not-a-path, and mail@example.com.\nKeep @data/#/../../../../outside.txt and @data/file.md\\..\\..\\outside.txt.\nKeep @docs/../..cache/file.md now.\nConsult @references/guide.md now.\n')

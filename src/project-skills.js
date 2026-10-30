@@ -38,7 +38,7 @@ const JSON_TAG_RESOLVERS = Object.freeze({
     return value
   },
   'tag:yaml.org,2002:int': (value, onError) => {
-    if (!/^[+-]?(?:0|[1-9][0-9]*|0x[0-9a-fA-F]+|0o[0-7]+|0b[01]+)$/u.test(value)) {
+    if (!/^[+-]?(?:[0-9]+|0x[0-9a-fA-F]+|0o[0-7]+|0b[01]+)$/u.test(value)) {
       onError(`cannot resolve integer scalar ${JSON.stringify(value)}`)
       return value
     }
