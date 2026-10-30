@@ -1489,6 +1489,16 @@ test('rejects result-shaped thenables from a read-only registry without queueing
   assert.equal(queued.length, 0)
 })
 
+test('accepts non-function then metadata without treating it as a thenable', async () => {
+  for (const then of [undefined, null, 'metadata', { value: 'metadata' }]) {
+    const { agent, queued, command } = fixture(failed({ status: 'incomplete', output: 'ordinary evidence', then }))
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'success', String(then))
+    assert.equal(queued.length, 1)
+    assert.match(queued[0][1], /ordinary evidence/u)
+  }
+})
+
 test('bounds the complete handoff prompt and marks additional evidence truncation', async () => {
   const { agent, queued, command } = fixture(failed({ output: 'x'.repeat(8_192) }))
   const response = await command.handler({ agent, rawInput: 'child-1' })
