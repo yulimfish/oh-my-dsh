@@ -172,6 +172,17 @@ test('wait Tool can return a persisted terminal snapshot without restoring runni
   manager.dispose()
 })
 
+test('does not confuse a stale restore miss with absence of a new running child', async () => {
+  const state = fixture()
+  const child = track(state)
+  state.registry.readAsync = async () => undefined
+  await assert.rejects(state.manager.tool.execute({ childId: 'child-1' }, { agent: state.parent }), /No unexpired dsh-omo result/u)
+  assert.equal(state.registry.read(state.parent, 'child-1').status, 'running')
+  state.registry.recordResult(state.parent, 'child-1', result())
+  child.resolve()
+  state.manager.dispose()
+})
+
 test('rejects unknown, malformed, and structurally similar cross-Agent child IDs', async () => {
   const state = fixture()
   track(state)
