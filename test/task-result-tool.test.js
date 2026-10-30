@@ -198,6 +198,29 @@ test('does not overwrite or misreport a new running child during an old persiste
   await registry.dispose()
 })
 
+test('keeps newer local terminal state when an old persistence list resolves', async () => {
+  const parent = agent('restore-list-race')
+  const gate = deferred()
+  const stored = persistedResult(parent.id, 'shared-child')
+  stored.output = 'stale persisted output'
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => undefined,
+      list: async () => gate.promise,
+    },
+  })
+  const listing = registry.listAsync(parent)
+  assert.equal(registry.recordStart(parent, stored.childId), true)
+  assert.equal(registry.recordResult(parent, stored.childId, { ...result, output: 'new local output' }), true)
+  gate.resolve([stored])
+  assert.deepEqual(await listing, [{ childId: stored.childId, status: 'completed' }])
+  assert.equal(registry.read(parent, stored.childId).output, 'new local output')
+  await registry.dispose()
+})
+
 test('storage failure falls back to current local state rather than the pre-I/O snapshot', async () => {
   const parent = agent('parent-storage-failure')
   const readGate = deferred()
