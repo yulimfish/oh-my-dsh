@@ -194,7 +194,7 @@ export function normalizeDisabledProjectSkills(value = []) {
   return normalizeProjectSkillNameList(value, 'disabledProjectSkills')
 }
 
-function parseYamlBoolean(value, field, defaultValue) {
+function parseYamlBoolean(value, field, defaultValue, formatCompatibility = false) {
   if (value === undefined) return defaultValue
   if (typeof value === 'boolean') return value
   if (typeof value === 'number' && (value === 0 || value === 1)) return value === 1
@@ -214,6 +214,7 @@ function parseYamlBoolean(value, field, defaultValue) {
         break
     }
   }
+  if (formatCompatibility) return defaultValue
   throw new SkillFormatError(`frontmatter field ${field} must be boolean`)
 }
 
@@ -394,8 +395,8 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
   }
   const hasMetadata = Object.keys(metadata).length > 0
   const invocation = {
-    modelInvocable: !parseYamlBoolean(frontmatter['disable-model-invocation'], 'disable-model-invocation', false),
-    userInvocable: parseYamlBoolean(frontmatter['user-invocable'], 'user-invocable', true),
+    modelInvocable: !parseYamlBoolean(frontmatter['disable-model-invocation'], 'disable-model-invocation', false, formatCompatibility),
+    userInvocable: parseYamlBoolean(frontmatter['user-invocable'], 'user-invocable', true, formatCompatibility),
   }
 
   return {

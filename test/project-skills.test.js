@@ -2052,6 +2052,33 @@ test('format compatibility ignores non-string whenToUse without losing the prefe
   assert.equal(skill.whenToUse, undefined)
 })
 
+for (const [field, value, defaultInvocation] of [
+  ['user-invocable', 'null', { modelInvocable: true, userInvocable: true }],
+  ['disable-model-invocation', 'sometimes', { modelInvocable: true, userInvocable: true }],
+]) {
+  test(`format compatibility defaults unsupported invocation metadata without losing the preferred skill: ${field}`, async t => {
+    const cwd = await makeWorkspace(t)
+    await writeCompatibilityDocument(cwd, 'shared.md', `---\nname: shared\ndescription: Preferred\n${field}: ${value}\n---\nPREFERRED_BODY\n`)
+    await writeSkill(path.join(cwd, '.claude/skills/shared/SKILL.md'), { name: 'shared', content: 'Fallback must not win.' })
+    const { ctx } = makeRegistry(makeFileSystem().fs)
+    const lifetime = new AbortController()
+    t.after(() => lifetime.abort())
+    const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+      projectSkillDirs: ['.opencode/skills', '.claude/skills'], formatCompatibility: true,
+    })
+    const listed = await provider.list({ cwd })
+    const candidate = listed.candidates.find(item => item.name === 'shared' && item.locator.resolverPath === '.opencode/skills/shared.md')
+    assert.ok(candidate)
+    assert.deepEqual(candidate.invocation, defaultInvocation)
+    const skill = await provider.get(candidate, { cwd })
+    assert.equal(skill.content, 'PREFERRED_BODY')
+    assert.deepEqual(skill.invocation, defaultInvocation)
+    const strict = makeRegistry(makeFileSystem().fs)
+    registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills', '.claude/skills'] })
+    assert.equal((await strict.registry.get('shared', { cwd })).content, 'Fallback must not win.')
+  })
+}
+
 test('format compatibility prioritizes directory candidates within each root through native SkillRegistry', async t => {
   const cwd = await makeWorkspace(t)
   const root = path.join(cwd, '.opencode/skills')
