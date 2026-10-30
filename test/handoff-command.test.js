@@ -1011,6 +1011,23 @@ test('rejects non-boolean caveat values from the initial async result read', asy
   }
 })
 
+test('rejects non-string stop reason values from the initial async result read', async () => {
+  for (const stopReason of [new String('max-tokens'), { value: 'max-tokens' }, ['max-tokens'], null]) {
+    const snapshot = failed({ status: 'incomplete', output: 'same evidence', stopReason })
+    let revalidated = false
+    const queued = []
+    const command = createHandoffCommand({
+      readAsync: async () => snapshot,
+      read() { revalidated = true; return snapshot },
+    }, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent: { id: 'parent-non-string-stop-reason-initial' }, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', String(stopReason))
+    assert.match(response.text, /failed or incomplete/u)
+    assert.equal(revalidated, false, 'invalid initial stop reason never reaches synchronous revalidation')
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('rejects array snapshots from the initial async result read', async () => {
   const snapshot = Object.assign([], failed({ status: 'incomplete', output: 'same evidence' }))
   let revalidated = false
