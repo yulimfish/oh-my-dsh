@@ -2005,6 +2005,25 @@ test('format compatibility treats falsy NaN allowed-tools as absent during list 
   assert.equal(skill.metadata?.['allowed-tools'], undefined)
 })
 
+test('format compatibility sanitizes non-string model metadata without losing the preferred skill', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'shared.md', '---\nname: shared\ndescription: Preferred\nmodel: !!float .NaN\n---\nPREFERRED_BODY\n')
+  await writeSkill(path.join(cwd, '.claude/skills/fallback/SKILL.md'), { name: 'shared', content: 'Fallback must not win.' })
+  const { ctx } = makeRegistry(makeFileSystem().fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills', '.claude/skills'], formatCompatibility: true,
+  })
+  const listed = await provider.list({ cwd })
+  const candidate = listed.candidates.find(item => item.name === 'shared' && item.locator.resolverPath === '.opencode/skills/shared.md')
+  assert.ok(candidate)
+  assert.equal(candidate.metadata?.model, undefined)
+  const skill = await provider.get(candidate, { cwd })
+  assert.equal(skill.content, 'PREFERRED_BODY')
+  assert.equal(skill.metadata?.model, undefined)
+})
+
 test('format compatibility prioritizes directory candidates within each root through native SkillRegistry', async t => {
   const cwd = await makeWorkspace(t)
   const root = path.join(cwd, '.opencode/skills')

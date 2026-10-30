@@ -385,6 +385,10 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
   }
   for (const [key, value] of Object.entries(frontmatter)) {
     if (FRONTMATTER_FIELDS.has(key) || (formatCompatibility && (key === 'metadata' || (key === 'allowed-tools' && !allowedTools)))) continue
+    if (formatCompatibility && key === 'model') {
+      if (typeof value === 'string' && value.trim().length > 0) metadata.model = value.trim()
+      continue
+    }
     assertJsonValue(value)
     metadata[key] = value
   }
