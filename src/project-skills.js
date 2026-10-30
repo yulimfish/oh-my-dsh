@@ -958,7 +958,6 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         throwIfAborted(signal)
         const userRoot = rootIndex >= directories.length ? userRoots[rootIndex - directories.length] : undefined
         const rootPath = userRoot?.rootPath ?? directories[rootIndex]
-        let directoryCandidateEnd = candidates.length
         if (!userRoot && !cwdTarget) { complete = false; continue }
         if (!userRoot && !await watchSymlinkParents(rootPath, cwd, cwdTarget, signal, startingWatchRevision)) complete = false
         if (userRoot && !await watchAbsoluteSkillRoot(rootPath, cwd, signal, startingWatchRevision, false)) complete = false
@@ -1131,10 +1130,10 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                         warn(ctx, 'dsh-omo could not classify a nested project skill directory')
                       }
                     }
-                    if (nestedDirectories.length > 0) orderedEntries.splice(orderedIndex + 1, 0, ...nestedDirectories)
-                    // Defer flat files until all directory candidates have been read,
-                    // so a flat file cannot consume their shared scan budget first.
-                    orderedEntries.push(...nestedFiles)
+                    // Finish this container's recursive directories and flat files
+                    // before advancing to its next sibling, matching upstream's
+                    // per-container first-name-wins merge order.
+                    orderedEntries.splice(orderedIndex + 1, 0, ...nestedDirectories, ...nestedFiles)
                   }
                   continue
                 }
@@ -1206,13 +1205,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 && candidates.some(existing => existing.name === skill.name && existing.locator.rootTarget.targetKey === rootTarget.targetKey
                   && existing.locator.skillDirectoryTarget.targetKey !== skillDirectoryTarget.targetKey)) continue
               const candidate = makeCandidate(skill, rootPath, rootTarget, skillDirectoryTarget, fileTarget, rootIndex, resolverPath, userRoot, startingObservationRevision, !formatCompatibility || entryInfo.type !== 'file')
-              if (formatCompatibility && entryInfo.type === 'directory') {
-                // Keep accepted directory candidates ahead of same-root flat files.
-                candidates.splice(directoryCandidateEnd, 0, candidate)
-                directoryCandidateEnd += 1
-              } else {
-                candidates.push(candidate)
-              }
+              candidates.push(candidate)
             } catch (error) {
               if (signal?.aborted || !formatCompatibility) throw error
               if (error instanceof SkillFormatError) {

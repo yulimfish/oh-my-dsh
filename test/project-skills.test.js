@@ -2734,6 +2734,22 @@ test('nested flat files follow directory skills and preserve same-root collision
   assert.ok(reads.findIndex(key => key.endsWith(`${path.sep}other${path.sep}SKILL.md`)) < reads.findIndex(key => key.endsWith(`${path.sep}flat.md`)))
 })
 
+test('an earlier container nested flat skill wins before a later sibling directory', async t => {
+  const cwd = await makeWorkspace(t)
+  const root = path.join(cwd, '.opencode/skills')
+  await writeCompatibilityDocument(cwd, 'a/flat.md', '---\nname: shared\n---\nFROM_EARLIER_CONTAINER_FLAT')
+  await writeCompatibilityDocument(cwd, 'b/SKILL.md', '---\nname: shared\n---\nFROM_LATER_DIRECTORY')
+  const { fs } = makeFileSystem()
+  const canonicalRoot = await realpath(root)
+  const listDir = fs.listDir
+  fs.listDir = async (target, signal) => {
+    const entries = await listDir(target, signal)
+    return target.targetKey === canonicalRoot ? entries.sort((a, b) => a.name.localeCompare(b.name)) : entries
+  }
+  const { registry } = compatibilityRegistry(t, fs)
+  assert.equal((await registry.get('shared', { cwd })).content, 'FROM_EARLIER_CONTAINER_FLAT')
+})
+
 test('nested flat files are deduplicated against directory skills in the same root', async t => {
   const cwd = await makeWorkspace(t)
   const root = path.join(cwd, '.opencode/skills')
