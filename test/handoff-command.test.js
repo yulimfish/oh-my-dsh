@@ -243,6 +243,20 @@ test('accepts ordinary Unicode child identities and next-step text', async () =>
   }
 })
 
+test('rejects invisible next-step format characters without blocking ordinary Unicode text', async () => {
+  const { agent, queued, calls, command } = fixture(failed())
+  for (const nextStep of ['inspect\u200bstate', 'inspect\ufeffstate']) {
+    const response = await command.handler({ agent, rawInput: `child-1 ${nextStep}` })
+    assert.equal(response.kind, 'error', nextStep)
+    assert.match(response.text, /Usage: \/omo handoff/u)
+  }
+  assert.equal(calls.length, 0)
+  assert.equal(queued.length, 0)
+  const valid = await command.handler({ agent, rawInput: 'child-1 inspect\u00a0state' })
+  assert.equal(valid.kind, 'success')
+  assert.match(queued[0][1], /inspect state/u)
+})
+
 test('validates input, Agent, cancellation, and registry contracts before queueing', async () => {
   const { agent, queued, command } = fixture(failed())
   for (const rawInput of ['', '   ', 'child-1\nchild-2', 'child-1\u202e', `${'x'.repeat(2_049)}`]) {
