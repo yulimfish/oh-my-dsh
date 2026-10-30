@@ -296,6 +296,39 @@ test('rejects a stale async result when the same child ID restarts before handof
   await registry.dispose()
 })
 
+test('does not queue a stale handoff when the parent is replaced during persistent restore', async () => {
+  const oldAgent = { id: 'parent-persistent-replaced' }
+  const replacement = { id: oldAgent.id }
+  let release
+  const readGate = new Promise(resolve => { release = resolve })
+  const stored = {
+    parentId: oldAgent.id, childId: 'child-1', status: 'incomplete',
+    output: 'stale persistent evidence', truncated: false, omittedNonText: false,
+    settledAt: 900, expiresAt: 2_000,
+  }
+  const store = {
+    put: async () => true,
+    delete: async () => true,
+    read: async () => readGate,
+    list: async () => [stored],
+  }
+  const registry = createTaskResultRegistry({ now: () => 1_000, persistentStore: store })
+  const queued = []
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  const pending = command.handler({ agent: oldAgent, rawInput: 'child-1 inspect' })
+  registry.clearAgent(oldAgent)
+  store.read = async () => stored
+  const restored = await registry.readAsync(replacement, 'child-1')
+  assert.equal(restored.output, 'stale persistent evidence')
+  release(stored)
+  const response = await pending
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /failed or incomplete/u)
+  assert.equal(queued.length, 0)
+  assert.equal(registry.read(replacement, 'child-1').output, 'stale persistent evidence')
+  await registry.dispose()
+})
+
 test('does not trust an unversioned async snapshot after same-child replacement', async () => {
   const agent = { id: 'parent-unversioned-stale' }
   const registry = createTaskResultRegistry()
