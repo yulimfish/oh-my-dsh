@@ -582,6 +582,33 @@ test('rejects over-TTL persisted results even before their expiry time', async (
   }
 })
 
+test('rejects metadata-only changes between async read and synchronous revalidation', async () => {
+  for (const difference of [
+    { stopReason: 'timeout' },
+    { truncated: true },
+    { omittedNonText: true },
+  ]) {
+    const agent = { id: 'parent-metadata-revalidation' }
+    const registry = createTaskResultRegistry()
+    registry.recordStart(agent, 'child-1')
+    registry.recordResult(agent, 'child-1', {
+      status: 'incomplete', output: 'same evidence', truncated: false, omittedNonText: false,
+    })
+    const stale = registry.read(agent, 'child-1')
+    const current = { ...stale, ...difference }
+    const queued = []
+    const command = createHandoffCommand({
+      readAsync: async () => stale,
+      read: () => current,
+    }, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', JSON.stringify(difference))
+    assert.match(response.text, /result changed while handoff was being prepared/u)
+    assert.equal(queued.length, 0)
+    await registry.dispose()
+  }
+})
+
 test('does not trust an unversioned async snapshot after same-child replacement', async () => {
   const agent = { id: 'parent-unversioned-stale' }
   const registry = createTaskResultRegistry()
