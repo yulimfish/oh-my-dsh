@@ -9,6 +9,7 @@ const MAX_PROMPT_CHARS = 6_000
 const MAX_NEXT_STEP_JSON_CHARS = 1_000
 const CONTROL_OR_BIDI = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u
 const CONTROL_OR_BIDI_GLOBAL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu
+const INVISIBLE_ID = /[\u180e\u200b-\u200d\u2060\u2061-\u2064\u206a-\u206f\ufeff]/u
 
 function result(kind, text) {
   return { kind, text: text.slice(0, MAX_OUTPUT_CHARS) }
@@ -26,10 +27,9 @@ function cleanMetadata(value, max) {
 }
 
 function parseInput(rawInput) {
-  if (typeof rawInput !== 'string' || rawInput.length > MAX_INPUT_CHARS || CONTROL_OR_BIDI.test(rawInput)) return undefined
-  const input = rawInput.trim()
-  const match = input.match(/^(\S+)(?:\s+([\s\S]+))?$/u)
-  if (!match || match[1].length > MAX_CHILD_ID_CHARS) return undefined
+  if (typeof rawInput !== 'string' || rawInput.length > MAX_INPUT_CHARS || CONTROL_OR_BIDI.test(rawInput) || INVISIBLE_ID.test(rawInput)) return undefined
+  const match = rawInput.match(/^\s*(\S+)(?:\s+([\s\S]+))?$/u)
+  if (!match || match[1].length > MAX_CHILD_ID_CHARS || INVISIBLE_ID.test(match[1])) return undefined
   return { childId: match[1], nextStep: clean(match[2] ?? '', 1_000) }
 }
 

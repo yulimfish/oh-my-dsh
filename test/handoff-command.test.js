@@ -218,6 +218,20 @@ test('fails closed without leaking errors when synchronous handoff revalidation 
   assert.equal(queued.length, 0)
 })
 
+test('rejects invisible or confusable child identities before reading the registry', async () => {
+  const { agent, queued, calls, command } = fixture(failed())
+  for (const childId of ['\u200b', 'child\u200b1', 'child\ufeff1']) {
+    const response = await command.handler({ agent, rawInput: `${childId} inspect` })
+    assert.equal(response.kind, 'error', JSON.stringify(childId))
+    assert.match(response.text, /Usage: \/omo handoff/u)
+  }
+  assert.equal(calls.length, 0, 'invisible identities never reach the result registry')
+  const trimmed = await command.handler({ agent, rawInput: '\u00a0child-1 inspect' })
+  assert.equal(trimmed.kind, 'success', 'ordinary Unicode whitespace may trim around a valid child ID')
+  const bomTrimmed = await command.handler({ agent, rawInput: '\ufeffchild-1 inspect' })
+  assert.equal(bomTrimmed.kind, 'success', 'a leading BOM is trim whitespace, not part of the child identity')
+})
+
 test('validates input, Agent, cancellation, and registry contracts before queueing', async () => {
   const { agent, queued, command } = fixture(failed())
   for (const rawInput of ['', '   ', 'child-1\nchild-2', 'child-1\u202e', `${'x'.repeat(2_049)}`]) {
