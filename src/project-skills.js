@@ -476,7 +476,12 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     const directory = await fs.resolve(dirname(path), { cwd, signal })
     const entries = await fs.listDir(directory, signal)
     // Directory entries preserve exact case even when lstat is case-insensitive.
-    return Array.isArray(entries) && entries.every(entry => entry.name !== basename(path))
+    if (!Array.isArray(entries)) return false
+    const primary = entries.find(entry => entry.name === basename(path))
+    if (!primary) return true
+    // fs.access in the pinned loader follows links: a dangling canonical is
+    // absent, while an existing invalid or escaping canonical still wins.
+    return !await fs.stat(primary.target, signal)
   }
   const formatPathsStillEligible = async (paths, cwd, signal) => {
     if (!paths) return false
@@ -984,10 +989,20 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 const allChildren = await fs.listDir(skillDirectoryTarget, signal)
                 const children = limitEntries(allChildren)
                 let skillFile = children.find(child => child.name === 'SKILL.md')
+                let skillFileInfo
+                let danglingCanonical = false
+                if (skillFile && formatCompatibility) {
+                  if (!fs.contains(rootTarget, skillFile.target)) continue
+                  skillFileInfo = await fs.stat(skillFile.target, signal)
+                  if (!skillFileInfo) {
+                    danglingCanonical = true
+                    skillFile = undefined
+                  }
+                }
                 const directoryName = relativeDirectoryPath.slice(relativeDirectoryPath.lastIndexOf('/') + 1)
                 let canonicalConfirmedAbsent = false
                 if (!skillFile && formatCompatibility && children.length === allChildren.length) {
-                  canonicalConfirmedAbsent = children.every(child => child.name !== 'SKILL.md')
+                  canonicalConfirmedAbsent = danglingCanonical || children.every(child => child.name !== 'SKILL.md')
                   if (!canonicalConfirmedAbsent) {
                     complete = false
                     continue
@@ -1002,6 +1017,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                       try {
                         throwIfAborted(signal)
                         if (!isSafeEntryName(child.name) || child.name.startsWith('.') || !fs.contains(rootTarget, child.target)) continue
+                        if (danglingCanonical && child.name === 'SKILL.md') continue
                         const childInfo = await fs.stat(child.target, signal)
                         if (!childInfo) { complete = false; continue }
                         if (childInfo.type === 'directory') {
@@ -1033,7 +1049,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                   continue
                 }
                 if (!fs.contains(rootTarget, skillFile.target)) continue
-                const skillFileInfo = await fs.stat(skillFile.target, signal)
+                skillFileInfo ??= await fs.stat(skillFile.target, signal)
                 if (!skillFileInfo) {
                   complete = false
                   continue

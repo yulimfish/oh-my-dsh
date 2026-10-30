@@ -3052,6 +3052,19 @@ test('format compatibility gives canonical SKILL.md priority over named files in
   assert.equal(await registry.get('linked', { cwd }), undefined)
 })
 
+test('format compatibility falls through dangling canonical symlinks to named and nested skills', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'review/review.md', 'Named fallback after dangling canonical.')
+  await symlink('missing-target.md', path.join(cwd, '.opencode/skills/review/SKILL.md'))
+  await writeCompatibilityDocument(cwd, 'container/child/SKILL.md', 'Nested child after dangling ancestor.')
+  await symlink('missing-ancestor.md', path.join(cwd, '.opencode/skills/container/SKILL.md'))
+  const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const snapshot = await registry.snapshot({ cwd })
+  assert.deepEqual(snapshot.skills.map(skill => skill.name).sort(), ['child', 'review'])
+  assert.equal((await registry.get('review', { cwd })).content, 'Named fallback after dangling canonical.')
+  assert.equal((await registry.get('child', { cwd })).content, 'Nested child after dangling ancestor.')
+})
+
 test('strict mode loads contained skill symlinks and rejects escapes and stale targets', async t => {
   const cwd = await makeWorkspace(t)
   const target = path.join(cwd, '.opencode/skills/linked/actual.txt')
