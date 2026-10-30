@@ -3125,6 +3125,24 @@ test('format compatibility preserves sibling reserved fields alongside explicit 
   }
 })
 
+test('format compatibility does not reject preferred skills for nonfinite direct reserved fields', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'shared.md', '---\nname: shared\ndescription: Preferred\nagent: !!float .NaN\n---\nPREFERRED_BODY\n')
+  await writeSkill(path.join(cwd, '.claude/skills/shared/SKILL.md'), { name: 'shared', content: 'Fallback must not win.' })
+  const { ctx } = makeRegistry(makeFileSystem().fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills', '.claude/skills'], formatCompatibility: true,
+  })
+  const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'shared' && item.locator.resolverPath === '.opencode/skills/shared.md')
+  assert.ok(candidate)
+  assert.equal(Number.isNaN(candidate.agent), true)
+  const skill = await provider.get(candidate, { cwd })
+  assert.equal(skill.content, 'PREFERRED_BODY')
+  assert.equal(Number.isNaN(skill.agent), true)
+})
+
 test('format compatibility preserves non-record metadata verbatim during list and cached get', async t => {
   for (const [source, expected] of [
     ['null', null],

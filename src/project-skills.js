@@ -384,6 +384,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
   if (reservedMetadata && frontmatter.metadata !== undefined) assertJsonValue(frontmatter.metadata)
   for (const [key, value] of Object.entries(frontmatter)) {
     if (FRONTMATTER_FIELDS.has(key) || (formatCompatibility && (key === 'metadata' || (key === 'allowed-tools' && !allowedTools)))) continue
+    if (formatCompatibility && ['agent', 'subtask', 'argument-hint', 'license', 'compatibility'].includes(key)) continue
     if (formatCompatibility && key === 'model') {
       if (typeof value === 'string' && value.trim().length > 0) {
         if (!reservedMetadata) metadata.model = value.trim()
