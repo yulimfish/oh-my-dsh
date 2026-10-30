@@ -667,6 +667,17 @@ test('uses incomplete status guidance when no partial text evidence survives', a
   assert.doesNotMatch(prompt, /Inspect the evidence, identify the unfinished work/u)
 })
 
+test('keeps incomplete status review wording with an explicit next step but no output', async () => {
+  const { agent, queued, command } = fixture(failed({ status: 'incomplete', output: '', stopReason: 'max-tokens' }))
+  const response = await command.handler({ agent, rawInput: 'child-1 continue the unfinished parser work' })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.match(prompt, /no partial text evidence is available/u)
+  assert.match(prompt, /continue the unfinished parser work/u)
+  assert.match(prompt, /Review the incomplete status and stop reason against the current user request/u)
+  assert.doesNotMatch(prompt, /Review this evidence against the current user request/u)
+})
+
 test('rejects failed snapshots that claim omitted evidence without retained output', async () => {
   for (const caveats of [{ truncated: true }, { omittedNonText: true }, { truncated: true, omittedNonText: true }]) {
     const { agent, queued, command } = fixture(failed({ output: '', ...caveats }))
