@@ -104,6 +104,36 @@ test('hands off a persisted incomplete result after restoring the exact Agent ca
   await registry.dispose()
 })
 
+test('hands off persisted evidence to the exact same-session replacement Agent', async () => {
+  const oldAgent = { id: 'parent-replaced-session' }
+  const replacement = { id: oldAgent.id }
+  const stored = new Map()
+  const registry = createTaskResultRegistry({
+    now: () => 1_000,
+    persistentStore: {
+      async put(value) { stored.set(value.childId, structuredClone(value)); return true },
+      async delete(_parentId, childId) { stored.delete(childId); return true },
+      async read(_parentId, childId) { return stored.get(childId) },
+      async list() { return [...stored.values()] },
+    },
+  })
+  registry.recordStart(oldAgent, 'child-1')
+  registry.recordResult(oldAgent, 'child-1', {
+    status: 'incomplete', output: 'replacement evidence', truncated: false,
+    omittedNonText: false, stopReason: 'max-tokens',
+  })
+  registry.clearAgent(oldAgent)
+  const queued = []
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent: replacement, rawInput: 'child-1 continue after replacement' })
+  assert.equal(response.kind, 'success')
+  assert.strictEqual(queued[0][0], replacement)
+  assert.notStrictEqual(queued[0][0], oldAgent)
+  assert.match(queued[0][1], /replacement evidence/u)
+  assert.match(queued[0][1], /continue after replacement/u)
+  await registry.dispose()
+})
+
 test('does not hand off stale failure evidence after the same child ID starts new work', async () => {
   const agent = { id: 'parent-generation' }
   const registry = createTaskResultRegistry()
