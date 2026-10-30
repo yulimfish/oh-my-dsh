@@ -3333,6 +3333,10 @@ function registerCommands(ctx, config, projectSkills, goalService, llmService, j
 }
 
 export function apply(ctx, rawConfig) {
+  if (typeof ctx.get === 'function' && ctx.get('settings')?.configure) {
+    const settings = ctx.get('settings')
+    ctx.effect(() => settings.configure({ auto: true }), 'dsh-omo automatic settings form')
+  }
   if (typeof ctx.get === 'function' && ctx.get('configEditor')) {
     const settings = createLongHorizonConfigService(ctx.get('configEditor'))
     ctx.provide('longHorizonConfig', settings)
