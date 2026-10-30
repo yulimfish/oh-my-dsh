@@ -3114,6 +3114,24 @@ test('format compatibility falls through dangling directory-named files to neste
   assert.equal((await registry.get('child', { cwd })).content, 'Nested child after dangling named fallback.')
 })
 
+test('format compatibility suppresses nested discovery for invalid and escaping directory-named primaries', async t => {
+  for (const kind of ['invalid', 'escaping']) {
+    const cwd = await makeWorkspace(t)
+    await writeCompatibilityDocument(cwd, 'container/child/SKILL.md', 'Nested child must not replace primary.')
+    if (kind === 'invalid') {
+      await writeCompatibilityDocument(cwd, 'container/container.md', '---\nname: "   "\n---\nInvalid named primary.')
+    } else {
+      const outside = await makeWorkspace(t)
+      const target = path.join(outside, 'outside.md')
+      await writeFile(target, 'Outside named primary.', 'utf8')
+      await symlink(target, path.join(cwd, '.opencode/skills/container/container.md'))
+    }
+    const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+    assert.deepEqual((await registry.snapshot({ cwd })).skills, [])
+    assert.equal(await registry.get('child', { cwd }), undefined)
+  }
+})
+
 test('strict mode loads contained skill symlinks and rejects escapes and stale targets', async t => {
   const cwd = await makeWorkspace(t)
   const target = path.join(cwd, '.opencode/skills/linked/actual.txt')
@@ -3208,9 +3226,19 @@ test('format compatibility rejects a cached directory symlink retarget with an u
   })
   const listed = (await provider.list({ cwd })).candidates.find(candidate => candidate.name === 'alias')
   assert.ok(listed)
-  await unlink(path.join(root, 'alias'))
-  await symlink(path.join(root, 'b'), path.join(root, 'alias'), 'dir')
+  const readBytes = fs.readBytes.bind(fs)
+  let retargeted = false
+  fs.readBytes = async (target, signal, limit) => {
+    const result = await readBytes(target, signal, limit)
+    if (!retargeted) {
+      retargeted = true
+      await unlink(path.join(root, 'alias'))
+      await symlink(path.join(root, 'b'), path.join(root, 'alias'), 'dir')
+    }
+    return result
+  }
   assert.equal(await provider.get(listed, { cwd }), undefined)
+  assert.equal(retargeted, true)
 })
 
 test('format compatibility cached named fallback is invalidated when a canonical SKILL.md appears without watcher delivery', async t => {
