@@ -243,6 +243,28 @@ test('keeps newer local terminal state when an old persistence list resolves', a
   await registry.dispose()
 })
 
+test('does not revive a cleared result when an old persistence list resolves', async () => {
+  const parent = agent('restore-list-clear-race')
+  const gate = deferred()
+  const stored = persistedResult(parent.id, 'cleared-child')
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => undefined,
+      list: async () => gate.promise,
+    },
+  })
+  registry.recordStart(parent, stored.childId)
+  const listing = registry.listAsync(parent)
+  registry.clearAgent(parent)
+  gate.resolve([stored])
+  assert.deepEqual(await listing, [], 'a list started before clearing must not restore the deleted snapshot')
+  assert.equal(registry.read(parent, stored.childId), undefined)
+  await registry.dispose()
+})
+
 test('invalid or expired persisted snapshots do not block a fresh child with the same ID', async () => {
   const parent = agent('invalid-restore')
   for (const stored of [undefined, { ...persistedResult(parent.id, 'shared-child'), status: 'running' }, { ...persistedResult(parent.id, 'shared-child'), expiresAt: 100 }]) {
