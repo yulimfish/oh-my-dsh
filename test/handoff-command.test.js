@@ -296,6 +296,39 @@ test('rejects a stale async result when the same child ID restarts before handof
   await registry.dispose()
 })
 
+test('rejects a stale real-registry result changed before synchronous revalidation', async () => {
+  const agent = { id: 'parent-real-revalidation-window' }
+  const registry = createTaskResultRegistry()
+  registry.recordStart(agent, 'child-1')
+  registry.recordResult(agent, 'child-1', {
+    status: 'incomplete', output: 'old revalidation evidence', truncated: false, omittedNonText: false,
+  })
+  const stale = registry.read(agent, 'child-1')
+  let release
+  const queued = []
+  const command = createHandoffCommand({
+    readAsync: async () => {
+      await new Promise(resolve => { release = resolve })
+      return stale
+    },
+    read: registry.read,
+  }, { queueMessage: (...args) => queued.push(args) })
+  const pending = command.handler({ agent, rawInput: 'child-1 inspect' })
+  registry.clearAgent(agent)
+  registry.recordStart(agent, 'child-1')
+  registry.recordResult(agent, 'child-1', {
+    status: 'incomplete', output: 'new revalidation evidence', truncated: true,
+    omittedNonText: true, stopReason: 'max-tokens',
+  })
+  release()
+  const response = await pending
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /result changed while handoff was being prepared/u)
+  assert.equal(queued.length, 0)
+  assert.equal(registry.read(agent, 'child-1').output, 'new revalidation evidence')
+  await registry.dispose()
+})
+
 test('does not queue a stale handoff when the parent is replaced during persistent restore', async () => {
   const oldAgent = { id: 'parent-persistent-replaced' }
   const replacement = { id: oldAgent.id }
