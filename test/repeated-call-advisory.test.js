@@ -320,6 +320,18 @@ test('bounds Agent state without eviction and exact disposal frees capacity', as
   feature.dispose()
 })
 
+test('clearing an unreadable Agent ID also releases its bounded state slot', async () => {
+  const { live, feature } = makeHarness()
+  const agents = Array.from({ length: 257 }, (_value, index) => ({ id: `agent-${index}` }))
+  for (const agent of agents) live.set(agent.id, agent)
+  for (const agent of agents.slice(0, 256)) await complete(feature, makeExec(agent))
+  Object.defineProperty(agents[0], 'id', { get() { throw new Error('private id failure') } })
+  feature.clearAgent(agents[0])
+  for (let index = 0; index < 2; index += 1) await complete(feature, makeExec(agents[256]))
+  assert.equal(warningCount((await complete(feature, makeExec(agents[256]))).returned), 1)
+  feature.dispose()
+})
+
 test('disposal during downstream execution fences reminders and clears pending abort listeners', async () => {
   const { live, feature } = makeHarness()
   const agent = { id: 'agent-dispose' }

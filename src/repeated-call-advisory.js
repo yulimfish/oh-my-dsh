@@ -150,6 +150,9 @@ export function createRepeatedCallAdvisory(agentsService) {
     for (const [token, entry] of pending) {
       if (entry.agent === agent) clearPending(token)
     }
+    for (const [agentId, state] of states) {
+      if (state.agent === agent) states.delete(agentId)
+    }
     let agentId
     try { agentId = agent?.id } catch { return }
     if (typeof agentId === 'string' && states.get(agentId)?.agent === agent) states.delete(agentId)
