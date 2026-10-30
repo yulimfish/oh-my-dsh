@@ -53,6 +53,7 @@ const JSON_TAG_RESOLVERS = Object.freeze({
     return sign * Number.parseInt(unsigned, 10)
   },
   'tag:yaml.org,2002:float': (value, onError) => {
+    if (value === '.nan' || value === '.NaN' || value === '.NAN') return Number.NaN
     if (!/^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/u.test(value)) {
       onError(`cannot resolve float scalar ${JSON.stringify(value)}`)
       return value
