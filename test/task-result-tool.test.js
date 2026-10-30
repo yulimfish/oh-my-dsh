@@ -865,6 +865,30 @@ test('restored terminal results expire at their original settlement deadline', a
   await registry.dispose()
 })
 
+test('restored records keep their original settledAt when persisted after an LRU refresh', async () => {
+  let time = 100
+  const parent = agent('restore-persist-time')
+  const stored = persistedResult(parent.id, 'restored-child')
+  const writes = []
+  const registry = createTaskResultRegistry({
+    now: () => time,
+    persistentStore: {
+      put: async value => { writes.push(value); return true },
+      delete: async () => true,
+      read: async () => stored,
+      list: async () => [],
+    },
+  })
+  assert.equal((await registry.readAsync(parent, stored.childId))?.output, stored.output)
+  time = 101
+  registry.recordResult(parent, 'other-child', result)
+  registry.recordStart(parent, 'other-child')
+  registry.recordResult(parent, 'other-child', result)
+  assert.equal(writes.length, 1, 'restoration itself performs no write; only the new terminal record is persisted')
+  assert.equal(writes[0].settledAt, 101, 'new terminal records still use their settlement time')
+  await registry.dispose()
+})
+
 test('restore capacity failure leaves no partial running record', async () => {
   const parent = agent('restore-capacity')
   const stored = persistedResult(parent.id, 'stored-child')
