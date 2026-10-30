@@ -487,6 +487,28 @@ test('retains explicit omission and evidence edges under combined multibyte pres
   assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
 })
 
+test('retains both evidence edges when multibyte head consumes byte budget', async () => {
+  const childId = 'c'.repeat(256)
+  const output = `${'汉'.repeat(4_100)}${'t'.repeat(4_092)}`
+  const { agent, queued, command } = fixture(failed({
+    childId,
+    status: 'incomplete',
+    output,
+    truncated: true,
+    omittedNonText: true,
+    stopReason: 'x'.repeat(80),
+  }))
+  const response = await command.handler({ agent, rawInput: `${childId} ${'汉'.repeat(1_000)}` })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.ok(prompt.length <= 6_000)
+  assert.ok(Buffer.byteLength(prompt, 'utf8') <= 6_000)
+  const evidence = prompt.split('--- BEGIN CHILD EVIDENCE ---\n')[1].split('\n--- END CHILD EVIDENCE ---')[0]
+  assert.match(evidence, /additional evidence omitted for prompt budget/u)
+  assert.ok(evidence.startsWith('汉'))
+  assert.ok(evidence.endsWith('ttt'), 'tail evidence must receive its own byte budget instead of being starved by the head')
+})
+
 test('preserves boundaries and guidance when fixed metadata approaches the byte cap', async () => {
   const childId = 'c'.repeat(256)
   const { agent, queued, command } = fixture(failed({

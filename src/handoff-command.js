@@ -66,22 +66,22 @@ function handoffPrompt({ childId, status, stopReason, truncated, omittedNonText,
   const fixedBytes = Buffer.byteLength(prefix, 'utf8') + Buffer.byteLength(suffix, 'utf8')
     + Buffer.byteLength(marker, 'utf8') + 2
   const byteBudget = Math.max(0, MAX_PROMPT_CHARS - fixedBytes)
-  let usedBytes = 0
-  const take = (count, fromTail = false) => {
+  const headByteBudget = Math.floor(byteBudget / 2)
+  const tailByteBudget = byteBudget - headByteBudget
+  const take = (count, budget, fromTail = false) => {
     let taken = 0
     let bytes = 0
     const values = fromTail ? characters.slice(-count).reverse() : characters.slice(0, count)
     for (const character of values) {
       const size = Buffer.byteLength(character, 'utf8')
-      if (usedBytes + bytes + size > byteBudget) break
+      if (bytes + size > budget) break
       taken += 1
       bytes += size
     }
-    usedBytes += bytes
     return taken
   }
-  const head = take(Math.min(Math.ceil(characters.length / 2), headChars))
-  const tail = take(Math.min(Math.floor(characters.length / 2), tailChars), true)
+  const head = take(Math.min(Math.ceil(characters.length / 2), headChars), headByteBudget)
+  const tail = take(Math.min(Math.floor(characters.length / 2), tailChars), tailByteBudget, true)
   text = render(`${characters.slice(0, head).join('')}${marker}${characters.slice(-tail).join('')}`)
   if (text.length <= MAX_PROMPT_CHARS && Buffer.byteLength(text, 'utf8') <= MAX_PROMPT_CHARS) return text
   return render('[… evidence omitted for prompt budget …]')
