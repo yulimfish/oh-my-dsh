@@ -329,6 +329,36 @@ test('does not queue a stale handoff when the parent is replaced during persiste
   await registry.dispose()
 })
 
+test('does not queue handoff after registry disposal during persistent restore', async () => {
+  const agent = { id: 'parent-persistent-disposed' }
+  let release
+  const readGate = new Promise(resolve => { release = resolve })
+  const stored = {
+    parentId: agent.id, childId: 'child-1', status: 'incomplete',
+    output: 'disposed persistent evidence', truncated: false, omittedNonText: false,
+    settledAt: 900, expiresAt: 2_000,
+  }
+  const registry = createTaskResultRegistry({
+    now: () => 1_000,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => readGate,
+      list: async () => [stored],
+    },
+  })
+  const queued = []
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  const pending = command.handler({ agent, rawInput: 'child-1 inspect' })
+  await registry.dispose()
+  release(stored)
+  const response = await pending
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /failed or incomplete/u)
+  assert.equal(queued.length, 0)
+  assert.equal(registry.read(agent, 'child-1'), undefined)
+})
+
 test('does not trust an unversioned async snapshot after same-child replacement', async () => {
   const agent = { id: 'parent-unversioned-stale' }
   const registry = createTaskResultRegistry()
