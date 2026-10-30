@@ -629,7 +629,11 @@ test('opt-in loads only contained file symlinks with canonical containment and s
       .filter(([candidate]) => path.dirname(candidate) === target.path)
       .map(([candidate, record]) => ({
         name: path.basename(candidate), type: record.type,
-        target: candidate === `${root}/review.md` ? state.targetFor(`${root}/actual.md`) : state.targetFor(candidate),
+        target: candidate === `${root}/review.md`
+          ? state.targetFor(`${root}/actual.md`)
+          : candidate === `${root}/escape.md`
+            ? state.targetFor(`${CWD}/outside.md`)
+            : state.targetFor(candidate),
       }))
   }
   state.addSymlink(`${root}/escape.md`)
@@ -641,6 +645,13 @@ test('opt-in loads only contained file symlinks with canonical containment and s
   strict.addFile(`${root}/actual.md`, VALID)
   strict.addSymlink(`${root}/review.md`)
   assert.deepEqual((await strict.adapter.list(strict.agent)).commands.map(command => command.name), ['actual'])
+  const switched = fixture({ allowContainedSymlinks: true, fsOptions: { aliases: { [`${root}/review.md`]: `${root}/replacement.md` } } })
+  switched.addFile(`${root}/listed.md`, VALID)
+  switched.addFile(`${root}/replacement.md`, VALID)
+  switched.addSymlink(`${root}/review.md`)
+  switched.fs.listDir = async () => [{ name: 'review.md', type: 'symlink', target: switched.targetFor(`${root}/listed.md`) }]
+  assert.deepEqual((await switched.adapter.list(switched.agent)).commands, [])
+  assert.equal(readCalls(switched).length, 0)
 })
 
 test('discovers and queues plain Markdown commands without frontmatter', async () => {
