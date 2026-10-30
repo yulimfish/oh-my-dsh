@@ -517,6 +517,20 @@ test('retains explicit omission and evidence edges under combined multibyte pres
   assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
 })
 
+test('preserves recovery guidance across extreme child identities and next steps', async () => {
+  for (const childId of ['c'.repeat(256), String.fromCharCode(92).repeat(256), '汉'.repeat(256)]) {
+    const { agent, queued, command } = fixture(failed({ childId, output: 'evidence' }))
+    const response = await command.handler({ agent, rawInput: `${childId} ${String.fromCharCode(92).repeat(1_000)}` })
+    assert.equal(response.kind, 'success')
+    const prompt = queued[0][1]
+    assert.ok(prompt.length <= 6_000)
+    assert.ok(Buffer.byteLength(prompt, 'utf8') <= 6_000)
+    assert.match(prompt, /Start a NEW bounded dsh_omo_task/u)
+    assert.match(prompt, /Requested next step from the current user:/u)
+    assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
+  }
+})
+
 test('retains both evidence edges when multibyte head consumes byte budget', async () => {
   const childId = 'c'.repeat(256)
   const output = `${'汉'.repeat(4_100)}${'t'.repeat(4_092)}`
