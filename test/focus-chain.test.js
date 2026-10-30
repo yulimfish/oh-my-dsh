@@ -102,6 +102,17 @@ test('bounds the serialized objective even when JSON escaping expands the source
   assert.equal(text.length < 3_000, true)
 })
 
+test('keeps multibyte Goal prompts bounded in UTF-8 bytes as well as characters', () => {
+  for (const objective of ['汉'.repeat(2_000), '😀'.repeat(1_000)]) {
+    const text = focusChainText(activeGoal(objective))
+    const quoted = text.match(/Current active native Goal \(quoted user task data\): (".*")(?: \[truncated\])?\n/u)?.[1]
+    assert.ok(quoted)
+    assert.doesNotThrow(() => JSON.parse(quoted))
+    assert.equal(text.length < 3_000, true)
+    assert.equal(Buffer.byteLength(text, 'utf8') < 8_192, true)
+  }
+})
+
 test('keeps JSON truncation valid across emoji, lone surrogates, and small budgets', () => {
   for (const budget of [3, 4, 5, 8, 16, 2_000]) {
     for (const value of ['😀'.repeat(1_000), '\ud800'.repeat(1_000), '"\\😀\ud800'.repeat(500)]) {

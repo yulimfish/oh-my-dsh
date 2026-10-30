@@ -77,7 +77,7 @@ Goose has moved to `aaif-goose/goose`; the source snapshot is pinned to [`361003
 
 ### Phase 1 — Native Goal Focus Chain
 
-**Implemented in this phase:** default-off `enableFocusChain` adds `dsh-omo:focus-chain` runtime context in every exact live Agent scope. Its provider re-reads only `goals.get(agent)` at prompt assembly, renders an active Goal as bounded JSON-quoted task data, with the bound applied after escape expansion rather than only to source characters, and returns an empty string for missing, inactive, or malformed Goal data. Agent creation, compaction, same-ID replacement, capacity, and dual-scope disposal are covered by unit and real DSH prompt-assembly tests. It neither creates a second objective store nor changes Goal lifecycle authority.
+**Implemented in this phase:** default-off `enableFocusChain` adds `dsh-omo:focus-chain` runtime context in every exact live Agent scope. Its provider re-reads only `goals.get(agent)` at prompt assembly, renders an active Goal as bounded JSON-quoted task data, with the character bound applied after escape expansion rather than only to source characters (the current fixed prompt remains below 8 KiB for multibyte boundary cases; this is not a token guarantee), and returns an empty string for missing, inactive, or malformed Goal data. Agent creation, compaction, same-ID replacement, capacity, and dual-scope disposal are covered by unit and real DSH prompt-assembly tests. It neither creates a second objective store nor changes Goal lifecycle authority.
 
 - Add default-off `enableFocusChain` scoped prompt context for exact live Agents.
 - Re-read `goals.get(agent)` on every assembly; show only an active Goal, with bounded sanitized objective and concise anti-drift guidance.
