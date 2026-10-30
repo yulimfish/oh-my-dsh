@@ -412,6 +412,20 @@ test('pending capacity evicts the oldest entry and removes its abort listener', 
   assert.equal(removals.slice(1).every(count => count === 1), true, 'all remaining listeners are released on disposal')
 })
 
+test('an evicted entry abort callback cannot remove a newer pending entry', async () => {
+  const { live, feature } = makeHarness()
+  const agent = { id: 'evicted-abort' }
+  live.set(agent.id, agent)
+  const controllers = Array.from({ length: 129 }, () => new AbortController())
+  const execs = controllers.map(controller => makeExec(agent, {}, { signal: controller.signal }))
+  for (const exec of execs) await feature.preExecute(exec, async () => ({ kind: 'allow' }))
+  controllers[0].abort()
+  assert.equal(warningCount((await complete(feature, execs[1])).returned), 0)
+  assert.equal(warningCount((await complete(feature, execs[2])).returned), 0)
+  assert.equal(warningCount((await complete(feature, execs[3])).returned), 1)
+  feature.dispose()
+})
+
 test('disposal during downstream execution fences reminders and clears pending abort listeners', async () => {
   const { live, feature } = makeHarness()
   const agent = { id: 'agent-dispose' }
