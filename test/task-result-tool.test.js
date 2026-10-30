@@ -177,6 +177,27 @@ test('clearing an old Agent fences in-flight restores without replacing the succ
   await registry.dispose()
 })
 
+test('does not overwrite or misreport a new running child during an old persistence read', async () => {
+  const parent = agent('restore-race')
+  const gate = deferred()
+  const stored = persistedResult(parent.id, 'shared-child')
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => gate.promise,
+      list: async () => [],
+    },
+  })
+  const reading = registry.readAsync(parent, stored.childId)
+  assert.equal(registry.recordStart(parent, stored.childId), true)
+  gate.resolve(stored)
+  assert.equal(await reading, undefined, 'an old restore must not return the replacement running record as its own result')
+  assert.deepEqual(registry.read(parent, stored.childId), { childId: stored.childId, status: 'running' })
+  await registry.dispose()
+})
+
 test('storage failure falls back to current local state rather than the pre-I/O snapshot', async () => {
   const parent = agent('parent-storage-failure')
   const readGate = deferred()

@@ -247,7 +247,7 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
       : sanitizeResult(stored)
     if (!summary || !['completed', 'incomplete', 'failed'].includes(summary.status)) return false
     const existing = byParent.get(parent)?.get(stored.childId)
-    if (existing) return true
+    if (existing) return false
     const record = reserve(parent, stored.childId)
     if (!record) return false
     Object.assign(record, summary, { updatedAt: stored.settledAt, expiresAt: stored.expiresAt })
@@ -338,8 +338,8 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
         return readLocal(parent, childId)
       }
       if (disposed || parentEpochs.get(parent) !== epoch) return readLocal(parent, childId)
-      restoreTerminal(parent, stored)
-      return readLocal(parent, childId)
+      const restored = restoreTerminal(parent, stored)
+      return restored ? readLocal(parent, childId) : undefined
     },
     list: listLocal,
     async listAsync(parent) {
