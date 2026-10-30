@@ -201,6 +201,22 @@ test('nested, stale, canceled, blocked, and malformed positions never produce a 
   feature.dispose()
 })
 
+test('invalid tokens never install abort listeners or count completions', async () => {
+  const { live, feature } = makeHarness()
+  const agent = { id: 'invalid-token' }
+  live.set(agent.id, agent)
+  const controller = new AbortController()
+  const originalAdd = controller.signal.addEventListener.bind(controller.signal)
+  let adds = 0
+  controller.signal.addEventListener = (...args) => { adds += 1; return originalAdd(...args) }
+  const exec = makeExec(agent, {}, { token: 'not-a-symbol', signal: controller.signal })
+  const decision = { kind: 'allow' }
+  assert.strictEqual(await feature.preExecute(exec, async () => decision), decision)
+  assert.equal(adds, 0)
+  assert.equal(warningCount((await complete(feature, exec)).returned), 0)
+  feature.dispose()
+})
+
 test('unsupported or untracked completed calls reset rather than bridging identical runs', async () => {
   const { live, feature } = makeHarness()
   const agent = { id: 'agent-unsupported' }
