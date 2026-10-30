@@ -2832,6 +2832,7 @@ test('format compatibility derives flat and directory names for absent or falsy 
     ['empty-yaml.md', '---\n---\nEmpty metadata body.', 'empty-yaml'],
     ['comment-yaml.md', '---\n# metadata intentionally absent\n---\nComment metadata body.', 'comment-yaml'],
     ['scalar-yaml.md', '---\nplain scalar\n---\nScalar frontmatter body.', 'scalar-yaml'],
+    ['scalar-demo.md', '---\ndescription: 0123\n---\nScalar body.', 'scalar-demo'],
     ['sequence-yaml.md', '---\n- one\n- two\n---\nSequence frontmatter body.', 'sequence-yaml'],
     ['directory-guide/SKILL.md', 'Canonical plain body.', 'directory-guide'],
     ['named-guide/named-guide.md', 'Named fallback body.', 'named-guide'],
@@ -2851,7 +2852,7 @@ test('format compatibility derives flat and directory names for absent or falsy 
   for (const [relative, , name] of documents) {
     const skill = await registry.get(name, { cwd })
     assert.ok(skill, relative)
-    assert.equal(skill.description, `(opencode-project - Skill) ${name === 'description-only' ? 'Explicit description' : `Project skill ${name}`}`)
+    assert.equal(skill.description, `(opencode-project - Skill) ${name === 'description-only' ? 'Explicit description' : name === 'scalar-demo' ? '0123' : `Project skill ${name}`}`)
     assert.ok(skill.content.includes('body.'))
   }
   assert.equal((await registry.get('indented-guide', { cwd })).content, 'body.\r\n\tindented line')

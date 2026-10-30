@@ -263,17 +263,20 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
     let document
     try {
       document = parseDocument(pinnedFrontmatter ? pinnedFrontmatter[1] : lines.slice(1, end).join('\n'), {
-        schema: 'core',
+        schema: formatCompatibility ? 'json' : 'core',
         uniqueKeys: true,
       })
     } catch {
       throw new SkillFormatError('skill YAML frontmatter is invalid')
     }
-    if (document.errors.length > 0 && !(formatCompatibility && pinnedFrontmatter)) {
+    const parseErrors = formatCompatibility
+      ? document.errors.filter(error => error?.code !== 'TAG_RESOLVE_FAILED' || !String(error.message).startsWith('Unresolved plain scalar '))
+      : document.errors
+    if (parseErrors.length > 0 && !(formatCompatibility && pinnedFrontmatter)) {
       throw new SkillFormatError('skill YAML frontmatter is invalid')
     }
     try {
-      if (document.errors.length > 0 && formatCompatibility && pinnedFrontmatter) {
+      if (parseErrors.length > 0 && formatCompatibility && pinnedFrontmatter) {
         // Pinned OpenCode discards malformed frontmatter and retains the body.
       } else {
         frontmatter = document.toJS({ maxAliasCount: 0 })
