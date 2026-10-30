@@ -1122,7 +1122,9 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           } catch (error) {
             if (signal?.aborted || !formatCompatibility || error?.code !== 'ELOOP') throw error
             rootEntries = []
-            for (const entry of await readdir(fs.processPath(rootTarget), { withFileTypes: true })) {
+            const recovered = await readdir(fs.processPath(rootTarget), { withFileTypes: true })
+            recovered.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
+            for (const entry of recovered) {
               try {
                 rootEntries.push({
                   name: entry.name,
@@ -1131,7 +1133,8 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 })
               } catch (entryError) {
                 if (signal?.aborted || entryError?.code !== 'ELOOP') throw entryError
-                complete = false
+                if (entry.isSymbolicLink()) complete = false
+                else markIncomplete()
               }
             }
           }

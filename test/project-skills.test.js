@@ -2831,6 +2831,62 @@ test('format compatibility rejects a cached flat skill when incomplete classific
   assert.equal(fresh.candidates.some(candidate => candidate.locator.resolverPath === '.opencode/skills/shared.md'), true)
 })
 
+test('format compatibility rejects cached priority when a real directory cannot be resolved after root ELOOP', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'shared.md', '---\nname: shared\ndescription: Same\n---\nFLAT')
+  await symlink('loop', path.join(cwd, '.opencode/skills/loop'), 'dir')
+  const { fs } = makeFileSystem()
+  const { ctx } = makeRegistry(fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const cached = (await provider.list({ cwd })).candidates.find(candidate => candidate.name === 'shared')
+  await writeCompatibilityDocument(cwd, 'directory/SKILL.md', '---\nname: shared\ndescription: Same\n---\nDIRECTORY')
+  const resolve = fs.resolve
+  fs.resolve = async (filePath, options = {}) => {
+    if (filePath === '.opencode/skills/directory' || filePath === 'directory') {
+      const error = new Error('unattributed directory loop')
+      error.code = 'ELOOP'
+      throw error
+    }
+    return resolve(filePath, options)
+  }
+  assert.equal(await provider.get(cached, { cwd }), undefined)
+  const fresh = await provider.list({ cwd })
+  assert.equal(fresh.complete, false)
+  assert.equal(fresh.priorityComplete, false)
+})
+
+test('format compatibility preserves adapter name ordering during root ELOOP recovery', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'a.md', '---\nname: shared\ndescription: Same\n---\nA')
+  await writeCompatibilityDocument(cwd, 'b.md', '---\nname: shared\ndescription: Same\n---\nB')
+  await symlink('loop', path.join(cwd, '.opencode/skills/loop'), 'dir')
+  const { fs } = makeFileSystem()
+  const listDir = fs.listDir
+  const canonicalRoot = await realpath(path.join(cwd, '.opencode/skills'))
+  fs.listDir = async (target, signal) => {
+    const entries = await listDir(target, signal)
+    return target.targetKey === canonicalRoot ? entries.sort((left, right) => left.name.localeCompare(right.name)) : entries
+  }
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider({ fs, logger: { warn() {} } }, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const listed = await provider.list({ cwd })
+  assert.equal(listed.complete, false)
+  assert.equal(listed.priorityComplete, true)
+  assert.deepEqual(listed.candidates.map(candidate => candidate.locator.resolverPath), ['.opencode/skills/a.md', '.opencode/skills/b.md'])
+  assert.equal((await provider.get(listed.candidates[0], { cwd })).content, 'A')
+  const { registry } = compatibilityRegistry(t, fs)
+  const registered = await registry.get('shared', { cwd })
+  assert.equal(registered.content, 'A')
+  assert.equal(registered.path, path.join(canonicalRoot, 'a.md'))
+})
+
 for (const timing of ['before', 'during']) {
   test(`delivered directory change ${timing} provider loading rejects the stale candidate`, async t => {
     const cwd = await makeWorkspace(t)
