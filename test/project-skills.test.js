@@ -2954,6 +2954,17 @@ test('format compatibility accepts explicit decimal integers with leading zeros'
   assert.equal(skill.content, 'Body.')
 })
 
+test('format compatibility preserves explicit negative zero integer metadata', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'signed-zero.md', '---\nname: chosen\ndescription: From metadata\nmetadata:\n  negative: !!int "-0"\n  positive: !!int "+0"\n---\nBody.\n')
+  const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const skill = await registry.get('chosen', { cwd })
+  assert.ok(skill)
+  assert.equal(Object.is(skill.metadata.metadata.negative, -0), true)
+  assert.equal(Object.is(skill.metadata.metadata.positive, 0), true)
+  assert.equal(skill.content, 'Body.')
+})
+
 test('format compatibility recovers from overflowing explicit integer metadata', async t => {
   const cwd = await makeWorkspace(t)
   const source = `---\nname: chosen\ndescription: Custom description\nmetadata:\n  rank: !!int "${'9'.repeat(400)}"\n---\nBody.\n`

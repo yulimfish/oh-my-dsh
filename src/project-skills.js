@@ -45,7 +45,6 @@ const JSON_TAG_RESOLVERS = Object.freeze({
     const normalized = value.replaceAll('_', '')
     const negative = normalized.startsWith('-')
     const unsigned = normalized.replace(/^[+-]/u, '')
-    if (unsigned === '0') return 0
     const sign = negative ? -1 : 1
     const result = unsigned.startsWith('0x')
       ? sign * Number.parseInt(unsigned.slice(2), 16)
