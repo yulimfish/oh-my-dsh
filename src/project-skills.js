@@ -361,7 +361,9 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
   }
 
   const name = formatCompatibility ? String(frontmatter.name || defaultName) : frontmatter.name
-  const description = formatCompatibility && !frontmatter.description ? `Project skill ${name}` : frontmatter.description
+  const description = formatCompatibility
+    ? String(frontmatter.description || `Project skill ${name}`)
+    : frontmatter.description
   const whenToUse = frontmatter.whenToUse
   if (typeof name !== 'string' || !isSkillName(name)) throw new SkillFormatError('skill frontmatter name must be a valid kebab-case name')
   if (typeof description !== 'string' || description.trim().length === 0 || description.length > 2_000) {
@@ -382,7 +384,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
     if (frontmatter.metadata !== null) Object.assign(metadata, frontmatter.metadata)
   }
   for (const [key, value] of Object.entries(frontmatter)) {
-    if (FRONTMATTER_FIELDS.has(key) || (formatCompatibility && key === 'metadata')) continue
+    if (FRONTMATTER_FIELDS.has(key) || (formatCompatibility && (key === 'metadata' || (key === 'allowed-tools' && !allowedTools)))) continue
     assertJsonValue(value)
     metadata[key] = value
   }

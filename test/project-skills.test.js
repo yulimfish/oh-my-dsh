@@ -1985,6 +1985,26 @@ test('format compatibility rejects malformed allowed-tools so a valid fallback c
   }
 })
 
+test('format compatibility treats falsy NaN allowed-tools as absent during list and get', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'shared.md', '---\nname: shared\ndescription: Valid winner\nallowed-tools: !!float .NaN\n---\nValid wins.\n')
+  await writeSkill(path.join(cwd, '.claude/skills/fallback/SKILL.md'), { name: 'shared', content: 'Fallback must not win.' })
+  const { ctx } = makeRegistry(makeFileSystem().fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills', '.claude/skills'], formatCompatibility: true,
+  })
+  const listed = await provider.list({ cwd })
+  assert.equal(listed.complete, true)
+  const candidate = listed.candidates.find(item => item.name === 'shared' && item.locator.resolverPath === '.opencode/skills/shared.md')
+  assert.ok(candidate)
+  assert.equal(candidate.metadata?.['allowed-tools'], undefined)
+  const skill = await provider.get(candidate, { cwd })
+  assert.equal(skill.content, 'Valid wins.')
+  assert.equal(skill.metadata?.['allowed-tools'], undefined)
+})
+
 test('format compatibility prioritizes directory candidates within each root through native SkillRegistry', async t => {
   const cwd = await makeWorkspace(t)
   const root = path.join(cwd, '.opencode/skills')
@@ -3180,7 +3200,7 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
     ['null-name.md', '---\nname: null\ndescription: "   "\n---\nPrivate body.'],
     ['bad-name.md', '---\nname: invalid/name\n---\nPrivate body.'],
     ['blank-description.md', '---\ndescription: "   "\n---\nPrivate body.'],
-    ['null-description.md', '---\ndescription: true\n---\nPrivate body.'],
+    ['null-description.md', '---\ndescription: "   "\n---\nPrivate body.'],
     ['control.md', '---\nname: "bad\\u202evalue"\n---\nPrivate body.'],
     ['Bad Name.md', '---\nname: null\n---\nPrivate body.'],
     ['bad name/bad name.md', '---\nname: ""\n---\nPrivate body.'],
@@ -3194,10 +3214,19 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
     const { registry: scalarRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
     assert.equal((await scalarRegistry.get(value, { cwd })).content, 'Body.')
   }
+  for (const [file, value] of [['numeric-description.md', '42'], ['boolean-description.md', 'true']]) {
+    await writeCompatibilityDocument(cwd, file, `---\ndescription: ${value}\n---\nBody.\n`)
+    const { registry: scalarRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
+    const skill = await scalarRegistry.get(file.replace(/\.md$/u, ''), { cwd })
+    assert.equal(skill.description, `(opencode-project - Skill) ${value}`)
+    assert.equal(skill.content, 'Body.')
+  }
   const strictNames = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(strictNames.ctx, { projectSkillDirs: ['.opencode/skills'] })
   assert.equal(await strictNames.registry.get('1', { cwd }), undefined)
   assert.equal(await strictNames.registry.get('true', { cwd }), undefined)
+  assert.equal(await strictNames.registry.get('numeric-description', { cwd }), undefined)
+  assert.equal(await strictNames.registry.get('boolean-description', { cwd }), undefined)
   await writeCompatibilityDocument(cwd, 'broken.md', '---\nname: [invalid\n---\nRecovered body.\n')
   const { registry: recoveredRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
   const recovered = await recoveredRegistry.get('broken', { cwd })
