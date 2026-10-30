@@ -177,6 +177,31 @@ test('clearing an old Agent fences in-flight restores without replacing the succ
   await registry.dispose()
 })
 
+test('keeps replacement results isolated when an old parent list resolves late', async () => {
+  const old = agent('session-list-replacement')
+  const replacement = agent(old.id)
+  const gate = deferred()
+  const oldStored = persistedResult(old.id, 'shared-child')
+  oldStored.output = 'old parent output'
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => undefined,
+      list: async () => gate.promise,
+    },
+  })
+  const oldListing = registry.listAsync(old)
+  registry.clearAgent(old)
+  assert.equal(registry.recordStart(replacement, 'shared-child'), true)
+  assert.equal(registry.recordResult(replacement, 'shared-child', { ...result, output: 'replacement output' }), true)
+  gate.resolve([oldStored])
+  assert.deepEqual(await oldListing, [])
+  assert.equal(registry.read(replacement, 'shared-child').output, 'replacement output')
+  await registry.dispose()
+})
+
 test('does not overwrite or misreport a new running child during an old persistence read', async () => {
   const parent = agent('restore-race')
   const gate = deferred()
