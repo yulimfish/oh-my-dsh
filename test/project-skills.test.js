@@ -3203,6 +3203,34 @@ test('format compatibility ignores unknown frontmatter instead of rejecting or s
   assert.equal((await strict.registry.get('shared', { cwd })).content, 'Fallback must not win.')
 })
 
+test('format compatibility preserves nonfinite reserved metadata without changing source precedence', async t => {
+  for (const [metadata, assertMetadata] of [
+    ['!!float .NaN', value => assert.equal(Number.isNaN(value), true)],
+    ['{ score: !!float .inf }', value => assert.equal(value.score, Infinity)],
+    ['{ score: !!float -.inf }', value => assert.equal(value.score, -Infinity)],
+    ['{ score: !!float .NaN }', value => assert.equal(Number.isNaN(value.score), true)],
+  ]) {
+    const cwd = await makeWorkspace(t)
+    await writeCompatibilityDocument(cwd, 'shared.md', `---\nname: shared\ndescription: Preferred\nmetadata: ${metadata}\n---\nPREFERRED_BODY\n`)
+    await writeSkill(path.join(cwd, '.claude/skills/shared/SKILL.md'), { name: 'shared', content: 'Fallback must not win.' })
+    const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+    const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills', '.claude/skills'], formatCompatibility: true })
+    t.after(() => registration.dispose())
+    const lifetime = new AbortController()
+    t.after(() => lifetime.abort())
+    const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+      projectSkillDirs: ['.opencode/skills', '.claude/skills'], formatCompatibility: true,
+    })
+    const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'shared' && item.locator.resolverPath === '.opencode/skills/shared.md')
+    assert.ok(candidate, metadata)
+    assertMetadata(candidate.metadata)
+    const skill = await provider.get(candidate, { cwd })
+    assert.equal(skill.content, 'PREFERRED_BODY')
+    assertMetadata(skill.metadata)
+    assert.equal((await registry.get('shared', { cwd })).content, 'PREFERRED_BODY')
+  }
+})
+
 test('format compatibility exposes reserved metadata directly during list and cached get', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'flat.md', '---\nname: chosen\ndescription: Custom\nmetadata:\n  owner: atlas\n  rank: 2\n---\nBody.\n')
@@ -3594,7 +3622,9 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
   }
   await writeCompatibilityDocument(cwd, 'infinity.md', '---\nname: chosen\ndescription: Custom\nmetadata:\n  score: !!float .inf\n---\nBody.\n')
   const { registry: infinityRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
-  assert.equal(await infinityRegistry.get('chosen', { cwd }), undefined)
+  const infinitySkill = await infinityRegistry.get('chosen', { cwd })
+  assert.equal(infinitySkill.metadata.score, Infinity)
+  assert.equal(infinitySkill.content, 'Body.')
   assert.equal(await infinityRegistry.get('infinity', { cwd }), undefined)
   await writeCompatibilityDocument(cwd, 'good.md', '---\nname: good\ndescription: !!bool TRUE\n---\nRecovered body.\n')
   const { registry: taggedRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
