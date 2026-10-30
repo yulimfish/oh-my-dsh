@@ -485,6 +485,22 @@ test('keeps truncated next-step JSON valid and outside child evidence', async ()
   assert.match(prompt, /Start a NEW bounded dsh_omo_task/u)
 })
 
+test('keeps Unicode next-step truncation valid without breaking recovery guidance', async () => {
+  for (const nextStep of ['😀'.repeat(1_000), '\ud800'.repeat(1_000)]) {
+    const { agent, queued, command } = fixture(failed({ output: 'child evidence' }))
+    const response = await command.handler({ agent, rawInput: `child-1 ${nextStep}` })
+    assert.equal(response.kind, 'success')
+    const prompt = queued[0][1]
+    const quoted = prompt.match(/Requested next step from the current user: (".*")\nReview this evidence/u)?.[1]
+    assert.ok(quoted)
+    assert.equal(quoted.length <= 1_000, true)
+    assert.equal(JSON.parse(quoted).endsWith('…'), true)
+    assert.ok(Buffer.byteLength(prompt, 'utf8') <= 6_000)
+    assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
+    assert.match(prompt, /Start a NEW bounded dsh_omo_task/u)
+  }
+})
+
 test('retains explicit omission and evidence edges under combined multibyte pressure', async () => {
   const childId = `child-${'c'.repeat(250)}`
   const output = `${'h'.repeat(4_100)}${'t'.repeat(4_092)}`
