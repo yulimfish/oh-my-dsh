@@ -3235,11 +3235,12 @@ test('format compatibility candidate matching distinguishes nullish, nonfinite, 
   const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
     projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
   })
-  const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'chosen')
-  for (const metadata of [null, Number.NaN, undefined]) {
+  for (const metadata of [null, Number.NaN, Infinity, -Infinity]) {
+    const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'chosen')
     assert.equal(await provider.get({ ...candidate, metadata }, { cwd }), undefined, String(metadata))
   }
-  for (const agent of [null, Number.NaN, -0, { value: Number.NaN }]) {
+  for (const agent of [null, Number.NaN, Infinity, -Infinity, -0, { value: Number.NaN }, { value: -0 }]) {
+    const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'chosen')
     assert.equal(await provider.get({ ...candidate, agent }, { cwd }), undefined, String(agent))
   }
   const strictProvider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
