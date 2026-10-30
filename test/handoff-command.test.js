@@ -868,6 +868,20 @@ test('preserves truncation caveats when handoff has no retained text', async () 
   assert.match(queued[0][1], /no partial text evidence is available/u)
 })
 
+test('sanitizes exact-budget stop reason markers without partial boundary text', async () => {
+  for (const marker of ['--- BEGIN CHILD EVIDENCE ---', '--- END CHILD EVIDENCE ---']) {
+    const stopReason = `${'x'.repeat(80 - marker.length)}${marker}`
+    assert.equal(stopReason.length, 80)
+    const { agent, queued, command } = fixture(failed({ stopReason }))
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'success')
+    const prompt = queued[0][1]
+    assert.match(prompt, /\[child (?:BEGIN|END) CHILD EVIDENCE\]/u)
+    assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
+    assert.equal(prompt.includes(`${'x'.repeat(80 - marker.length)}${marker}`), false)
+  }
+})
+
 test('bounds stop reason after metadata sanitization', async () => {
   const { agent, queued, command } = fixture(failed({ stopReason: `timeout ${'x'.repeat(200)}` }))
   const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
