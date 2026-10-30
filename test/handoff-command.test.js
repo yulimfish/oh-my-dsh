@@ -73,6 +73,37 @@ test('hands off a real registry incomplete result with all evidence caveats', as
   await registry.dispose()
 })
 
+test('hands off a persisted incomplete result after restoring the exact Agent cache', async () => {
+  const agent = { id: 'parent-persisted-incomplete' }
+  const stored = new Map()
+  const registry = createTaskResultRegistry({
+    now: () => 1_000,
+    persistentStore: {
+      async put(value) { stored.set(value.childId, structuredClone(value)); return true },
+      async delete(_parentId, childId) { stored.delete(childId); return true },
+      async read(_parentId, childId) { return stored.get(childId) },
+      async list() { return [...stored.values()] },
+    },
+  })
+  assert.equal(registry.recordStart(agent, 'child-1'), true)
+  assert.equal(registry.recordResult(agent, 'child-1', {
+    status: 'incomplete', output: 'persisted partial evidence', truncated: true,
+    omittedNonText: true, stopReason: 'max-tokens',
+  }), true)
+  assert.equal(registry.clearAgent(agent), true)
+  const queued = []
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent, rawInput: 'child-1 continue the persisted work' })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.match(prompt, /Recorded status: incomplete; stop reason: max-tokens/u)
+  assert.match(prompt, /persisted partial evidence/u)
+  assert.match(prompt, /output was truncated/u)
+  assert.match(prompt, /Non-text result blocks were omitted/u)
+  assert.match(prompt, /continue the persisted work/u)
+  await registry.dispose()
+})
+
 test('does not hand off stale failure evidence after the same child ID starts new work', async () => {
   const agent = { id: 'parent-generation' }
   const registry = createTaskResultRegistry()
