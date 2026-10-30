@@ -843,6 +843,23 @@ test('rejects invalid status values during synchronous revalidation', async () =
   }
 })
 
+test('rejects non-string output values during synchronous revalidation', async () => {
+  const stale = failed({ status: 'incomplete', output: 'same evidence' })
+  for (const output of [new String('same evidence'), { text: 'same evidence' }, ['same evidence'], null]) {
+    const current = { ...stale, output }
+    const agent = { id: 'parent-non-string-output-revalidation' }
+    const queued = []
+    const command = createHandoffCommand({
+      readAsync: async () => stale,
+      read: () => current,
+    }, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', String(output))
+    assert.match(response.text, /result changed while handoff was being prepared/u)
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('rejects handoff when any retained evidence field changes before enqueue', async () => {
   for (const change of [
     { status: 'failed' },
