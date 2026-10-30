@@ -683,6 +683,23 @@ test('rejects non-boolean caveat values during synchronous revalidation', async 
   }
 })
 
+test('rejects non-string stop reason values during synchronous revalidation', async () => {
+  const stale = failed({ status: 'incomplete', output: 'same evidence', stopReason: 'max-tokens' })
+  for (const stopReason of [new String('max-tokens'), { value: 'max-tokens' }, ['max-tokens'], null]) {
+    const current = { ...stale, stopReason }
+    const agent = { id: 'parent-non-string-stop-reason' }
+    const queued = []
+    const command = createHandoffCommand({
+      readAsync: async () => stale,
+      read: () => current,
+    }, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', String(stopReason))
+    assert.match(response.text, /result changed while handoff was being prepared/u)
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('rejects a child identity change during synchronous handoff revalidation', async () => {
   const stale = failed({ status: 'incomplete', output: 'same evidence' })
   const current = { ...stale, childId: 'another-child' }
