@@ -247,20 +247,21 @@ function render(scripts, checks, sessionId, cwdChanged = false) {
   let evidenceText = evidenceLines.join('\n')
   if (evidenceText.length > MAX_EVIDENCE_CHARS) {
     const marker = '- … older evidence omitted to retain the latest result and interpretation …'
+    const preamble = evidenceLines.slice(0, cwdChanged ? 3 : 2).join('\n')
     const records = checks.map(check => [
       `- #${check.seq} ${check.isError ? 'FAIL/ERROR' : 'completed without Tool error'}: ${check.command.slice(0, 256)}`,
       ...(check.text ? [`  Output excerpt (untrusted): ${clean(check.text, 300)}`] : []),
       ...(!check.text && !check.hasNonText ? ['  (no text output; a passing exit status is not implied)'] : []),
       ...(check.hasNonText ? ['  (non-text result blocks present; inspect the original Tool result for details)'] : []),
     ].join('\n'))
-    const retained = [records.at(-1)]
-    let used = marker.length + 1 + retained[0].length
+    const retained = records.length > 0 ? [records.at(-1)] : []
+    let used = preamble.length + marker.length + 2 + (retained[0]?.length ?? 0)
     for (let index = records.length - 2; index >= 0; index -= 1) {
       if (used + records[index].length + 1 > MAX_EVIDENCE_CHARS) break
       retained.unshift(records[index])
       used += records[index].length + 1
     }
-    evidenceText = [marker, ...retained].join('\n')
+    evidenceText = [preamble, marker, ...retained].join('\n')
   }
   const suffix = ['', evidenceText, '', disclaimer].join('\n')
   const scriptLines = ['', 'Suggested project scripts (inspect before running):']

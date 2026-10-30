@@ -336,6 +336,24 @@ test('labels historical bash evidence as unattributed after a working-directory 
   assert.match(response.text, /20 tests passed in new-project/u)
 })
 
+test('retains cwd attribution warnings when long evidence is compacted', async () => {
+  const events = []
+  for (let index = 0; index < 16; index += 1) {
+    events.push(call(index * 2, `cwd-long-${index}`, `pnpm test -- ${index}-${'x'.repeat(4_000)}`))
+    events.push(resultEvent(index * 2 + 1, `cwd-long-${index}`, `result-${index}`))
+  }
+  const response = await createVerifyCommand({
+    observeSession: async () => observation(events),
+  }, fsFixture(), '/workspace/new-project').handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  assert.equal(response.kind, 'success')
+  assert.ok(response.text.length <= 4_000)
+  assert.match(response.text, /older evidence omitted/u)
+  assert.match(response.text, /#31 completed without Tool error/u)
+  assert.match(response.text, /per-call working directory is not recorded/u)
+  assert.match(response.text, /effective working directory differs from the session header/u)
+  assert.match(response.text, /not verification of the current project/u)
+})
+
 test('prioritizes bash evidence and disclaimer when scripts exceed the display budget', async () => {
   const largeManifest = JSON.stringify({ scripts: Object.fromEntries(Array.from({ length: 8 }, (_v, i) => [`test:script-${i}`, 'x'.repeat(500)])) })
   const command = createVerifyCommand({
