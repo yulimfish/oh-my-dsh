@@ -3643,6 +3643,27 @@ test('format compatibility falls through dangling canonical symlinks to named an
   assert.equal((await registry.get('child', { cwd })).content, 'Nested child after dangling ancestor.')
 })
 
+test('format compatibility falls through an inaccessible canonical self-loop to named fallback', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'review/review.md', '---\nname: review\ndescription: Named fallback\n---\nNAMED_FALLBACK\n')
+  const { fs } = makeFileSystem()
+  const { ctx } = makeRegistry(fs)
+  const warnings = []
+  ctx.logger = { warn(message, error) { warnings.push(`${message} ${error?.stack ?? error ?? ''}`) } }
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider({ fs, logger: { warn(message, error) { warnings.push(`${message} ${error?.stack ?? error ?? ''}`) } } }, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const cached = (await provider.list({ cwd })).candidates.find(candidate => candidate.name === 'review')
+  assert.ok(cached)
+  await symlink('SKILL.md', path.join(cwd, '.opencode/skills/review/SKILL.md'))
+  const listed = await provider.list({ cwd })
+  assert.equal(listed.complete, true, JSON.stringify(warnings))
+  assert.deepEqual(listed.candidates.map(candidate => candidate.name), ['review'])
+  assert.equal((await provider.get(cached, { cwd })).content, 'NAMED_FALLBACK')
+})
+
 test('format compatibility falls through dangling directory-named files to nested skills', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'container/child/SKILL.md', 'Nested child after dangling named fallback.')

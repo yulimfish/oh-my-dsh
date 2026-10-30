@@ -596,14 +596,25 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
   if (typeof formatCompatibility !== 'boolean') throw new TypeError('formatCompatibility must be boolean')
   const primaryIsAbsent = async (path, cwd, signal) => {
     const directory = await fs.resolve(dirname(path), { cwd, signal })
-    const entries = await fs.listDir(directory, signal)
+    let entries
+    try {
+      entries = await fs.listDir(directory, signal)
+    } catch (error) {
+      if (signal?.aborted || error?.code !== 'ELOOP') throw error
+      return true
+    }
     // Directory entries preserve exact case even when lstat is case-insensitive.
     if (!Array.isArray(entries)) return false
     const primary = entries.find(entry => entry.name === basename(path))
     if (!primary) return true
     // fs.access in the pinned loader follows links: a dangling canonical is
     // absent, while an existing invalid or escaping canonical still wins.
-    return !await fs.stat(primary.target, signal)
+    try {
+      return !await fs.stat(primary.target, signal)
+    } catch (error) {
+      if (signal?.aborted) throw error
+      return true
+    }
   }
   const formatPathsStillEligible = async (paths, cwd, signal) => {
     if (!paths) return false
@@ -1120,14 +1131,34 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
               if (entryInfo.type === 'directory') {
                 skillDirectoryTarget = entry.target
                 if (!await ensureWatch(skillDirectoryTarget, signal, startingWatchRevision, false, true)) complete = false
-                const allChildren = await fs.listDir(skillDirectoryTarget, signal)
+                let allChildren
+                let danglingCanonical = false
+                try {
+                  allChildren = await fs.listDir(skillDirectoryTarget, signal)
+                } catch (error) {
+                  if (signal?.aborted || !formatCompatibility || error?.code !== 'ELOOP') throw error
+                  const directoryName = relativeDirectoryPath.slice(relativeDirectoryPath.lastIndexOf('/') + 1)
+                  let namedTarget
+                  try {
+                    namedTarget = await fs.resolve(`${rootPath}/${relativeDirectoryPath}/${directoryName}.md`, { cwd, signal })
+                  } catch (resolveError) {
+                    if (signal?.aborted) throw resolveError
+                    namedTarget = { targetKey: `${rootPath}/${relativeDirectoryPath}/${directoryName}.md`, displayPath: `${rootPath}/${relativeDirectoryPath}/${directoryName}.md` }
+                  }
+                  danglingCanonical = true
+                  allChildren = [{ name: `${directoryName}.md`, target: namedTarget, type: 'file' }]
+                }
                 const children = limitEntries(allChildren)
                 let skillFile = children.find(child => child.name === 'SKILL.md')
                 let skillFileInfo
-                let danglingCanonical = false
                 if (skillFile && formatCompatibility) {
-                  if (!fs.contains(rootTarget, skillFile.target)) continue
-                  skillFileInfo = await fs.stat(skillFile.target, signal)
+                  if (danglingCanonical) skillFile = undefined
+                  else if (!fs.contains(rootTarget, skillFile.target)) continue
+                  try {
+                    skillFileInfo = await fs.stat(skillFile.target, signal)
+                  } catch (error) {
+                    if (signal?.aborted) throw error
+                  }
                   if (!skillFileInfo) {
                     danglingCanonical = true
                     skillFile = undefined
