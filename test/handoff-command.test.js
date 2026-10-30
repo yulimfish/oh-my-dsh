@@ -190,6 +190,31 @@ test('rejects expired and future persisted results without queueing handoff', as
   }
 })
 
+test('fails closed without stale evidence when persistent handoff reads fail', async () => {
+  const agent = { id: 'parent-storage-failure' }
+  const registry = createTaskResultRegistry({
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => { throw new Error('private storage failure') },
+      list: async () => [],
+    },
+  })
+  registry.recordStart(agent, 'child-1')
+  registry.recordResult(agent, 'child-1', {
+    status: 'incomplete', output: 'old evidence', truncated: false, omittedNonText: false,
+  })
+  registry.clearAgent(agent)
+  const queued = []
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /failed or incomplete/u)
+  assert.equal(response.text.includes('private storage failure'), false)
+  assert.equal(queued.length, 0)
+  await registry.dispose()
+})
+
 test('hands off persisted evidence to the exact same-session replacement Agent', async () => {
   const oldAgent = { id: 'parent-replaced-session' }
   const replacement = { id: oldAgent.id }
