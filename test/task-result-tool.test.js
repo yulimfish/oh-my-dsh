@@ -268,6 +268,25 @@ test('keeps newer local terminal state when an old persistence list resolves', a
   await registry.dispose()
 })
 
+test('restoring results does not write stale snapshots back to persistence', async () => {
+  const parent = agent('restore-read-only')
+  const stored = persistedResult(parent.id, 'stored-child')
+  let writes = 0
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => { writes += 1; return true },
+      delete: async () => true,
+      read: async () => stored,
+      list: async () => [stored],
+    },
+  })
+  assert.equal((await registry.readAsync(parent, stored.childId))?.output, stored.output)
+  assert.deepEqual(await registry.listAsync(parent), [{ childId: stored.childId, status: 'completed' }])
+  assert.equal(writes, 0, 'read/list restoration must not rewrite stale evidence or extend its durable lifetime')
+  await registry.dispose()
+})
+
 test('prefers current local terminal state over a conflicting persisted snapshot', async () => {
   const parent = agent('local-terminal-priority')
   const stored = persistedResult(parent.id, 'shared-child')
