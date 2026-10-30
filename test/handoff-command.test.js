@@ -508,6 +508,24 @@ test('preserves boundaries and guidance when fixed metadata approaches the byte 
   assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
 })
 
+test('keeps maximal handoff compaction bounded without quadratic rebuilding', async () => {
+  const childId = 'c'.repeat(256)
+  const { agent, command } = fixture(failed({
+    childId,
+    status: 'incomplete',
+    output: '汉'.repeat(8_192),
+    truncated: true,
+    omittedNonText: true,
+    stopReason: 'x'.repeat(80),
+  }))
+  const started = performance.now()
+  for (let index = 0; index < 20; index += 1) {
+    const response = await command.handler({ agent, rawInput: `${childId} ${'汉'.repeat(1_000)}` })
+    assert.equal(response.kind, 'success')
+  }
+  assert.ok(performance.now() - started < 1_000, '20 maximal compactions should not rebuild evidence quadratically')
+})
+
 test('labels failed handoff with no retained output and stop reason', async () => {
   const { agent, queued, command } = fixture(failed({ output: '', stopReason: 'timeout' }))
   const response = await command.handler({ agent, rawInput: 'child-1 investigate timeout' })

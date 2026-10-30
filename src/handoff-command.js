@@ -59,17 +59,31 @@ function handoffPrompt({ childId, status, stopReason, truncated, omittedNonText,
   let text = `${prefix}\n${evidence}\n${suffix}`
   if (text.length <= MAX_PROMPT_CHARS && Buffer.byteLength(text, 'utf8') <= MAX_PROMPT_CHARS) return text
   const render = bounded => `${prefix}\n${bounded}\n${suffix}`
-  const fits = value => value.length <= MAX_PROMPT_CHARS && Buffer.byteLength(value, 'utf8') <= MAX_PROMPT_CHARS
   const characters = [...evidence]
-  let head = Math.ceil(characters.length / 2)
-  let tail = Math.floor(characters.length / 2)
-  while (head + tail > 0) {
-    const bounded = `${characters.slice(0, head).join('')}${marker}${characters.slice(-tail).join('')}`
-    text = render(bounded)
-    if (fits(text)) return text
-    if (head >= tail) head -= 1
-    else tail -= 1
+  const charBudget = Math.max(0, MAX_PROMPT_CHARS - prefix.length - suffix.length - marker.length - 2)
+  const headChars = Math.floor(charBudget / 2)
+  const tailChars = charBudget - headChars
+  const fixedBytes = Buffer.byteLength(prefix, 'utf8') + Buffer.byteLength(suffix, 'utf8')
+    + Buffer.byteLength(marker, 'utf8') + 2
+  const byteBudget = Math.max(0, MAX_PROMPT_CHARS - fixedBytes)
+  let usedBytes = 0
+  const take = (count, fromTail = false) => {
+    let taken = 0
+    let bytes = 0
+    const values = fromTail ? characters.slice(-count).reverse() : characters.slice(0, count)
+    for (const character of values) {
+      const size = Buffer.byteLength(character, 'utf8')
+      if (usedBytes + bytes + size > byteBudget) break
+      taken += 1
+      bytes += size
+    }
+    usedBytes += bytes
+    return taken
   }
+  const head = take(Math.min(Math.ceil(characters.length / 2), headChars))
+  const tail = take(Math.min(Math.floor(characters.length / 2), tailChars), true)
+  text = render(`${characters.slice(0, head).join('')}${marker}${characters.slice(-tail).join('')}`)
+  if (text.length <= MAX_PROMPT_CHARS && Buffer.byteLength(text, 'utf8') <= MAX_PROMPT_CHARS) return text
   return render('[… evidence omitted for prompt budget …]')
 }
 
