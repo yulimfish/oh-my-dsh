@@ -221,6 +221,25 @@ test('keeps newer local terminal state when an old persistence list resolves', a
   await registry.dispose()
 })
 
+test('invalid or expired persisted snapshots do not block a fresh child with the same ID', async () => {
+  const parent = agent('invalid-restore')
+  for (const stored of [undefined, { ...persistedResult(parent.id, 'shared-child'), status: 'running' }, { ...persistedResult(parent.id, 'shared-child'), expiresAt: 100 }]) {
+    const registry = createTaskResultRegistry({
+      now: () => 100,
+      persistentStore: {
+        put: async () => true,
+        delete: async () => true,
+        read: async () => stored,
+        list: async () => [],
+      },
+    })
+    assert.equal(await registry.readAsync(parent, 'shared-child'), undefined)
+    assert.equal(registry.recordStart(parent, 'shared-child'), true)
+    assert.deepEqual(registry.read(parent, 'shared-child'), { childId: 'shared-child', status: 'running' })
+    await registry.dispose()
+  }
+})
+
 test('storage failure falls back to current local state rather than the pre-I/O snapshot', async () => {
   const parent = agent('parent-storage-failure')
   const readGate = deferred()
