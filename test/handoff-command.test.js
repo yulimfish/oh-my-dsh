@@ -678,6 +678,25 @@ test('keeps incomplete status review wording with an explicit next step but no o
   assert.doesNotMatch(prompt, /Review this evidence against the current user request/u)
 })
 
+test('reviews incomplete partial output instead of using empty-evidence guidance', async () => {
+  const { agent, queued, command } = fixture(failed({
+    status: 'incomplete',
+    output: 'Partial investigation evidence',
+    stopReason: 'max-tokens',
+    truncated: true,
+    omittedNonText: true,
+  }))
+  const response = await command.handler({ agent, rawInput: 'child-1' })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.match(prompt, /Partial investigation evidence/u)
+  assert.match(prompt, /output was truncated/u)
+  assert.match(prompt, /Non-text result blocks were omitted/u)
+  assert.match(prompt, /Inspect the evidence, identify the unfinished work/u)
+  assert.match(prompt, /Review this evidence against the current user request/u)
+  assert.doesNotMatch(prompt, /no partial text evidence is available/u)
+})
+
 test('rejects failed snapshots that claim omitted evidence without retained output', async () => {
   for (const caveats of [{ truncated: true }, { omittedNonText: true }, { truncated: true, omittedNonText: true }]) {
     const { agent, queued, command } = fixture(failed({ output: '', ...caveats }))
