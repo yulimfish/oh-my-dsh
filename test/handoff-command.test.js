@@ -253,6 +253,14 @@ test('removes control characters from stop reason metadata', async () => {
   assert.match(queued[0][1], /stop reason: timeout next/u)
 })
 
+test('omits blank stop reason metadata in handoff', async () => {
+  const { agent, queued, command } = fixture(failed({ stopReason: '   ' }))
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+  assert.equal(response.kind, 'success')
+  assert.match(queued[0][1], /Recorded status: failed\n/u)
+  assert.doesNotMatch(queued[0][1], /stop reason:/u)
+})
+
 test('preserves exact child identity when preparing handoff evidence', async () => {
   const { agent, queued, calls, command } = fixture(failed({ childId: 'child-unicode-任务' }))
   const response = await command.handler({ agent, rawInput: 'child-unicode-任务 inspect next' })
