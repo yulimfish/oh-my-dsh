@@ -1247,11 +1247,13 @@ test('rejects running, completed, unknown, cross-session, malformed, and service
     assert.equal(queued.length, 0)
   }
 
-  const failing = createHandoffCommand({ read() { throw new Error('private registry failure') } }, { queueMessage() { throw new Error('must not queue') } })
+  let queueCalls = 0
+  const failing = createHandoffCommand({ read() { throw new Error('private registry failure') } }, { queueMessage() { queueCalls += 1; throw new Error('must not queue') } })
   const response = await failing.handler({ agent: { id: 'parent' }, rawInput: 'child-1' })
   assert.equal(response.kind, 'error')
   assert.match(response.text, /Could not read/u)
   assert.equal(response.text.includes('private registry failure'), false)
+  assert.equal(queueCalls, 0, 'a synchronous read failure never reaches the handoff queue')
 })
 
 test('fails closed without leaking errors when synchronous handoff revalidation fails', async () => {
