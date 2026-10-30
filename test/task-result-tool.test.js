@@ -914,6 +914,32 @@ test('restoring a result refreshes its LRU position without extending its TTL', 
   await registry.dispose()
 })
 
+test('list restoration refreshes the restored record LRU position without extending TTL', async () => {
+  let time = 100
+  const parent = agent('restore-list-lru')
+  const stored = persistedResult(parent.id, 'restored-child')
+  const registry = createTaskResultRegistry({
+    now: () => time,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => undefined,
+      list: async () => [stored],
+    },
+  })
+  registry.recordStart(parent, 'older-child')
+  registry.recordResult(parent, 'older-child', result)
+  time = 101
+  assert.deepEqual(await registry.listAsync(parent), [
+    { childId: 'older-child', status: 'completed' },
+    { childId: stored.childId, status: 'completed' },
+  ])
+  for (let index = 0; index < 31; index += 1) assert.equal(registry.recordStart(parent, `active-${index}`), true)
+  assert.equal(registry.read(parent, 'older-child'), undefined)
+  assert.equal(registry.read(parent, stored.childId)?.status, 'completed')
+  await registry.dispose()
+})
+
 test('caps each parent and refuses excess active records without expiring live work', () => {
   let time = 100
   const registry = createTaskResultRegistry({ now: () => time })
