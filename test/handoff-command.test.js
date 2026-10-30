@@ -697,6 +697,19 @@ test('reviews incomplete partial output instead of using empty-evidence guidance
   assert.doesNotMatch(prompt, /no partial text evidence is available/u)
 })
 
+test('treats whitespace-only incomplete output as no partial evidence', async () => {
+  for (const output of ['   ', '\n\t', '\u0000']) {
+    const { agent, queued, command } = fixture(failed({ status: 'incomplete', output, stopReason: 'max-tokens' }))
+    const response = await command.handler({ agent, rawInput: 'child-1' })
+    assert.equal(response.kind, 'success', JSON.stringify(output))
+    const prompt = queued[0][1]
+    assert.match(prompt, /no partial text evidence is available/u)
+    assert.match(prompt, /Review the incomplete status and stop reason/u)
+    assert.doesNotMatch(prompt, /Inspect the evidence, identify the unfinished work/u)
+    assert.doesNotMatch(prompt, /Review this evidence against the current user request/u)
+  }
+})
+
 test('rejects failed snapshots that claim omitted evidence without retained output', async () => {
   for (const caveats of [{ truncated: true }, { omittedNonText: true }, { truncated: true, omittedNonText: true }]) {
     const { agent, queued, command } = fixture(failed({ output: '', ...caveats }))
