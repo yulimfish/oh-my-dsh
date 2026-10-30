@@ -134,6 +134,30 @@ test('explicit persistence restores a terminal snapshot for a same-session Agent
   await registry.dispose()
 })
 
+test('rejects cross-parent, empty-child, and running persisted snapshots', async () => {
+  for (const difference of [
+    { parentId: 'other-parent' },
+    { childId: '' },
+    { status: 'running' },
+  ]) {
+    const parent = agent('identity-restore')
+    const stored = { ...persistedResult(parent.id, 'shared-child'), ...difference }
+    const registry = createTaskResultRegistry({
+      now: () => 100,
+      persistentStore: {
+        put: async () => true,
+        delete: async () => true,
+        read: async () => stored,
+        list: async () => [stored],
+      },
+    })
+    assert.equal(await registry.readAsync(parent, stored.childId), undefined)
+    assert.deepEqual(await registry.listAsync(parent), [])
+    assert.equal(registry.size(), 0)
+    await registry.dispose()
+  }
+})
+
 test('clearing an old Agent fences in-flight restores without replacing the successor snapshot', async () => {
   const old = agent('session-fence')
   const replacement = agent('session-fence')
