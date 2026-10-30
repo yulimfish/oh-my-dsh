@@ -700,6 +700,23 @@ test('rejects non-string stop reason values during synchronous revalidation', as
   }
 })
 
+test('rejects non-string child identities during synchronous revalidation', async () => {
+  const stale = failed({ status: 'incomplete', output: 'same evidence' })
+  for (const childId of [new String('child-1'), { value: 'child-1' }, ['child-1'], '']) {
+    const current = { ...stale, childId }
+    const agent = { id: 'parent-non-string-child-identity' }
+    const queued = []
+    const command = createHandoffCommand({
+      readAsync: async () => stale,
+      read: () => current,
+    }, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', String(childId))
+    assert.match(response.text, /result changed while handoff was being prepared/u)
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('rejects a child identity change during synchronous handoff revalidation', async () => {
   const stale = failed({ status: 'incomplete', output: 'same evidence' })
   const current = { ...stale, childId: 'another-child' }
