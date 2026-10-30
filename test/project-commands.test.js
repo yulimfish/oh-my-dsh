@@ -128,7 +128,7 @@ function fixture(options = {}) {
   return { ...memory, agent, session, sessions, adapter }
 }
 
-function applyCommandFixture() {
+function applyCommandFixture({ backfillLiveAgents = false } = {}) {
   const state = fixture()
   const globalCommands = new Map()
   const scopedCommands = new Map()
@@ -165,7 +165,10 @@ function applyCommandFixture() {
     },
   }
   const services = {
-    agents: { get: id => id === agent.id ? agent : undefined },
+    agents: {
+      get: id => id === agent.id ? agent : undefined,
+      ...(backfillLiveAgents ? { list: () => [agent] } : {}),
+    },
     sessions: state.sessions,
   }
   const ctx = {
@@ -228,9 +231,13 @@ function applyCommandFixture() {
         await listener({ agent, signal: new AbortController().signal })
       }
     },
-    async dispose() {
-      for (const listener of listeners.get('agent/disposed') ?? []) await listener({ agent })
+    async dispose({ unload = true } = {}) {
+      if (unload) for (const listener of listeners.get('agent/disposed') ?? []) await listener({ agent })
       for (let index = effects.length - 1; index >= 0; index -= 1) await effects[index].dispose?.()
+      if (!unload) {
+        listeners.clear()
+        effects.length = 0
+      }
     },
   }
 }
@@ -1037,7 +1044,9 @@ test('wires the explicit project root through Agent setup and manual refresh', a
     },
   }
   const services = {
-    agents: { get: id => id === agent.id ? agent : undefined },
+    agents: {
+      get: id => id === agent.id ? agent : undefined,
+    },
     sessions: state.sessions,
   }
   const ctx = {
@@ -1746,6 +1755,20 @@ test('Config forwards empty-body compatibility through real apply', async t => {
   assert.throws(() => state.setup({ enableProjectCommandEmptyBody: true, enableProjectCommands: false }), /requires enableProjectCommands/u)
 })
 
+test('configuration replacement restores project commands for already-live Agents', async t => {
+  const state = applyCommandFixture({ backfillLiveAgents: true })
+  t.after(() => state.dispose())
+  state.addFile(`${CWD}/${PROJECT_COMMAND_DIRECTORY}/local-check.md`, VALID)
+  state.setup()
+  await state.createAgent()
+  assert.ok(state.scopedCommands.has('local-check'))
+  await state.dispose({ unload: false })
+  assert.equal(state.scopedCommands.has('local-check'), false)
+  state.setup()
+  await state.effects.find(effect => effect.label === 'dsh-omo project command live-Agent backfill').dispose()
+  assert.ok(state.scopedCommands.has('local-check'), 'replacement backfills without another agent/created event')
+})
+
 test('command routes default off and preserve the existing project prompt queue', async t => {
   const state = applyCommandFixture()
   t.after(() => state.dispose())
@@ -2099,7 +2122,9 @@ test('integrates project and user-root commands in only the exact live Agent com
   agent.followup = message => queued.push(message)
   let nextFiberDisposeHook
   const services = {
-    agents: { get: id => id === agent.id ? agent : undefined },
+    agents: {
+      get: id => id === agent.id ? agent : undefined,
+    },
     sessions: state.sessions,
   }
   const ctx = {

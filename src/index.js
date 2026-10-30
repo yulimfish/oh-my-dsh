@@ -1184,6 +1184,22 @@ function createProjectCommandManager(ctx, sessionsService, agentsService, lifecy
     await Promise.all(current.map(state => disposeScope(state, true)))
     retryFailedWatchClosers()
   }
+  const backfill = async () => {
+    if (disposed || lifecycle.disposed || typeof agentsService?.list !== 'function') return
+    let agents
+    try {
+      agents = agentsService.list()
+    } catch (error) {
+      warn(error)
+      return
+    }
+    if (!Array.isArray(agents)) return
+    for (const agent of agents.slice(0, MAX_PROJECT_COMMAND_AGENT_SCOPES)) {
+      if (disposed || lifecycle.disposed) return
+      await listener({ agent })
+    }
+  }
+
   const automaticCommand = (agent, definition) => {
     if (disposed || lifecycle.disposed || !live(agent) || !definition) return undefined
     const state = scopes.get(agent.id)
@@ -1192,7 +1208,7 @@ function createProjectCommandManager(ctx, sessionsService, agentsService, lifecy
     if (!projectCommand || ctx.commands.find(agent, definition.name) !== definition) return undefined
     return projectCommand
   }
-  return { listener, clearAgent, refresh, dispose, automaticCommand }
+  return { listener, clearAgent, refresh, dispose, backfill, automaticCommand }
 }
 
 function settlementSource(childId, summary) {
@@ -4676,6 +4692,8 @@ export function apply(ctx, rawConfig) {
     ctx.on('agent/created', projectCommandManager.listener)
     ctx.on('agent/disposed', projectCommandManager.clearAgent)
     ctx.effect(() => projectCommandManager.dispose, 'dsh-omo project command source')
+    const backfill = Promise.resolve().then(projectCommandManager.backfill)
+    ctx.effect(() => () => backfill, 'dsh-omo project command live-Agent backfill')
     const resolveAutomaticCommand = projectCommandManager.automaticCommand
     if (config.enableAutomaticSlashCommands && typeof resolveAutomaticCommand === 'function') {
       const automatic = createAutomaticSlashCommandListener({
