@@ -49,6 +49,30 @@ test('accepts incomplete results and preserves truncation and omitted-block cave
   assert.match(prompt, /Review the incomplete status and stop reason/u)
 })
 
+test('hands off a real registry incomplete result with all evidence caveats', async () => {
+  const agent = { id: 'parent-real-incomplete' }
+  const registry = createTaskResultRegistry()
+  assert.equal(registry.recordStart(agent, 'child-1'), true)
+  assert.equal(registry.recordResult(agent, 'child-1', {
+    status: 'incomplete',
+    output: 'partial evidence',
+    truncated: true,
+    omittedNonText: true,
+    stopReason: 'max-tokens',
+  }), true)
+  const queued = []
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent, rawInput: 'child-1 continue carefully' })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.match(prompt, /Recorded status: incomplete; stop reason: max-tokens/u)
+  assert.match(prompt, /partial evidence/u)
+  assert.match(prompt, /output was truncated/u)
+  assert.match(prompt, /Non-text result blocks were omitted/u)
+  assert.match(prompt, /continue carefully/u)
+  await registry.dispose()
+})
+
 test('does not hand off stale failure evidence after the same child ID starts new work', async () => {
   const agent = { id: 'parent-generation' }
   const registry = createTaskResultRegistry()
