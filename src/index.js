@@ -78,6 +78,7 @@ import { createRouteAdmission } from './route-admission.js'
 import { createPendingTaskRegistry } from './pending-task-registry.js'
 import { createPendingBackgroundScheduler } from './pending-background.js'
 import { createPendingTaskCancelTool, createPendingTaskStatusTool } from './pending-task-tools.js'
+import { createTaskJobMonitor } from './task-job-monitor.js'
 
 export const name = 'dsh-omo'
 export const inject = ['tools', 'subagents', 'systemPrompt', 'commands', 'skills', 'fs']
@@ -168,6 +169,7 @@ export const Config = z.object({
   enableWebSearchCommand: z.boolean().default(false),
   enableWebSearchTool: z.boolean().default(false),
   enableJobTools: z.boolean().default(false),
+  enableTaskJobStatus: z.boolean().default(true),
   enableToolResultPruning: z.boolean().default(false),
   enableManualContextPruning: z.boolean().default(false),
   enableSearchToolResultPruning: z.boolean().default(false),
@@ -353,7 +355,7 @@ When the user says **ultrawork**, **ulw**, or requests a substantial multi-step 
 3. Inspect every worker's evidence and diff; do not accept a worker's completion claim as verification.
 4. Run the relevant project checks yourself (or have a test worker provide exact command output), fix failures, and report what was and was not verified.
 
-${reviewRoleGuidance} allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain available. For a hard boundary, verify DSH-native permission, sandbox, or tool-guard policy covers scoped tools and the reserved transport; dsh-omo does not install a per-worker hard guard. DSH retains authority over filesystem, shell, network, and approvals. One-shot delegation is the default and sends a host-attributed settlement notice followed by a bounded child-authored relay (untrusted evidence); use dsh_omo_task_continuable only when that optional tool is enabled and a durable child session is needed. ${taskListingGuidance} ${projectAgentGuidance} ${interruptionGuidance} ${planExecutionGuidance} ${writeGuardGuidance}`
+${reviewRoleGuidance} allowTools/denyTools filter inherited global and ancestor-scope tools; the child's own scoped registrations and (when the scope's effective presentation mode is non-native) DSH's reserved PTC run_code transport may remain available. For a hard boundary, verify DSH-native permission, sandbox, or tool-guard policy covers scoped tools and the reserved transport; dsh-omo does not install a per-worker hard guard. DSH retains authority over filesystem, shell, network, and approvals. One-shot delegation is the default and sends one settlement delivery containing host metadata and any bounded child-authored relay (untrusted evidence); use dsh_omo_task_continuable only when that optional tool is enabled and a durable child session is needed. ${taskListingGuidance} ${projectAgentGuidance} ${interruptionGuidance} ${planExecutionGuidance} ${writeGuardGuidance}`
 }
 
 function optionalService(ctx, name) {
@@ -2155,7 +2157,7 @@ function callOmoAgentTool(config, categoryRoutes, taskResultRegistry, roles, lau
   })
 }
 
-function specialistTools(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, activeRunOwners, activeRunCompletions, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles, routeConcurrency, promptFileExpander, taskResultRegistry, admission, agentsService, maxPendingTasks, routePreflight, presetPreflight, routeAdmission, pendingScheduler) {
+function specialistTools(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, activeRunOwners, activeRunCompletions, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles, routeConcurrency, promptFileExpander, taskResultRegistry, admission, agentsService, maxPendingTasks, routePreflight, presetPreflight, routeAdmission, pendingScheduler, taskJobMonitor) {
   const disposedParents = new WeakSet()
   const clearDisposedParent = parent => {
     if (parent && typeof parent === 'object') disposedParents.add(parent)
@@ -2552,6 +2554,7 @@ function specialistTools(ctx, config, roleRoutes, categoryRoutes, userAgents, ac
       activeRuns.set(run.id, run)
       if (config.enableTaskCancelTool || config.enableTaskWaitTool) activeRunOwners.set(run.id, exec.agent)
       const resultTracked = taskResultRegistry?.recordStart(exec.agent, run.id) === true
+      taskJobMonitor?.start({ run, parent: exec.agent, role: roleName, task: args.task })
       const completion = settleBackgroundChild({
         run, role: roleName, task: args.task, parent: exec.agent, ctx, activeChildren, activeRuns, activeRunOwners, activeRunCompletions, lifecycle,
         maxResultChars: config.maxResultChars, releaseRouteConcurrency, taskResultRegistry, foregroundDelivery, resultTracked, admission: coordinatedAdmission, reservation, isParentCurrent: parentCurrent,
@@ -4209,6 +4212,9 @@ export function apply(ctx, rawConfig) {
   const activeRuns = new Map()
   const activeRunOwners = new Map()
   const activeRunCompletions = new Map()
+  const taskJobMonitor = config.enableTaskJobStatus !== false
+    ? createTaskJobMonitor({ jobs: optionalService(ctx, 'jobs'), subagents: ctx.subagents, logger: ctx.logger })
+    : undefined
   const routeConcurrency = createRouteConcurrencyAdmission(providerConcurrency, modelConcurrency)
   const routePreflight = createHostPreflightGate(MAX_PENDING_ROUTE_PREFLIGHTS, () => new RoutePreflightBusyError())
   const presetPreflight = createHostPreflightGate(MAX_PENDING_PRESET_PREFLIGHTS, () => new PresetPreflightBusyError())
@@ -4308,7 +4314,7 @@ export function apply(ctx, rawConfig) {
     ctx.effect(() => disposeNotepadWriteGuard, 'dsh-omo notepad write guard')
   }
   const specialist = specialistTools(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, activeRunOwners, activeRunCompletions, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles, routeConcurrency, promptFileExpander, taskResultRegistry, admission, agentsService, maxPendingTasks, routePreflight, presetPreflight, routeAdmission,
-    config.enablePendingBackgroundTasks ? { enqueue: (args, exec) => pendingScheduler.enqueue(args, exec) } : undefined)
+    config.enablePendingBackgroundTasks ? { enqueue: (args, exec) => pendingScheduler.enqueue(args, exec) } : undefined, taskJobMonitor)
   if (pendingRegistry) {
     pendingScheduler = createPendingBackgroundScheduler({
       registry: pendingRegistry,

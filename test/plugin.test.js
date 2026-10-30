@@ -478,6 +478,8 @@ test('exports Cordis function-plugin metadata and config defaults', () => {
   assert.equal(Config({ enableSessionInfo: true }).enableSessionInfo, true)
   assert.equal(Config({}).enableJobTools, false)
   assert.equal(Config({ enableJobTools: true }).enableJobTools, true)
+  assert.equal(Config({}).enableTaskJobStatus, true)
+  assert.equal(Config({ enableTaskJobStatus: false }).enableTaskJobStatus, false)
   assert.equal(Config({}).enableToolResultPruning, false)
   assert.equal(Config({ enableToolResultPruning: true }).enableToolResultPruning, true)
   assert.equal(Config({}).enableManualContextPruning, false)
@@ -1664,6 +1666,40 @@ test('injects one settled result into a running parent without queueing a wake-u
   assert.match(injected[0].content[0].text, /specialist result/)
   assert.equal(injected[0].content[1].text, 'Running-parent evidence.')
   assert.deepEqual(fixture.followups, [], 'a busy parent must not receive a queued wake-up')
+})
+
+test('mirrors accepted children into native Jobs without a second settlement delivery', async () => {
+  const jobStarts = []
+  const jobWaits = []
+  const jobs = {
+    start(spec) { jobStarts.push(spec); return 'omo-subagent-job-1' },
+    wait(...args) { jobWaits.push(args); return new Promise(() => {}) },
+  }
+  const fixture = makeContext({ services: { jobs }, outputText: 'Job-backed evidence.' })
+  apply(fixture.ctx, baseConfig)
+  const parent = { id: 'parent-agent', followup: message => fixture.followups.push(message) }
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'Show status through native Jobs' },
+    { agent: parent, signal: new AbortController().signal },
+  )
+  assert.equal(jobStarts.length, 1)
+  const spec = jobStarts[0]
+  assert.equal(spec.kind, 'omo-subagent')
+  assert.equal(spec.owner, 'parent-agent')
+  assert.equal(spec.label, 'OMO explore: Show status through native Jobs')
+  assert.deepEqual(jobWaits, [['omo-subagent-job-1', 2_147_483_647, 'parent-agent']])
+  assert.deepEqual(await spec.run().done, { status: 'completed' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(fixture.followups.length, 1, 'the native Job mirror adds no second Agent delivery')
+  assert.equal(fixture.followups[0].content[1].text, 'Job-backed evidence.')
+
+  const disabled = makeContext({ services: { jobs } })
+  apply(disabled.ctx, { ...baseConfig, enableTaskJobStatus: false })
+  await disabled.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'Disable only the Job mirror' },
+    { agent: parent, signal: new AbortController().signal },
+  )
+  assert.equal(jobStarts.length, 1)
 })
 
 test('mounts only opt-in DSH-supported read-only LSP tools when the exact services are available', () => {

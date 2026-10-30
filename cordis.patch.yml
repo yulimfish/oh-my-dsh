@@ -32,6 +32,7 @@
         enableContinuableTasks: false
         enableGoalTools: false
         enableTeamTools: false
+        enableTaskJobStatus: true
         projectSkillDirs: [.opencode/skills, .opencode/skill, .claude/skills, .agents/skills]
         disabledSkills: []
         categoryRoutes: []
