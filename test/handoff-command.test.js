@@ -359,6 +359,32 @@ test('does not queue handoff after registry disposal during persistent restore',
   assert.equal(registry.read(agent, 'child-1'), undefined)
 })
 
+test('rejects persisted completed and running records as recovery handoffs', async () => {
+  const agent = { id: 'parent-persisted-status' }
+  for (const status of ['completed', 'running']) {
+    const stored = {
+      parentId: agent.id, childId: 'child-1', status, output: 'not recovery evidence',
+      truncated: false, omittedNonText: false, settledAt: 900, expiresAt: 2_000,
+    }
+    const registry = createTaskResultRegistry({
+      now: () => 1_000,
+      persistentStore: {
+        put: async () => true,
+        delete: async () => true,
+        read: async () => stored,
+        list: async () => [stored],
+      },
+    })
+    const queued = []
+    const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', status)
+    assert.match(response.text, /failed or incomplete/u)
+    assert.equal(queued.length, 0, status)
+    await registry.dispose()
+  }
+})
+
 test('does not trust an unversioned async snapshot after same-child replacement', async () => {
   const agent = { id: 'parent-unversioned-stale' }
   const registry = createTaskResultRegistry()
