@@ -703,11 +703,28 @@ test('treats whitespace-only incomplete output as no partial evidence', async ()
     const response = await command.handler({ agent, rawInput: 'child-1' })
     assert.equal(response.kind, 'success', JSON.stringify(output))
     const prompt = queued[0][1]
-    assert.match(prompt, /no partial text evidence is available/u)
+    assert.match(prompt, output ? /retained output is empty after sanitization/u : /no partial text evidence is available/u)
     assert.match(prompt, /Review the incomplete status and stop reason/u)
     assert.doesNotMatch(prompt, /Inspect the evidence, identify the unfinished work/u)
     assert.doesNotMatch(prompt, /Review this evidence against the current user request/u)
   }
+})
+
+test('distinguishes sanitized-empty truncated output from originally empty evidence', async () => {
+  const { agent, queued, command } = fixture(failed({
+    status: 'incomplete',
+    output: ' \u0000 ',
+    stopReason: 'max-tokens',
+    truncated: true,
+    omittedNonText: true,
+  }))
+  const response = await command.handler({ agent, rawInput: 'child-1' })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.match(prompt, /retained output is empty after sanitization/u)
+  assert.match(prompt, /output was truncated/u)
+  assert.match(prompt, /Non-text result blocks were omitted/u)
+  assert.match(prompt, /Review the incomplete status and stop reason/u)
 })
 
 test('rejects failed snapshots that claim omitted evidence without retained output', async () => {

@@ -178,7 +178,9 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
           ? evidenceForPrompt(cleanedOutput)
           : snapshot.status === 'failed'
             ? '(no recovery evidence is available; the specialist failed without a retained child result)'
-            : '(no partial text evidence is available; inspect the incomplete status and stop reason)'
+            : snapshot.output
+              ? '(retained output is empty after sanitization; inspect the incomplete status and stop reason)'
+              : '(no partial text evidence is available; inspect the incomplete status and stop reason)'
         stopReason = cleanMetadata(snapshot.stopReason, 80)
       } catch {
         return result('error', 'Could not prepare bounded handoff evidence; no handoff was queued.')
