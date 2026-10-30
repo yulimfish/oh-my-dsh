@@ -3027,6 +3027,9 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
   const strict = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills'] })
   assert.equal(await strict.registry.get('broken', { cwd }), undefined)
+  await writeCompatibilityDocument(cwd, 'cr-malformed.md', '---\rname: "good"\rdescription: "valid"\ragent: [invalid\r---\rRecovered body.\r')
+  const { registry: crRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
+  assert.equal(await crRegistry.get('cr-malformed', { cwd }), undefined)
 })
 
 test('format compatibility gives canonical SKILL.md priority over named files including invalid and symlink primaries', async t => {

@@ -266,7 +266,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
       throw new SkillFormatError('skill YAML frontmatter is invalid')
     }
     const duplicateKey = document.errors.some(error => error?.code === 'DUPLICATE_KEY')
-    if (duplicateKey || (document.errors.length > 0 && !formatCompatibility)) {
+    if (duplicateKey || (document.errors.length > 0 && !(formatCompatibility && pinnedFrontmatter))) {
       throw new SkillFormatError('skill YAML frontmatter is invalid')
     }
     try {
