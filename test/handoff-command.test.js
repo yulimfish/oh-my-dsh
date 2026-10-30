@@ -443,6 +443,20 @@ test('preserves handoff guidance and boundary with maximum next-step and evidenc
   assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
 })
 
+test('bounds escaped next-step JSON and the complete handoff prompt', async () => {
+  for (const nextStep of [String.fromCharCode(92).repeat(1_000), String.fromCharCode(34).repeat(1_000), '汉'.repeat(1_000)]) {
+    const { agent, queued, command } = fixture(failed({ output: 'x'.repeat(8_192) }))
+    const response = await command.handler({ agent, rawInput: `child-1 ${nextStep}` })
+    assert.equal(response.kind, 'success')
+    const prompt = queued[0][1]
+    assert.ok(prompt.length <= 6_000, `prompt length was ${prompt.length}`)
+    assert.ok(Buffer.byteLength(prompt, 'utf8') <= 6_000, `prompt bytes were ${Buffer.byteLength(prompt, 'utf8')}`)
+    assert.match(prompt, /Start a NEW bounded dsh_omo_task/u)
+    assert.match(prompt, /Requested next step from the current user:/u)
+    assert.equal((prompt.match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
+  }
+})
+
 test('labels failed handoff with no retained output and stop reason', async () => {
   const { agent, queued, command } = fixture(failed({ output: '', stopReason: 'timeout' }))
   const response = await command.handler({ agent, rawInput: 'child-1 investigate timeout' })
