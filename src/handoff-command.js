@@ -94,6 +94,7 @@ function validResult(value, childId) {
       && typeof value.output === 'string' && value.output.length <= MAX_EVIDENCE_CHARS
       && (value.truncated === undefined || typeof value.truncated === 'boolean')
       && (value.omittedNonText === undefined || typeof value.omittedNonText === 'boolean')
+      && (value.status !== 'failed' || value.output !== '' || (value.truncated !== true && value.omittedNonText !== true))
       && (value.stopReason === undefined || (typeof value.stopReason === 'string' && value.stopReason.length <= 80))
   } catch {
     return false

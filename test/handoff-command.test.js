@@ -645,8 +645,19 @@ test('keeps incomplete empty output distinct from failed recovery evidence', asy
   assert.match(queued[0][1], /output was truncated/u)
 })
 
-test('preserves failed status metadata alongside the no-recovery-evidence notice', async () => {
+test('rejects failed snapshots that claim omitted evidence without retained output', async () => {
+  for (const caveats of [{ truncated: true }, { omittedNonText: true }, { truncated: true, omittedNonText: true }]) {
+    const { agent, queued, command } = fixture(failed({ output: '', ...caveats }))
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect failure state' })
+    assert.equal(response.kind, 'error', JSON.stringify(caveats))
+    assert.match(response.text, /failed or incomplete/u)
+    assert.equal(queued.length, 0)
+  }
+})
+
+test('preserves incomplete status metadata alongside its partial-evidence caveats', async () => {
   const { agent, queued, command } = fixture(failed({
+    status: 'incomplete',
     output: '',
     stopReason: 'timeout',
     truncated: true,
@@ -655,10 +666,10 @@ test('preserves failed status metadata alongside the no-recovery-evidence notice
   const response = await command.handler({ agent, rawInput: 'child-1 inspect failure state' })
   assert.equal(response.kind, 'success')
   const prompt = queued[0][1]
-  assert.match(prompt, /Recorded status: failed; stop reason: timeout/u)
+  assert.match(prompt, /Recorded status: incomplete; stop reason: timeout/u)
   assert.match(prompt, /output was truncated/u)
   assert.match(prompt, /Non-text result blocks were omitted/u)
-  assert.match(prompt, /no recovery evidence is available/u)
+  assert.match(prompt, /no retained child output/u)
   assert.match(prompt, /inspect failure state/u)
 })
 
@@ -704,12 +715,12 @@ test('omits blank stop reason metadata in handoff', async () => {
 })
 
 test('preserves truncation caveats when handoff has no retained text', async () => {
-  const { agent, queued, command } = fixture(failed({ output: '', truncated: true, omittedNonText: true }))
+  const { agent, queued, command } = fixture(failed({ status: 'incomplete', output: '', truncated: true, omittedNonText: true }))
   const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
   assert.equal(response.kind, 'success')
   assert.match(queued[0][1], /output was truncated/u)
   assert.match(queued[0][1], /Non-text result blocks were omitted/u)
-  assert.match(queued[0][1], /failed without a retained child result/u)
+  assert.match(queued[0][1], /no retained child output/u)
 })
 
 test('bounds stop reason after metadata sanitization', async () => {
