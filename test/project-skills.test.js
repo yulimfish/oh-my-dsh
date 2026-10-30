@@ -2033,6 +2033,26 @@ test('format compatibility sanitizes non-string model metadata without losing th
   assert.equal(skill.metadata?.model, undefined)
 })
 
+test('format compatibility top-level model sanitizer replaces nested model metadata', async t => {
+  for (const [model, expected] of [['!!float .NaN', undefined], ['"   "', undefined], ['"  demo/model  "', 'demo/model']]) {
+    const cwd = await makeWorkspace(t)
+    await writeCompatibilityDocument(cwd, 'chosen.md', `---\nname: chosen\ndescription: Custom\nmetadata:\n  model: nested/model\nmodel: ${model}\n---\nBody.\n`)
+    const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+    const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'], formatCompatibility: true })
+    t.after(() => registration.dispose())
+    const lifetime = new AbortController()
+    t.after(() => lifetime.abort())
+    const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+      projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+    })
+    const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'chosen')
+    assert.equal(candidate.metadata.model, expected, model)
+    const skill = await provider.get(candidate, { cwd })
+    assert.equal(skill.metadata.model, expected, model)
+    assert.equal((await registry.get('chosen', { cwd })).metadata.model, expected, model)
+  }
+})
+
 test('format compatibility ignores non-string whenToUse without losing the preferred skill', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'shared/SKILL.md', '---\nname: shared\ndescription: Pinned winner\nwhenToUse: [not, a, string]\n---\nPREFERRED_BODY\n')

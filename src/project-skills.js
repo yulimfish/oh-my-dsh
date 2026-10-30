@@ -386,9 +386,9 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
     if (FRONTMATTER_FIELDS.has(key) || (formatCompatibility && (key === 'metadata' || (key === 'allowed-tools' && !allowedTools)))) continue
     if (formatCompatibility && ['agent', 'subtask', 'argument-hint', 'license', 'compatibility'].includes(key)) continue
     if (formatCompatibility && key === 'model') {
-      if (typeof value === 'string' && value.trim().length > 0) {
-        if (!reservedMetadata) metadata.model = value.trim()
-        else if (metadata && (typeof metadata === 'object' || typeof metadata === 'function')) metadata.model = value.trim()
+      if (metadata && (typeof metadata === 'object' || typeof metadata === 'function')) {
+        delete metadata.model
+        if (typeof value === 'string' && value.trim().length > 0) metadata.model = value.trim()
       }
       continue
     }
