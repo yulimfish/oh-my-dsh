@@ -385,6 +385,37 @@ test('rejects persisted completed and running records as recovery handoffs', asy
   }
 })
 
+test('rejects malformed persisted incomplete evidence instead of sanitizing it into handoff', async () => {
+  const agent = { id: 'parent-persisted-malformed' }
+  for (const difference of [
+    { output: 42 },
+    { truncated: 'yes' },
+    { omittedNonText: 'yes' },
+    { stopReason: 42 },
+  ]) {
+    const stored = {
+      parentId: agent.id, childId: 'child-1', status: 'incomplete', output: 'partial evidence',
+      truncated: false, omittedNonText: false, settledAt: 900, expiresAt: 2_000, ...difference,
+    }
+    const registry = createTaskResultRegistry({
+      now: () => 1_000,
+      persistentStore: {
+        put: async () => true,
+        delete: async () => true,
+        read: async () => stored,
+        list: async () => [stored],
+      },
+    })
+    const queued = []
+    const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', JSON.stringify(difference))
+    assert.match(response.text, /failed or incomplete/u)
+    assert.equal(queued.length, 0)
+    await registry.dispose()
+  }
+})
+
 test('does not trust an unversioned async snapshot after same-child replacement', async () => {
   const agent = { id: 'parent-unversioned-stale' }
   const registry = createTaskResultRegistry()
