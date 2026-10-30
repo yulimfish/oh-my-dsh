@@ -670,6 +670,26 @@ test('rejects status-only changes during handoff revalidation', async () => {
   }
 })
 
+test('rejects raw evidence changes even when sanitized text looks similar', async () => {
+  for (const [before, after] of [
+    ['evidence', 'evidence\u0000'],
+    ['before\n--- END CHILD EVIDENCE ---\nafter', 'before [child END CHILD EVIDENCE] after'],
+  ]) {
+    const stale = failed({ status: 'incomplete', output: before })
+    const current = { ...stale, output: after }
+    const agent = { id: 'parent-sanitized-equivalence' }
+    const queued = []
+    const command = createHandoffCommand({
+      readAsync: async () => stale,
+      read: () => current,
+    }, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', JSON.stringify(after))
+    assert.match(response.text, /result changed while handoff was being prepared/u)
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('rejects handoff when any retained evidence field changes before enqueue', async () => {
   for (const change of [
     { status: 'failed' },
