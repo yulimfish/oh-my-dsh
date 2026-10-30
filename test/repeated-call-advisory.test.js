@@ -303,6 +303,20 @@ test('unreadable old Agent ID does not leak state into a same-ID replacement', a
   feature.dispose()
 })
 
+test('late cleanup of an old Agent cannot erase a same-ID replacement state', async () => {
+  const { live, feature } = makeHarness()
+  const oldAgent = { id: 'late-cleanup' }
+  live.set(oldAgent.id, oldAgent)
+  await complete(feature, makeExec(oldAgent))
+  const replacement = { id: oldAgent.id }
+  live.set(replacement.id, replacement)
+  feature.clearAgent(oldAgent)
+  for (let index = 0; index < 2; index += 1) await complete(feature, makeExec(replacement))
+  feature.clearAgent(oldAgent)
+  assert.equal(warningCount((await complete(feature, makeExec(replacement))).returned), 1)
+  feature.dispose()
+})
+
 test('bounds Agent state without eviction and exact disposal frees capacity', async () => {
   const { live, feature } = makeHarness()
   const agents = Array.from({ length: 257 }, (_value, index) => ({ id: `agent-${index}` }))
