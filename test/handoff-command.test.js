@@ -778,6 +778,22 @@ test('rejects a failed empty result that gains evidence caveats during revalidat
   assert.equal(queued.length, 0)
 })
 
+test('rejects a missing output field during synchronous revalidation', async () => {
+  const stale = failed({ status: 'incomplete', output: 'retained evidence' })
+  const current = { ...stale }
+  delete current.output
+  const agent = { id: 'parent-missing-output-revalidation' }
+  const queued = []
+  const command = createHandoffCommand({
+    readAsync: async () => stale,
+    read: () => current,
+  }, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /result changed while handoff was being prepared/u)
+  assert.equal(queued.length, 0)
+})
+
 test('rejects handoff when any retained evidence field changes before enqueue', async () => {
   for (const change of [
     { status: 'failed' },
