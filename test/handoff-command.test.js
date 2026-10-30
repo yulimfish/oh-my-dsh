@@ -851,6 +851,18 @@ test('keeps stop reason separators and budget after invisible truncation cleanup
   assert.equal(line.length <= 80 + 'Recorded status: failed; stop reason: '.length, true)
 })
 
+test('preserves exact-budget plain stop reason without adding an ellipsis', async () => {
+  for (const stopReason of ['x'.repeat(80), '汉'.repeat(80)]) {
+    const { agent, queued, command } = fixture(failed({ stopReason }))
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'success')
+    const line = queued[0][1].split('\n').find(line => line.startsWith('Recorded status'))
+    assert.match(line, /stop reason:/u)
+    assert.equal(line.includes(stopReason), true, 'the exact-budget stop reason is preserved verbatim')
+    assert.equal(line.includes('…'), false, 'no extra truncation marker is added to exact-budget text')
+  }
+})
+
 test('preserves ordinary stop reason quotes slashes and Unicode as metadata', async () => {
   const stopReason = 'timeout "parser" \\u路径'
   const { agent, queued, command } = fixture(failed({ stopReason }))
