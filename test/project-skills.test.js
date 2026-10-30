@@ -3102,6 +3102,29 @@ test('format compatibility exposes reserved metadata directly during list and ca
   assert.equal(skill.content, 'Body.')
 })
 
+test('format compatibility preserves sibling reserved fields alongside explicit metadata', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'coexist/SKILL.md', '---\nname: coexist\ndescription: Combined\nagent: reviewer\nsubtask: true\nargument-hint: "<ticket>"\nlicense: MIT\ncompatibility: opencode\nmetadata:\n  owner: atlas\n---\nBody.\n')
+  const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+  const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'], formatCompatibility: true })
+  t.after(() => registration.dispose())
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'coexist')
+  const expected = {
+    agent: 'reviewer', subtask: true, argumentHint: '<ticket>',
+    license: 'MIT', compatibility: 'opencode', metadata: { owner: 'atlas' },
+  }
+  for (const skill of [candidate, await provider.get(candidate, { cwd }), await registry.get('coexist', { cwd })]) {
+    assert.ok(skill)
+    for (const [field, value] of Object.entries(expected)) assert.deepEqual(skill[field], value, field)
+    assert.equal(skill.metadata.metadata, undefined)
+  }
+})
+
 test('format compatibility preserves non-record metadata verbatim during list and cached get', async t => {
   for (const [source, expected] of [
     ['null', null],

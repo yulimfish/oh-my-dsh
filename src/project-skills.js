@@ -405,6 +405,13 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
     description,
     ...(whenToUse === undefined || (formatCompatibility && typeof whenToUse !== 'string') ? {} : { whenToUse }),
     ...(hasMetadata ? { metadata } : {}),
+    ...(formatCompatibility ? {
+      agent: frontmatter.agent,
+      subtask: frontmatter.subtask,
+      argumentHint: frontmatter['argument-hint'],
+      license: frontmatter.license,
+      compatibility: frontmatter.compatibility,
+    } : {}),
     invocation,
     content: formatCompatibility
       ? (hasFrontmatter
@@ -528,6 +535,9 @@ function matchesCandidate(skill, candidate, disabledSkills) {
     && invocation.userInvocable === candidate.invocation.userInvocable
     && (Object.is(skill.metadata, candidate.metadata)
       || JSON.stringify(skill.metadata ?? null) === JSON.stringify(candidate.metadata ?? null))
+    && Object.is(skill.agent, candidate.agent) && Object.is(skill.subtask, candidate.subtask)
+    && Object.is(skill.argumentHint, candidate.argumentHint) && Object.is(skill.license, candidate.license)
+    && Object.is(skill.compatibility, candidate.compatibility)
 }
 
 function skillFormatPaths(rootPath, resolverPath) {
@@ -910,6 +920,10 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       userRoot: userRoot?.source,
       locator: { rootTarget, skillDirectoryTarget, fileTarget, rootPath, resolverPath, userRoot: userRoot?.source, observationRevision: revision, allowSymlink },
       ...(skill.metadata !== undefined ? { metadata: skill.metadata } : {}),
+      ...(formatCompatibility ? {
+        agent: skill.agent, subtask: skill.subtask, argumentHint: skill.argumentHint,
+        license: skill.license, compatibility: skill.compatibility,
+      } : {}),
     }
   }
 
@@ -1331,6 +1345,10 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
             ? resolveCompatibleSkillReferences(skill.content, locator.skillDirectoryTarget.displayPath)
             : skill.content,
           ...(skill.metadata !== undefined ? { metadata: skill.metadata } : {}),
+          ...(formatCompatibility ? {
+            agent: skill.agent, subtask: skill.subtask, argumentHint: skill.argumentHint,
+            license: skill.license, compatibility: skill.compatibility,
+          } : {}),
         }
       } catch (error) {
         if (signal?.aborted) throw error
