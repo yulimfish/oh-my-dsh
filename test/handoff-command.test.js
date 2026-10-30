@@ -763,6 +763,21 @@ test('rejects raw stop reason changes even when cleaned metadata looks similar',
   }
 })
 
+test('rejects a failed empty result that gains evidence caveats during revalidation', async () => {
+  const stale = failed({ status: 'incomplete', output: '', truncated: false, omittedNonText: false })
+  const current = { ...stale, status: 'failed', truncated: true, omittedNonText: true }
+  const agent = { id: 'parent-failed-empty-caveats' }
+  const queued = []
+  const command = createHandoffCommand({
+    readAsync: async () => stale,
+    read: () => current,
+  }, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /result changed while handoff was being prepared/u)
+  assert.equal(queued.length, 0)
+})
+
 test('rejects handoff when any retained evidence field changes before enqueue', async () => {
   for (const change of [
     { status: 'failed' },
