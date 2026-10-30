@@ -292,6 +292,34 @@ test('concurrent read and list restore the same child without invalidating each 
   await registry.dispose()
 })
 
+test('a fresh child start wins over a later concurrent restore after an earlier restore', async () => {
+  const parent = agent('restore-start-restore-race')
+  const firstGate = deferred()
+  const secondGate = deferred()
+  const stored = persistedResult(parent.id, 'shared-child')
+  let reads = 0
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => { reads += 1; return reads === 1 ? firstGate.promise : secondGate.promise },
+      list: async () => [],
+    },
+  })
+  const firstRead = registry.readAsync(parent, stored.childId)
+  const secondRead = registry.readAsync(parent, stored.childId)
+  firstGate.resolve(stored)
+  assert.equal((await firstRead)?.output, stored.output)
+  assert.equal(registry.recordStart(parent, stored.childId), false, 'a restored terminal record cannot be restarted without clearing')
+  registry.clearAgent(parent)
+  assert.equal(registry.recordStart(parent, stored.childId), true)
+  secondGate.resolve(stored)
+  assert.equal(await secondRead, undefined, 'the older read cannot claim the fresh running child after another restore')
+  assert.deepEqual(registry.read(parent, stored.childId), { childId: stored.childId, status: 'running' })
+  await registry.dispose()
+})
+
 test('two concurrent readAsync calls restore the same snapshot idempotently', async () => {
   const parent = agent('concurrent-read-restore')
   const gate = deferred()
