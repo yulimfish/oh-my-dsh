@@ -959,6 +959,21 @@ test('rejects nullish and scalar snapshots during synchronous revalidation', asy
   }
 })
 
+test('rejects array snapshots from the initial async result read', async () => {
+  const snapshot = Object.assign([], failed({ status: 'incomplete', output: 'same evidence' }))
+  let revalidated = false
+  const queued = []
+  const command = createHandoffCommand({
+    readAsync: async () => snapshot,
+    read() { revalidated = true; return snapshot },
+  }, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent: { id: 'parent-array-initial-read' }, rawInput: 'child-1 inspect' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /failed or incomplete/u)
+  assert.equal(revalidated, false, 'the invalid initial snapshot is rejected before synchronous revalidation')
+  assert.equal(queued.length, 0)
+})
+
 test('rejects array snapshots during synchronous revalidation', async () => {
   const stale = failed({ status: 'incomplete', output: 'same evidence' })
   const current = Object.assign([], stale)
