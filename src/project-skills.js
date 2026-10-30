@@ -1015,6 +1015,11 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                   }
                   skillFile = children.find(child => child.name === `${directoryName}.md`)
                 }
+                if (skillFile && formatCompatibility && !skillFileInfo) {
+                  if (!fs.contains(rootTarget, skillFile.target)) continue
+                  skillFileInfo = await fs.stat(skillFile.target, signal)
+                  if (!skillFileInfo) skillFile = undefined
+                }
                 if (!skillFile) {
                   if (formatCompatibility && canonicalConfirmedAbsent && directoryDepth < MAX_COMPAT_DIRECTORY_DEPTH) {
                     const nestedDirectories = []
@@ -1024,6 +1029,10 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                         throwIfAborted(signal)
                         if (!isSafeEntryName(child.name) || child.name.startsWith('.') || !fs.contains(rootTarget, child.target)) continue
                         if (danglingCanonical && child.name === 'SKILL.md') continue
+                        if (child.name === `${directoryName}.md` && !skillFile) {
+                          const namedInfo = await fs.stat(child.target, signal)
+                          if (!namedInfo) continue
+                        }
                         const childInfo = await fs.stat(child.target, signal)
                         if (!childInfo) { complete = false; continue }
                         if (childInfo.type === 'directory') {
@@ -1161,8 +1170,11 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         const cwdTarget = !userRoot && lookup.cwd ? await fs.resolve('.', { cwd: lookup.cwd, signal }) : undefined
         const rootTarget = await fs.resolve(locator.rootPath, { cwd: userRoot ? locator.rootPath : lookup.cwd, signal })
         const fileTarget = await fs.resolve(locator.resolverPath, { cwd: userRoot ? locator.rootPath : lookup.cwd, signal })
+        const skillDirectoryTarget = await fs.resolve(dirname(locator.resolverPath), { cwd: userRoot ? locator.rootPath : lookup.cwd, signal })
         if ((!userRoot && !fs.contains(cwdTarget, rootTarget)) || !fs.contains(rootTarget, fileTarget)
-          || (locator.rootTarget.targetKey !== rootTarget.targetKey) || (locator.fileTarget.targetKey !== fileTarget.targetKey)) {
+          || !fs.contains(rootTarget, skillDirectoryTarget)
+          || (locator.rootTarget.targetKey !== rootTarget.targetKey) || (locator.fileTarget.targetKey !== fileTarget.targetKey)
+          || (locator.skillDirectoryTarget.targetKey !== skillDirectoryTarget.targetKey)) {
           invalidateObservation()
           return undefined
         }
@@ -1191,6 +1203,12 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           resolverPath: locator.resolverPath,
           signal,
         })) {
+          invalidateObservation()
+          return undefined
+        }
+        const currentSkillDirectoryTarget = await fs.resolve(dirname(locator.resolverPath), { cwd: userRoot ? locator.rootPath : lookup.cwd, signal })
+        if (!fs.contains(rootTarget, currentSkillDirectoryTarget)
+          || currentSkillDirectoryTarget.targetKey !== locator.skillDirectoryTarget.targetKey) {
           invalidateObservation()
           return undefined
         }

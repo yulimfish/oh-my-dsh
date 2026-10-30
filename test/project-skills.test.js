@@ -3097,6 +3097,17 @@ test('format compatibility falls through dangling canonical symlinks to named an
   assert.equal((await registry.get('child', { cwd })).content, 'Nested child after dangling ancestor.')
 })
 
+test('format compatibility falls through dangling directory-named files to nested skills', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'container/child/SKILL.md', 'Nested child after dangling named fallback.')
+  await symlink('missing-named.md', path.join(cwd, '.opencode/skills/container/container.md'))
+  const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const snapshot = await registry.snapshot({ cwd })
+  assert.equal(snapshot.complete, true)
+  assert.deepEqual(snapshot.skills.map(skill => skill.name), ['child'])
+  assert.equal((await registry.get('child', { cwd })).content, 'Nested child after dangling named fallback.')
+})
+
 test('strict mode loads contained skill symlinks and rejects escapes and stale targets', async t => {
   const cwd = await makeWorkspace(t)
   const target = path.join(cwd, '.opencode/skills/linked/actual.txt')
@@ -3171,6 +3182,29 @@ test('format compatibility loads contained canonical and named-fallback symlinks
   await unlink(path.join(cwd, '.opencode/skills/linked/SKILL.md'))
   await symlink(other, path.join(cwd, '.opencode/skills/linked/SKILL.md'))
   assert.equal(await provider.get(relisted, { cwd }), undefined)
+})
+
+test('format compatibility rejects a cached directory symlink retarget with an unchanged instruction target', async t => {
+  const cwd = await makeWorkspace(t)
+  const root = path.join(cwd, '.opencode/skills')
+  const shared = await writeCompatibilityDocument(cwd, 'shared.txt', 'Read @refs/guide.md now.')
+  await mkdir(path.join(root, 'a'), { recursive: true })
+  await mkdir(path.join(root, 'b'), { recursive: true })
+  await symlink(shared, path.join(root, 'a/SKILL.md'))
+  await symlink(shared, path.join(root, 'b/SKILL.md'))
+  await symlink(path.join(root, 'a'), path.join(root, 'alias'), 'dir')
+  const { fs } = makeFileSystem()
+  const { ctx } = makeRegistry(fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const listed = (await provider.list({ cwd })).candidates.find(candidate => candidate.name === 'alias')
+  assert.ok(listed)
+  await unlink(path.join(root, 'alias'))
+  await symlink(path.join(root, 'b'), path.join(root, 'alias'), 'dir')
+  assert.equal(await provider.get(listed, { cwd }), undefined)
 })
 
 test('format compatibility cached named fallback is invalidated when a canonical SKILL.md appears without watcher delivery', async t => {
