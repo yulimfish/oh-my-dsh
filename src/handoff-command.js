@@ -179,7 +179,10 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
       } catch {
         return result('error', 'Could not prepare bounded handoff evidence; no handoff was queued.')
       }
-      const nextStep = quoteBoundedText(input.nextStep || 'Inspect the evidence, identify the unfinished work, and continue with the smallest useful next action.', MAX_NEXT_STEP_JSON_CHARS)
+      const defaultNextStep = snapshot.status === 'failed' && !snapshot.output
+        ? 'Review the recorded failure state and the current user request, then start a new bounded task only if it is useful; do not assume child recovery evidence survives.'
+        : 'Inspect the evidence, identify the unfinished work, and continue with the smallest useful next action.'
+      const nextStep = quoteBoundedText(input.nextStep || defaultNextStep, MAX_NEXT_STEP_JSON_CHARS)
       if (args?.signal?.aborted) return result('error', 'Task handoff was cancelled before it was queued.')
       if (isParentCurrent) {
         let current = false

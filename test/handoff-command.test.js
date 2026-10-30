@@ -624,6 +624,16 @@ test('labels failed handoff with no retained output and stop reason', async () =
   assert.doesNotMatch(queued[0][1], /Investigation stopped at a failing test/u)
 })
 
+test('uses failure-state guidance instead of inspecting nonexistent evidence by default', async () => {
+  const { agent, queued, command } = fixture(failed({ output: '', stopReason: 'failed' }))
+  const response = await command.handler({ agent, rawInput: 'child-1' })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.match(prompt, /no recovery evidence is available/u)
+  assert.match(prompt, /Review the recorded failure state and the current user request/u)
+  assert.doesNotMatch(prompt, /Inspect the evidence, identify the unfinished work/u)
+})
+
 test('keeps incomplete empty output distinct from failed recovery evidence', async () => {
   const { agent, queued, command } = fixture(failed({ status: 'incomplete', output: '', truncated: true }))
   const response = await command.handler({ agent, rawInput: 'child-1 inspect partial work' })
