@@ -292,6 +292,28 @@ test('concurrent read and list restore the same child without invalidating each 
   await registry.dispose()
 })
 
+test('two concurrent readAsync calls restore the same snapshot idempotently', async () => {
+  const parent = agent('concurrent-read-restore')
+  const gate = deferred()
+  const stored = persistedResult(parent.id, 'shared-child')
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => gate.promise,
+      list: async () => [],
+    },
+  })
+  const first = registry.readAsync(parent, stored.childId)
+  const second = registry.readAsync(parent, stored.childId)
+  gate.resolve(stored)
+  const [firstResult, secondResult] = await Promise.all([first, second])
+  assert.equal(firstResult?.output, stored.output)
+  assert.equal(secondResult?.output, stored.output)
+  await registry.dispose()
+})
+
 test('restoring results does not write stale snapshots back to persistence', async () => {
   const parent = agent('restore-read-only')
   const stored = persistedResult(parent.id, 'stored-child')
