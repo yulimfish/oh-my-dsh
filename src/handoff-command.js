@@ -111,6 +111,7 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
         : '(no retained child output)'
       const nextStep = input.nextStep || 'Inspect the evidence, identify the unfinished work, and continue with the smallest useful next action.'
       const stopReason = cleanMetadata(snapshot.stopReason, 80)
+      if (args?.signal?.aborted) return result('error', 'Task handoff was cancelled before it was queued.')
       try {
         await queueMessage(agent, [
           '[DSH new-task handoff — not a child-session resume]',

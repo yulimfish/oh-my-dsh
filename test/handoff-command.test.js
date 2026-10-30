@@ -253,6 +253,23 @@ test('does not queue handoff when cancellation happens during async result readi
   assert.equal(queued.length, 0)
 })
 
+test('does not queue handoff when cancellation happens during synchronous revalidation', async () => {
+  const agent = { id: 'parent-revalidation-cancel' }
+  const controller = new AbortController()
+  const queued = []
+  const command = createHandoffCommand({
+    readAsync: async () => failed(),
+    read() {
+      controller.abort()
+      return failed()
+    },
+  }, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent, rawInput: 'child-1 retry', signal: controller.signal })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /cancelled before it was queued/u)
+  assert.equal(queued.length, 0)
+})
+
 test('does not queue handoff after the exact parent is replaced during async result reading', async () => {
   const agent = { id: 'parent-replaced' }
   let release
