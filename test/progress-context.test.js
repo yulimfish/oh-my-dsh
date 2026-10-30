@@ -273,6 +273,15 @@ test('rejects tool results with conflicting message and source call identities',
     },
   ]))
   assert.equal(projection.render(), '')
+  const sourceConflict = createProgressProjection(sessionWith([
+    todoEvent(1, 'expected-call', [{ content: 'must not accept conflicting source aliases', status: 'in_progress' }]),
+    {
+      seq: 2,
+      type: 'tool/result',
+      data: { message: { toolCallId: 'expected-call', source: { kind: 'tool', toolCallId: 'expected-call', callId: 'other-call' }, isError: false } },
+    },
+  ]))
+  assert.equal(sourceConflict.render(), '')
 })
 
 test('quarantines duplicate results for one todo call ID', () => {

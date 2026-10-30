@@ -114,6 +114,14 @@ test('collectBashResults pairs only bash calls and ignores other tools or malfor
       data: { message: { toolCallId: 'expected-call', source: { kind: 'tool', callId: 'other-call' }, isError: false, content: [{ type: 'text', text: 'wrong attribution' }] } },
     },
   ]), [], 'conflicting message and source identities cannot complete a bash call')
+  assert.deepEqual(collectBashResults([
+    call(1, 'expected-call', 'pnpm test'),
+    {
+      seq: 2,
+      type: 'tool/result',
+      data: { message: { toolCallId: 'expected-call', source: { kind: 'tool', toolCallId: 'expected-call', callId: 'other-call' }, isError: false, content: [{ type: 'text', text: 'wrong attribution' }] } },
+    },
+  ]), [], 'conflicting source aliases cannot complete a bash call')
   const nonText = collectBashResults([
     call(1, 'image', 'pnpm test'),
     { seq: 2, type: 'tool/result', data: { message: { toolCallId: 'image', isError: false, content: [{ type: 'image', data: 'binary' }] } } },

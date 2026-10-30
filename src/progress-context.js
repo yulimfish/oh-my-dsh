@@ -146,9 +146,12 @@ export function createProgressProjection(session) {
         if (event.type !== 'tool/result') continue
         const message = event.data.message
         const directCallId = message?.toolCallId
-        const sourceCallId = message?.source?.toolCallId ?? message?.source?.callId
-        if ((directCallId !== undefined && sourceCallId !== undefined && directCallId !== sourceCallId)) continue
-        const callId = directCallId ?? sourceCallId
+        const sourceToolCallId = message?.source?.toolCallId
+        const sourceCallId = message?.source?.callId
+        if ((directCallId !== undefined && sourceToolCallId !== undefined && directCallId !== sourceToolCallId)
+          || (directCallId !== undefined && sourceCallId !== undefined && directCallId !== sourceCallId)
+          || (sourceToolCallId !== undefined && sourceCallId !== undefined && sourceToolCallId !== sourceCallId)) continue
+        const callId = directCallId ?? sourceToolCallId ?? sourceCallId
         if (typeof callId !== 'string' || state.ambiguousCallIds.has(callId)) continue
         if (state.evictedCallIds.has(callId)) {
           clearCurrentCallId(state, callId)
