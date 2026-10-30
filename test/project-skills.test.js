@@ -2883,6 +2883,20 @@ test('format compatibility derives flat and directory names for absent or falsy 
   }
 })
 
+test('format compatibility treats an EOF closing delimiter as plain Markdown like the pinned loader', async t => {
+  const cwd = await makeWorkspace(t)
+  const source = '---\nname: custom-name\ndescription: From metadata\n---'
+  await writeCompatibilityDocument(cwd, 'flat-demo.md', source)
+  const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const skill = await registry.get('flat-demo', { cwd })
+  assert.ok(skill)
+  assert.equal(skill.description, '(opencode-project - Skill) Project skill flat-demo')
+  assert.equal(skill.content, source)
+  const strict = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills'] })
+  assert.equal((await strict.registry.get('custom-name', { cwd })).content, '')
+})
+
 test('format compatibility rewrites only bounded nonescaping file-like references', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'guide/SKILL.md', 'Consult @references/guide.md and @docs/.\nKeep @../outside.md, @not-a-path, and mail@example.com.\nKeep @data/#/../../../../outside.txt and @data/file.md\\..\\..\\outside.txt.\nKeep @docs/../..cache/file.md now.\nConsult @references/guide.md now.\n')
