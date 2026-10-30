@@ -401,6 +401,34 @@ test('does not treat changed status or evidence caveats as the same restored sna
   }
 })
 
+test('does not treat changed settlement or expiry timestamps as the same restored snapshot', async () => {
+  for (const difference of [{ settledAt: 91 }, { expiresAt: 201 }]) {
+    const parent = agent(`changed-restore-${Object.keys(difference)[0]}`)
+    const first = persistedResult(parent.id, 'shared-child')
+    const second = { ...first, ...difference }
+    const firstGate = deferred()
+    const secondGate = deferred()
+    let reads = 0
+    const registry = createTaskResultRegistry({
+      now: () => 100,
+      persistentStore: {
+        put: async () => true,
+        delete: async () => true,
+        read: async () => { reads += 1; return reads === 1 ? firstGate.promise : secondGate.promise },
+        list: async () => [],
+      },
+    })
+    const firstRead = registry.readAsync(parent, first.childId)
+    const secondRead = registry.readAsync(parent, first.childId)
+    firstGate.resolve(first)
+    assert.equal((await firstRead)?.output, first.output)
+    secondGate.resolve(second)
+    assert.equal(await secondRead, undefined)
+    assert.equal(registry.read(parent, first.childId).output, first.output)
+    await registry.dispose()
+  }
+})
+
 test('restoring results does not write stale snapshots back to persistence', async () => {
   const parent = agent('restore-read-only')
   const stored = persistedResult(parent.id, 'stored-child')
