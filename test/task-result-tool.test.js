@@ -198,6 +198,28 @@ test('does not overwrite or misreport a new running child during an old persiste
   await registry.dispose()
 })
 
+test('does not revive a cleared result or hide a fresh child after an old read resolves', async () => {
+  const parent = agent('restore-clear-race')
+  const gate = deferred()
+  const stored = persistedResult(parent.id, 'shared-child')
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => gate.promise,
+      list: async () => [],
+    },
+  })
+  const reading = registry.readAsync(parent, stored.childId)
+  registry.clearAgent(parent)
+  assert.equal(registry.recordStart(parent, stored.childId), true)
+  gate.resolve(stored)
+  assert.equal(await reading, undefined)
+  assert.deepEqual(registry.read(parent, stored.childId), { childId: stored.childId, status: 'running' })
+  await registry.dispose()
+})
+
 test('keeps newer local terminal state when an old persistence list resolves', async () => {
   const parent = agent('restore-list-race')
   const gate = deferred()

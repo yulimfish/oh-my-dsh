@@ -143,6 +143,7 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
   const byParent = new Map()
   const parentById = new Map()
   const parentEpochs = new WeakMap()
+  const childEpochs = new WeakMap()
   let total = 0
   let disposed = false
   let disposePromise
@@ -163,9 +164,21 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
     return true
   }
 
+  function childEpoch(parent, childId) {
+    let epochs = childEpochs.get(parent)
+    if (!epochs) {
+      epochs = new Map()
+      childEpochs.set(parent, epochs)
+    }
+    const epoch = (epochs.get(childId) ?? 0) + 1
+    epochs.set(childId, epoch)
+    return epoch
+  }
+
   function remove(parent, childId) {
     const records = byParent.get(parent)
     if (!records || !records.delete(childId)) return false
+    childEpoch(parent, childId)
     total -= 1
     if (records.size === 0) {
       byParent.delete(parent)
@@ -230,6 +243,7 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
       byParent.set(parent, records)
     }
     const record = { status: 'running', updatedAt: time, expiresAt: Infinity }
+    childEpoch(parent, childId)
     records.set(childId, record)
     parentById.set(parent.id, parent)
     total += 1
@@ -333,11 +347,13 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
       if (local || !persistentStore || disposed || !isAgent(parent) || !isChildId(childId)
         || (parentById.has(parent.id) && parentById.get(parent.id) !== parent)) return local
       const epoch = parentEpochs.get(parent)
+      const generation = childEpochs.get(parent)?.get(childId) ?? 0
       let stored
       try { stored = await persistentStore.read(parent.id, childId) } catch {
         return readLocal(parent, childId)
       }
-      if (disposed || parentEpochs.get(parent) !== epoch) return readLocal(parent, childId)
+      if (disposed || parentEpochs.get(parent) !== epoch
+        || (childEpochs.get(parent)?.get(childId) ?? 0) !== generation) return undefined
       const restored = restoreTerminal(parent, stored)
       return restored ? readLocal(parent, childId) : undefined
     },
