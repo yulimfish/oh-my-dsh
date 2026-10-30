@@ -462,6 +462,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
       license: frontmatter.license,
       compatibility: frontmatter.compatibility,
       allowedTools: parsedAllowedTools,
+      mcpConfig: frontmatter.mcp || undefined,
     } : {}),
     invocation,
     content: formatCompatibility
@@ -603,6 +604,7 @@ function matchesCandidate(skill, candidate, disabledSkills) {
     && sameSkillField(skill.agent, candidate.agent) && sameSkillField(skill.subtask, candidate.subtask)
     && sameSkillField(skill.argumentHint, candidate.argumentHint) && sameSkillField(skill.license, candidate.license)
     && sameSkillField(skill.compatibility, candidate.compatibility) && sameSkillField(skill.allowedTools, candidate.allowedTools)
+    && sameSkillField(skill.mcpConfig, candidate.mcpConfig)
 }
 
 function skillFormatPaths(rootPath, resolverPath) {
@@ -1014,6 +1016,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       ...(formatCompatibility ? {
         agent: skill.agent, subtask: skill.subtask, argumentHint: skill.argumentHint,
         license: skill.license, compatibility: skill.compatibility, allowedTools: skill.allowedTools,
+        mcpConfig: skill.mcpConfig,
       } : {}),
     }
   }
@@ -1514,6 +1517,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           ...(formatCompatibility ? {
             agent: skill.agent, subtask: skill.subtask, argumentHint: skill.argumentHint,
             license: skill.license, compatibility: skill.compatibility, allowedTools: skill.allowedTools,
+            mcpConfig: skill.mcpConfig,
           } : {}),
         }
       } catch (error) {

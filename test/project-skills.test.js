@@ -2042,6 +2042,40 @@ test('format compatibility exposes normalized allowed-tools as inert metadata du
   }
 })
 
+test('format compatibility exposes frontmatter MCP configuration without initializing it', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'mcp-demo.md', '---\nname: mcp-demo\ndescription: MCP metadata\nmcp:\n  docs:\n    type: remote\n    url: https://example.invalid/mcp\n---\nBody.\n')
+  const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+  const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'], formatCompatibility: true })
+  t.after(() => registration.dispose())
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const expected = { docs: { type: 'remote', url: 'https://example.invalid/mcp' } }
+  const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'mcp-demo')
+  assert.deepEqual(candidate.mcpConfig, expected)
+  const skill = await provider.get(candidate, { cwd })
+  assert.deepEqual(skill.mcpConfig, expected)
+  assert.equal(skill.content, 'Body.')
+  assert.deepEqual((await registry.get('mcp-demo', { cwd })).mcpConfig, expected)
+  for (const [name, source] of [['mcp-false', 'false'], ['mcp-zero', '0'], ['mcp-null', 'null'], ['mcp-empty', '""']]) {
+    await writeCompatibilityDocument(cwd, `${name}.md`, `---\nname: ${name}\ndescription: Falsy MCP\nmcp: ${source}\n---\nFalsy body.\n`)
+    const { registry: falsyRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
+    assert.equal((await falsyRegistry.get(name, { cwd })).mcpConfig, undefined, name)
+  }
+  await writeCompatibilityDocument(cwd, 'mcp-nonfinite.md', '---\nname: mcp-nonfinite\ndescription: Invalid MCP\nmcp: !!float .inf\n---\nRejected body.\n')
+  const { registry: nonfiniteRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
+  assert.equal(await nonfiniteRegistry.get('mcp-nonfinite', { cwd }), undefined)
+  await writeCompatibilityDocument(cwd, 'mcp-cycle.md', '---\nname: mcp-cycle\ndescription: Invalid cyclic MCP\nmcp: &loop\n  self: *loop\n---\nRejected body.\n')
+  const { registry: cycleRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
+  assert.equal(await cycleRegistry.get('mcp-cycle', { cwd }), undefined)
+  const strict = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills'] })
+  assert.equal((await strict.registry.get('mcp-demo', { cwd })).mcpConfig, undefined)
+})
+
 test('format compatibility treats falsy NaN allowed-tools as absent during list and get', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'shared.md', '---\nname: shared\ndescription: Valid winner\nallowed-tools: !!float .NaN\n---\nValid wins.\n')
