@@ -342,6 +342,33 @@ test('two concurrent readAsync calls restore the same snapshot idempotently', as
   await registry.dispose()
 })
 
+test('concurrent restores remain idempotent when the LRU clock advances', async () => {
+  let time = 100
+  const parent = agent('concurrent-lru-restore')
+  const firstGate = deferred()
+  const secondGate = deferred()
+  const stored = persistedResult(parent.id, 'shared-child')
+  let reads = 0
+  const registry = createTaskResultRegistry({
+    now: () => time,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => { reads += 1; return reads === 1 ? firstGate.promise : secondGate.promise },
+      list: async () => [],
+    },
+  })
+  const first = registry.readAsync(parent, stored.childId)
+  const second = registry.readAsync(parent, stored.childId)
+  firstGate.resolve(stored)
+  assert.equal((await first)?.output, stored.output)
+  time = 101
+  secondGate.resolve(stored)
+  assert.equal((await second)?.output, stored.output)
+  assert.equal(registry.read(parent, stored.childId).output, stored.output)
+  await registry.dispose()
+})
+
 test('does not treat a changed persisted output as the same restored snapshot', async () => {
   const parent = agent('changed-restore-output')
   const first = persistedResult(parent.id, 'shared-child')
