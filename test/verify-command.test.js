@@ -316,6 +316,26 @@ test('uses effective workingDirectory instead of the original session header cwd
   assert.equal(inspectedCwd, effectiveCwd)
 })
 
+test('labels historical bash evidence as unattributed after a working-directory change', async () => {
+  const effectiveCwd = '/workspace/new-project'
+  const events = [
+    call(1, 'old-check', 'pnpm test'),
+    resultEvent(2, 'old-check', '100 tests passed in old-project'),
+    call(3, 'new-check', 'pnpm test'),
+    resultEvent(4, 'new-check', '20 tests passed in new-project'),
+  ]
+  const command = createVerifyCommand({
+    observeSession: async () => observation(events),
+  }, fsFixture(), effectiveCwd)
+  const response = await command.handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  assert.equal(response.kind, 'success')
+  assert.match(response.text, /per-call working directory is not recorded/u)
+  assert.match(response.text, /effective working directory differs from the session header/u)
+  assert.match(response.text, /not verification of the current project/u)
+  assert.match(response.text, /100 tests passed in old-project/u)
+  assert.match(response.text, /20 tests passed in new-project/u)
+})
+
 test('prioritizes bash evidence and disclaimer when scripts exceed the display budget', async () => {
   const largeManifest = JSON.stringify({ scripts: Object.fromEntries(Array.from({ length: 8 }, (_v, i) => [`test:script-${i}`, 'x'.repeat(500)])) })
   const command = createVerifyCommand({

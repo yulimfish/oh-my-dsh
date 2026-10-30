@@ -111,7 +111,7 @@ This follows Goose's `/goal` “check before finishing” idea, but deliberately
 
 ### Phase 5 — Deterministic verification evidence
 
-**Implemented in this phase:** default-off `/omo verify` (`enableVerifyCommand`) reads bounded `package.json` scripts and the current session's bash call/result events. It reports suggested checks and observed success/error outcomes without running any command or changing Goal/workspace state. Missing evidence is explicitly unverified, not failure; a bash Tool completion is not automatically a passing test, and other sessions/CI are outside the evidence scope. This adapts Goose's deterministic success-check idea without executing model-authored shell checks.
+**Implemented in this phase:** default-off `/omo verify` (`enableVerifyCommand`) reads bounded `package.json` scripts and the current session's bash call/result events. It reports suggested checks and observed success/error outcomes without running any command or changing Goal/workspace state. Missing evidence is explicitly unverified, not failure; a bash Tool completion is not automatically a passing test, and other sessions/CI are outside the evidence scope. Raw tool calls do not record per-call cwd, so bash evidence is explicitly session-scoped rather than attributed to the current project; an effective-cwd/header mismatch adds a working-directory-change warning instead of guessing which results belong to the new project. This adapts Goose's deterministic success-check idea without executing model-authored shell checks.
 
 ### Phase 6 — Explicit failed-task handoff
 

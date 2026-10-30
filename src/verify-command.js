@@ -227,8 +227,14 @@ export function collectBashResults(events) {
   return evictedCallIds.size >= MAX_EVICTED_CALL_IDS ? [] : results
 }
 
-function render(scripts, checks, sessionId) {
-  const evidenceLines = [`Latest bash results observed in this session (${checks.length}):`]
+function render(scripts, checks, sessionId, cwdChanged = false) {
+  const evidenceLines = [
+    `Latest bash results observed in this session (${checks.length}):`,
+    '- Scope: per-call working directory is not recorded in raw events; results may predate the current cwd and are not verification of the current project by themselves.',
+  ]
+  if (cwdChanged) {
+    evidenceLines.push('- Working-directory change: the effective working directory differs from the session header, so earlier results may belong to another project.')
+  }
   if (checks.length === 0) evidenceLines.push('- (no completed bash Tool results observed; this is not proof that checks were never run elsewhere)')
   for (const check of checks) {
     evidenceLines.push(`- #${check.seq} ${check.isError ? 'FAIL/ERROR' : 'completed without Tool error'}: ${check.command.slice(0, 256)}`)
@@ -315,7 +321,7 @@ export function createVerifyCommand(sessionQuery, fs, workingDirectory, sessions
         // semantic-only documents without call arguments and cannot pair bash evidence.
         const events = observation.events.filter(event => event?.type === 'tool/call' || event?.type === 'tool/result')
         assertActive(signal)
-        response = render(scripts, collectBashResults(events), agent.id)
+        response = render(scripts, collectBashResults(events), agent.id, observation.header.cwd !== cwd)
       } catch (error) {
         response = result('error', clean(error?.message, 500) || 'Could not inspect verification evidence safely.')
       } finally {
