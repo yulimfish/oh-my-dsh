@@ -167,12 +167,15 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
 
       let evidence
       let stopReason
+      let hasEvidence
       try {
-        evidence = snapshot.output
-          ? evidenceForPrompt(snapshot.output
-            .replace(/--- BEGIN CHILD EVIDENCE ---/gu, '[child BEGIN CHILD EVIDENCE]')
-            .replace(/--- END CHILD EVIDENCE ---/gu, '[child END CHILD EVIDENCE]')
-            .replace(CONTROL_OR_BIDI_GLOBAL, ' ').replace(/[ \t]+/gu, ' ').trim())
+        const cleanedOutput = snapshot.output
+          .replace(/--- BEGIN CHILD EVIDENCE ---/gu, '[child BEGIN CHILD EVIDENCE]')
+          .replace(/--- END CHILD EVIDENCE ---/gu, '[child END CHILD EVIDENCE]')
+          .replace(CONTROL_OR_BIDI_GLOBAL, ' ').replace(/[ \t]+/gu, ' ').trim()
+        hasEvidence = cleanedOutput.length > 0
+        evidence = hasEvidence
+          ? evidenceForPrompt(cleanedOutput)
           : snapshot.status === 'failed'
             ? '(no recovery evidence is available; the specialist failed without a retained child result)'
             : '(no partial text evidence is available; inspect the incomplete status and stop reason)'
@@ -180,7 +183,7 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
       } catch {
         return result('error', 'Could not prepare bounded handoff evidence; no handoff was queued.')
       }
-      const defaultNextStep = !snapshot.output
+      const defaultNextStep = !hasEvidence
         ? snapshot.status === 'failed'
           ? 'Review the recorded failure state and the current user request, then start a new bounded task only if it is useful; do not assume child recovery evidence survives.'
           : 'Review the incomplete status and stop reason against the current user request, then continue with the smallest useful next action without assuming partial text evidence survives.'
@@ -201,7 +204,7 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
           omittedNonText: snapshot.omittedNonText,
           evidence,
           nextStep,
-          hasRecoveryEvidence: Boolean(snapshot.output),
+          hasRecoveryEvidence: hasEvidence,
         }))
       } catch {
         return result('error', 'Handoff delivery was uncertain; inspect the current Agent before retrying. No child was resumed or started by this command.')
