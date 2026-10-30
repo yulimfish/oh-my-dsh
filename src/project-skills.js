@@ -379,6 +379,10 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
     throw new SkillFormatError('skill frontmatter allowed-tools must be a string or an array of strings')
   }
 
+  const compatibleMetadataKeys = new Set([
+    'model', 'agent', 'subtask', 'argument-hint', 'license', 'compatibility',
+    'metadata', 'allowed-tools', 'mcp', 'disable-model-invocation', 'user-invocable',
+  ])
   const reservedMetadata = formatCompatibility && Object.hasOwn(frontmatter, 'metadata')
   const metadata = reservedMetadata ? frontmatter.metadata : Object.create(null)
   if (reservedMetadata && frontmatter.metadata !== undefined) assertJsonValue(frontmatter.metadata)
@@ -386,12 +390,14 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
     if (FRONTMATTER_FIELDS.has(key) || (formatCompatibility && (key === 'metadata' || (key === 'allowed-tools' && !allowedTools)))) continue
     if (formatCompatibility && ['agent', 'subtask', 'argument-hint', 'license', 'compatibility'].includes(key)) continue
     if (formatCompatibility && key === 'model') {
-      if (metadata && (typeof metadata === 'object' || typeof metadata === 'function')) {
-        delete metadata.model
+      if (!reservedMetadata || (metadata && !Array.isArray(metadata) && typeof metadata === 'object'
+        && (Object.getPrototypeOf(metadata) === Object.prototype || Object.getPrototypeOf(metadata) === null))) {
         if (modelScope === 'opencode' && typeof value === 'string' && value.trim().length > 0) metadata.model = value.trim()
+        else if (!reservedMetadata) delete metadata.model
       }
       continue
     }
+    if (formatCompatibility && !compatibleMetadataKeys.has(key)) continue
     assertJsonValue(value)
     if (!reservedMetadata) metadata[key] = value
   }
@@ -524,7 +530,15 @@ function skillDescriptionScope(rootPath, userRoot) {
 }
 
 function sameSkillField(left, right) {
-  return Object.is(left, right) || JSON.stringify(left ?? null) === JSON.stringify(right ?? null)
+  if (Object.is(left, right)) return true
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
+  if (Array.isArray(left) !== Array.isArray(right)) return false
+  if (Array.isArray(left)) {
+    return left.length === right.length && left.every((value, index) => sameSkillField(value, right[index]))
+  }
+  const leftKeys = Object.keys(left)
+  const rightKeys = Object.keys(right)
+  return leftKeys.length === rightKeys.length && leftKeys.every(key => Object.hasOwn(right, key) && sameSkillField(left[key], right[key]))
 }
 
 function matchesCandidate(skill, candidate, disabledSkills) {
@@ -538,8 +552,7 @@ function matchesCandidate(skill, candidate, disabledSkills) {
     && skill.whenToUse === candidate.whenToUse
     && invocation.modelInvocable === candidate.invocation.modelInvocable
     && invocation.userInvocable === candidate.invocation.userInvocable
-    && (Object.is(skill.metadata, candidate.metadata)
-      || JSON.stringify(skill.metadata ?? null) === JSON.stringify(candidate.metadata ?? null))
+    && sameSkillField(skill.metadata, candidate.metadata)
     && sameSkillField(skill.agent, candidate.agent) && sameSkillField(skill.subtask, candidate.subtask)
     && sameSkillField(skill.argumentHint, candidate.argumentHint) && sameSkillField(skill.license, candidate.license)
     && sameSkillField(skill.compatibility, candidate.compatibility)

@@ -2057,7 +2057,7 @@ test('format compatibility sanitizes non-string model metadata without losing th
 })
 
 test('format compatibility top-level model sanitizer replaces nested model metadata', async t => {
-  for (const [model, expected] of [['!!float .NaN', undefined], ['"   "', undefined], ['"  demo/model  "', 'demo/model']]) {
+  for (const [model, expected] of [['!!float .NaN', 'nested/model'], ['"   "', 'nested/model'], ['"  demo/model  "', 'demo/model']]) {
     const cwd = await makeWorkspace(t)
     await writeCompatibilityDocument(cwd, 'chosen.md', `---\nname: chosen\ndescription: Custom\nmetadata:\n  model: nested/model\nmodel: ${model}\n---\nBody.\n`)
     const { ctx, registry } = makeRegistry(makeFileSystem().fs)
@@ -2076,6 +2076,26 @@ test('format compatibility top-level model sanitizer replaces nested model metad
   }
 })
 
+test('format compatibility does not merge top-level model into explicit array metadata', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'chosen.md', '---\nname: chosen\ndescription: Custom\nmetadata: [x, 2, false]\nmodel: gpt-test\n---\nBody.\n')
+  const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+  const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'], formatCompatibility: true })
+  t.after(() => registration.dispose())
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'chosen')
+  assert.deepEqual(candidate.metadata, ['x', 2, false])
+  assert.equal(Object.hasOwn(candidate.metadata, 'model'), false)
+  const skill = await provider.get(candidate, { cwd })
+  assert.deepEqual(skill.metadata, ['x', 2, false])
+  assert.equal(Object.hasOwn(skill.metadata, 'model'), false)
+  assert.deepEqual((await registry.get('chosen', { cwd })).metadata, ['x', 2, false])
+})
+
 test('format compatibility drops model metadata for Claude and Agents scopes', async t => {
   for (const projectRoot of ['.claude/skills', '.agents/skills']) {
     const cwd = await makeWorkspace(t)
@@ -2088,8 +2108,8 @@ test('format compatibility drops model metadata for Claude and Agents scopes', a
     })
     const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'demo')
     assert.ok(candidate, projectRoot)
-    assert.equal(candidate.metadata?.model, undefined, projectRoot)
-    assert.equal((await provider.get(candidate, { cwd })).metadata?.model, undefined, projectRoot)
+    assert.equal(candidate.metadata?.model, 'nested/model', projectRoot)
+    assert.equal((await provider.get(candidate, { cwd })).metadata?.model, 'nested/model', projectRoot)
   }
 })
 
@@ -3163,6 +3183,26 @@ test('format compatibility treats an unclosed frontmatter opener as plain Markdo
   assert.equal(skill.content, source)
 })
 
+test('format compatibility ignores unknown frontmatter instead of rejecting or synthesizing metadata', async t => {
+  const cwd = await makeWorkspace(t)
+  const future = `future:\n${'  level:\n'.repeat(14)}  value: true`
+  await writeCompatibilityDocument(cwd, 'shared.md', `---\nname: shared\ndescription: Preferred\n${future}\n---\nPREFERRED_BODY\n`)
+  await writeSkill(path.join(cwd, '.claude/skills/shared/SKILL.md'), { name: 'shared', content: 'Fallback must not win.' })
+  const { ctx } = makeRegistry(makeFileSystem().fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills', '.claude/skills'], formatCompatibility: true,
+  })
+  const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'shared' && item.locator.resolverPath === '.opencode/skills/shared.md')
+  assert.ok(candidate)
+  assert.equal(candidate.metadata, undefined)
+  assert.equal((await provider.get(candidate, { cwd })).content, 'PREFERRED_BODY')
+  const strict = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills', '.claude/skills'] })
+  assert.equal((await strict.registry.get('shared', { cwd })).content, 'Fallback must not win.')
+})
+
 test('format compatibility exposes reserved metadata directly during list and cached get', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'flat.md', '---\nname: chosen\ndescription: Custom\nmetadata:\n  owner: atlas\n  rank: 2\n---\nBody.\n')
@@ -3184,6 +3224,29 @@ test('format compatibility exposes reserved metadata directly during list and ca
   assert.equal(skill.metadata.rank, 2)
   assert.equal(skill.metadata.metadata, undefined)
   assert.equal(skill.content, 'Body.')
+})
+
+test('format compatibility candidate matching distinguishes nullish, nonfinite, and signed-zero metadata', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'chosen.md', '---\nname: chosen\ndescription: Custom\n---\nBody.\n')
+  const { ctx } = makeRegistry(makeFileSystem().fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'chosen')
+  for (const metadata of [null, Number.NaN, undefined]) {
+    assert.equal(await provider.get({ ...candidate, metadata }, { cwd }), undefined, String(metadata))
+  }
+  for (const agent of [null, Number.NaN, -0, { value: Number.NaN }]) {
+    assert.equal(await provider.get({ ...candidate, agent }, { cwd }), undefined, String(agent))
+  }
+  const strictProvider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: false,
+  })
+  const strictCandidate = (await strictProvider.list({ cwd })).candidates.find(item => item.name === 'chosen')
+  assert.equal(await strictProvider.get({ ...strictCandidate, agent: null }, { cwd }), undefined)
 })
 
 test('format compatibility preserves sibling reserved fields alongside explicit metadata', async t => {
