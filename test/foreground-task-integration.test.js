@@ -540,7 +540,7 @@ test('native ToolRuntime abort after join body but before final materialization 
   assert.equal(result.error.info.code, 'ABORTED')
   await tick()
   assert.equal(fixture.followups.filter(message => message.source?.kind === 'agent-message').length, 1)
-  assert.equal(fixture.followups.filter(message => message.source?.kind !== 'agent-message').length, 1)
+  assert.equal(fixture.followups.filter(message => message.source?.kind !== 'agent-message').length, 0)
   assert.match(JSON.stringify(fixture.followups), /Verified specialist evidence/u)
 })
 
@@ -844,7 +844,7 @@ test('native caller abort while join body awaits child is classified ABORTED and
   child.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'Late evidence after canonical body abort.' }] })
   await tick()
   assert.equal(fixture.followups.filter(message => message.source?.kind === 'agent-message').length, 1)
-  assert.equal(fixture.followups.filter(message => message.source?.kind !== 'agent-message').length, 1)
+  assert.equal(fixture.followups.filter(message => message.source?.kind !== 'agent-message').length, 0)
 })
 
 test('enabling foreground joining leaves ordinary asynchronous task result delivery unchanged', async () => {

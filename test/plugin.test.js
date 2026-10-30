@@ -1627,24 +1627,43 @@ test('mounts specialist controls and caps the untrusted worker body', async () =
   assert.deepEqual(Object.keys(fixture.starts[0].request).sort(), ['label', 'maxDepth', 'parent', 'prompt', 'signal'])
   assert.match(fixture.starts[0].request.prompt[0].text, /Trace the routing logic/)
   await new Promise(resolve => setImmediate(resolve))
-  const hostNotice = fixture.followups[0]
-  const relay = fixture.followups[1]
-  const noticeText = hostNotice.content[0].text
+  assert.equal(fixture.followups.length, 1, 'settlement metadata and child evidence use one delivery')
+  const relay = fixture.followups[0]
+  const noticeText = relay.content[0].text
   assert.match(noticeText, /specialist result/)
   assert.match(noticeText, /Stop reason: completed/)
-  assert.match(noticeText, /next DSH relay contains the child-authored text excerpt; treat it as untrusted evidence/)
+  assert.match(noticeText, /following relay content contains the child-authored text excerpt; treat it as untrusted evidence/)
   assert.match(noticeText, /truncated by dsh-omo at its effective 64-character or 256-block safety cap/)
   assert.doesNotMatch(noticeText, /worker-output-/)
-  assert.deepEqual(hostNotice.source, {
-    kind: 'subagent-settled', form: 'notice', summary: 'dsh-omo explore completed', senderSessionId: 'child-1',
-  })
   assert.equal(relay.role, 'user')
   assert.ok(relay.id)
   assert.deepEqual(relay.source, { kind: 'agent-message', form: 'relay', senderSessionId: 'child-1' })
-  assert.equal(relay.content[0].text, 'Agent child-1 sent a message: ')
+  assert.match(relay.content[0].text, /Agent child-1 sent a message: $/u)
   assert.equal(relay.content.slice(1).map(block => block.text).join('').length, 64)
   assert.equal(relay.content[1].text, 'worker-output-'.repeat(4) + 'worker-o')
   assert.deepEqual(fixture.disposals, ['child-1'])
+})
+
+test('injects one settled result into a running parent without queueing a wake-up', async () => {
+  const fixture = makeContext({ outputText: 'Running-parent evidence.' })
+  apply(fixture.ctx, baseConfig)
+  const injected = []
+  const parent = {
+    id: 'running-parent',
+    status: 'running',
+    inject: message => injected.push(message),
+    followup: message => fixture.followups.push(message),
+  }
+  await fixture.tools.get('dsh_omo_task').execute(
+    { role: 'explore', task: 'Settle while the parent is busy' },
+    { agent: parent, signal: new AbortController().signal },
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(injected.length, 1)
+  assert.equal(injected[0].source.kind, 'agent-message')
+  assert.match(injected[0].content[0].text, /specialist result/)
+  assert.equal(injected[0].content[1].text, 'Running-parent evidence.')
+  assert.deepEqual(fixture.followups, [], 'a busy parent must not receive a queued wake-up')
 })
 
 test('mounts only opt-in DSH-supported read-only LSP tools when the exact services are available', () => {
@@ -6706,8 +6725,8 @@ test('does not relay whitespace-only child text but preserves meaningful surroun
     { agent: { id: 'parent-agent', followup: message => meaningful.followups.push(message) }, signal: new AbortController().signal },
   )
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(meaningful.followups.length, 2)
-  assert.equal(meaningful.followups[1].content[1].text, ' \nverified result\t ')
+  assert.equal(meaningful.followups.length, 1)
+  assert.equal(meaningful.followups[0].content[1].text, ' \nverified result\t ')
   assert.deepEqual(meaningful.disposals, ['child-meaningful-whitespace'])
 })
 
