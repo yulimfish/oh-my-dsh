@@ -396,6 +396,16 @@ test('rejects handoff snapshots with non-string status metadata', async () => {
   assert.equal(queued.length, 0)
 })
 
+test('rejects handoff snapshots with empty structured output', async () => {
+  for (const output of [[], {}]) {
+    const { agent, queued, command } = fixture(failed({ output }))
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error')
+    assert.match(response.text, /failed or incomplete/u)
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('preserves exact child identity when preparing handoff evidence', async () => {
   const { agent, queued, calls, command } = fixture(failed({ childId: 'child-unicode-任务' }))
   const response = await command.handler({ agent, rawInput: 'child-unicode-任务 inspect next' })
