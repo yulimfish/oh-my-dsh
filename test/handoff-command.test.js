@@ -45,8 +45,8 @@ test('accepts incomplete results and preserves truncation and omitted-block cave
   assert.match(prompt, /status: incomplete; stop reason: max-tokens/u)
   assert.match(prompt, /output was truncated/u)
   assert.match(prompt, /Non-text result blocks were omitted/u)
-  assert.match(prompt, /no retained child output/u)
-  assert.match(prompt, /Inspect the evidence, identify the unfinished work/u)
+  assert.match(prompt, /no partial text evidence is available/u)
+  assert.match(prompt, /Review the incomplete status and stop reason/u)
 })
 
 test('does not hand off stale failure evidence after the same child ID starts new work', async () => {
@@ -652,9 +652,19 @@ test('keeps incomplete empty output distinct from failed recovery evidence', asy
   const { agent, queued, command } = fixture(failed({ status: 'incomplete', output: '', truncated: true }))
   const response = await command.handler({ agent, rawInput: 'child-1 inspect partial work' })
   assert.equal(response.kind, 'success')
-  assert.match(queued[0][1], /no retained child output/u)
+  assert.match(queued[0][1], /no partial text evidence is available/u)
   assert.doesNotMatch(queued[0][1], /no recovery evidence is available/u)
   assert.match(queued[0][1], /output was truncated/u)
+})
+
+test('uses incomplete status guidance when no partial text evidence survives', async () => {
+  const { agent, queued, command } = fixture(failed({ status: 'incomplete', output: '', stopReason: 'max-tokens' }))
+  const response = await command.handler({ agent, rawInput: 'child-1' })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.match(prompt, /no partial text evidence is available/u)
+  assert.match(prompt, /Review the incomplete status and stop reason/u)
+  assert.doesNotMatch(prompt, /Inspect the evidence, identify the unfinished work/u)
 })
 
 test('rejects failed snapshots that claim omitted evidence without retained output', async () => {
@@ -681,7 +691,7 @@ test('preserves incomplete status metadata alongside its partial-evidence caveat
   assert.match(prompt, /Recorded status: incomplete; stop reason: timeout/u)
   assert.match(prompt, /output was truncated/u)
   assert.match(prompt, /Non-text result blocks were omitted/u)
-  assert.match(prompt, /no retained child output/u)
+  assert.match(prompt, /no partial text evidence is available/u)
   assert.match(prompt, /inspect failure state/u)
 })
 
@@ -732,7 +742,7 @@ test('preserves truncation caveats when handoff has no retained text', async () 
   assert.equal(response.kind, 'success')
   assert.match(queued[0][1], /output was truncated/u)
   assert.match(queued[0][1], /Non-text result blocks were omitted/u)
-  assert.match(queued[0][1], /no retained child output/u)
+  assert.match(queued[0][1], /no partial text evidence is available/u)
 })
 
 test('bounds stop reason after metadata sanitization', async () => {

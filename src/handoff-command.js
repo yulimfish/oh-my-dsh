@@ -53,7 +53,7 @@ function handoffPrompt({ childId, status, stopReason, truncated, omittedNonText,
   const suffix = [
     '--- END CHILD EVIDENCE ---',
     `Requested next step from the current user: ${nextStep}`,
-    `${hasRecoveryEvidence ? 'Review this evidence' : 'Review the recorded failure state'} against the current user request. Start a NEW bounded dsh_omo_task only if it is useful, with a self-contained prompt and appropriate role; do not reuse the old child ID, assume its workspace or conversation survives, or claim transparent resume. Verify any new result independently. This handoff itself started no worker and changed no Goal state.`,
+    `${hasRecoveryEvidence ? 'Review this evidence' : status === 'failed' ? 'Review the recorded failure state' : 'Review the incomplete status and stop reason'} against the current user request. Start a NEW bounded dsh_omo_task only if it is useful, with a self-contained prompt and appropriate role; do not reuse the old child ID, assume its workspace or conversation survives, or claim transparent resume. Verify any new result independently. This handoff itself started no worker and changed no Goal state.`,
   ].join('\n')
   const marker = '\n[… additional evidence omitted for prompt budget …]\n'
   let text = `${prefix}\n${evidence}\n${suffix}`
@@ -175,13 +175,15 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
             .replace(CONTROL_OR_BIDI_GLOBAL, ' ').replace(/[ \t]+/gu, ' ').trim())
           : snapshot.status === 'failed'
             ? '(no recovery evidence is available; the specialist failed without a retained child result)'
-            : '(no retained child output)'
+            : '(no partial text evidence is available; inspect the incomplete status and stop reason)'
         stopReason = cleanMetadata(snapshot.stopReason, 80)
       } catch {
         return result('error', 'Could not prepare bounded handoff evidence; no handoff was queued.')
       }
-      const defaultNextStep = snapshot.status === 'failed' && !snapshot.output
-        ? 'Review the recorded failure state and the current user request, then start a new bounded task only if it is useful; do not assume child recovery evidence survives.'
+      const defaultNextStep = !snapshot.output
+        ? snapshot.status === 'failed'
+          ? 'Review the recorded failure state and the current user request, then start a new bounded task only if it is useful; do not assume child recovery evidence survives.'
+          : 'Review the incomplete status and stop reason against the current user request, then continue with the smallest useful next action without assuming partial text evidence survives.'
         : 'Inspect the evidence, identify the unfinished work, and continue with the smallest useful next action.'
       const nextStep = quoteBoundedText(input.nextStep || defaultNextStep, MAX_NEXT_STEP_JSON_CHARS)
       if (args?.signal?.aborted) return result('error', 'Task handoff was cancelled before it was queued.')
@@ -199,7 +201,7 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
           omittedNonText: snapshot.omittedNonText,
           evidence,
           nextStep,
-          hasRecoveryEvidence: snapshot.status !== 'failed' || Boolean(snapshot.output),
+          hasRecoveryEvidence: Boolean(snapshot.output),
         }))
       } catch {
         return result('error', 'Handoff delivery was uncertain; inspect the current Agent before retrying. No child was resumed or started by this command.')
