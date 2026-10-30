@@ -673,7 +673,7 @@ async function readProjectCommand(fs, cwd, scope, directory, entry, name, signal
   if (pathInfo?.type !== 'file' && (!allowContainedSymlinks || pathInfo?.type !== 'symlink')) return undefined
   const target = await resolveTarget(fs, relativePath, cwd, signal)
   assertNotAborted(signal)
-  if (!targetKey(target) || (entry.type === 'file' && targetKey(target) !== listedKey)
+  if (!targetKey(target) || targetKey(target) !== listedKey
     || !safeContainment(fs, containmentRoot, target)
     || !safeContainment(fs, directory.target, target)) return undefined
   const beforeInfo = await safeStat(fs, target, signal)

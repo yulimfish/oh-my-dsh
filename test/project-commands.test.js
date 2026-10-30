@@ -624,6 +624,14 @@ test('opt-in loads only contained file symlinks with canonical containment and s
   } } })
   state.addFile(`${root}/actual.md`, VALID)
   state.addSymlink(`${root}/review.md`)
+  state.fs.listDir = async target => {
+    return [...state.nodes.entries()]
+      .filter(([candidate]) => path.dirname(candidate) === target.path)
+      .map(([candidate, record]) => ({
+        name: path.basename(candidate), type: record.type,
+        target: candidate === `${root}/review.md` ? state.targetFor(`${root}/actual.md`) : state.targetFor(candidate),
+      }))
+  }
   state.addSymlink(`${root}/escape.md`)
   state.addFile(`${CWD}/outside.md`, VALID)
   const commands = await state.adapter.list(state.agent)
