@@ -229,7 +229,7 @@ test('rejects invisible or confusable child identities before reading the regist
   const trimmed = await command.handler({ agent, rawInput: '\u00a0child-1 inspect' })
   assert.equal(trimmed.kind, 'success', 'ordinary Unicode whitespace may trim around a valid child ID')
   const bomTrimmed = await command.handler({ agent, rawInput: '\ufeffchild-1 inspect' })
-  assert.equal(bomTrimmed.kind, 'success', 'a leading BOM is trim whitespace, not part of the child identity')
+  assert.equal(bomTrimmed.kind, 'error', 'BOM is rejected as an invisible format character even at the input boundary')
 })
 
 test('validates input, Agent, cancellation, and registry contracts before queueing', async () => {
