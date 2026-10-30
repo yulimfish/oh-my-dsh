@@ -234,7 +234,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
   // The pinned parser requires a newline after the closing delimiter. At EOF
   // its no-match result treats the whole document as Markdown, not metadata.
   const hasFrontmatter = standaloneFrontmatter
-    && !(formatCompatibility && !pinnedFrontmatter && end === lines.length - 1)
+    && !(formatCompatibility && !pinnedFrontmatter && (end < 0 || end === lines.length - 1))
   if (!hasFrontmatter && !formatCompatibility) throw new SkillFormatError('skill file must begin with YAML frontmatter')
   if (hasFrontmatter && end < 0 && !pinnedFrontmatter) throw new SkillFormatError('skill YAML frontmatter has no closing delimiter')
   let originalBody

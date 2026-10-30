@@ -2281,7 +2281,7 @@ test('format compatibility preserves bounded scanning and incomplete snapshots',
       await Promise.all(Array.from({ length: count }, (_, index) => {
         const file = path.join(root, `skill-${index}.md`)
         return mode === 'entries'
-          ? writeFile(file, '---\nname: [invalid\n', 'utf8')
+          ? writeFile(file, '---\nname: "   "\n---\n', 'utf8')
           : writeSkill(file, { name: `skill-${index}`, content: mode === 'bytes' ? 'x'.repeat(200 * 1024) : 'body' })
       }))
       const { fs, calls } = makeFileSystem()
@@ -2895,6 +2895,17 @@ test('format compatibility treats an EOF closing delimiter as plain Markdown lik
   const strict = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills'] })
   assert.equal((await strict.registry.get('custom-name', { cwd })).content, '')
+})
+
+test('format compatibility treats an unclosed frontmatter opener as plain Markdown like the pinned loader', async t => {
+  const cwd = await makeWorkspace(t)
+  const source = '---\nname: custom-name\ndescription: From metadata\nBody without a closing delimiter.'
+  await writeCompatibilityDocument(cwd, 'unclosed.md', source)
+  const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const skill = await registry.get('unclosed', { cwd })
+  assert.ok(skill)
+  assert.equal(skill.description, '(opencode-project - Skill) Project skill unclosed')
+  assert.equal(skill.content, source)
 })
 
 test('format compatibility rewrites only bounded nonescaping file-like references', async t => {
