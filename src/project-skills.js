@@ -370,7 +370,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
   if (typeof description !== 'string' || (!formatCompatibility && description.trim().length === 0) || description.length > 2_000) {
     throw new SkillFormatError('skill frontmatter description must be a non-empty string no longer than 2000 characters')
   }
-  if (!formatCompatibility && whenToUse !== undefined && (typeof whenToUse !== 'string' || whenToUse.length > 2_000)) {
+  if (whenToUse !== undefined && (typeof whenToUse === 'string' ? whenToUse.length > 2_000 : !formatCompatibility)) {
     throw new SkillFormatError('skill frontmatter whenToUse must be a string no longer than 2000 characters')
   }
   const allowedTools = frontmatter['allowed-tools']

@@ -2112,6 +2112,30 @@ test('format compatibility ignores non-string whenToUse without losing the prefe
   assert.equal(skill.whenToUse, undefined)
 })
 
+test('format compatibility preserves whenToUse strings while enforcing the 2000-character bound in both modes', async t => {
+  for (const formatCompatibility of [false, true]) {
+    for (const length of [2_000, 2_001]) {
+      const cwd = await makeWorkspace(t)
+      const whenToUse = 'x'.repeat(length)
+      await writeCompatibilityDocument(cwd, 'bounded/SKILL.md', `---\nname: bounded\ndescription: Bounded\nwhenToUse: "${whenToUse}"\n---\nBody.\n`)
+      const { ctx } = makeRegistry(makeFileSystem().fs)
+      const lifetime = new AbortController()
+      t.after(() => lifetime.abort())
+      const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+        projectSkillDirs: ['.opencode/skills'], formatCompatibility,
+      })
+      const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'bounded')
+      if (length === 2_000) {
+        assert.ok(candidate, `${formatCompatibility}:${length}`)
+        assert.equal(candidate.whenToUse, whenToUse)
+        assert.equal((await provider.get(candidate, { cwd })).whenToUse, whenToUse)
+      } else {
+        assert.equal(candidate, undefined, `${formatCompatibility}:${length}`)
+      }
+    }
+  }
+})
+
 for (const [field, value, defaultInvocation] of [
   ['user-invocable', 'null', { modelInvocable: true, userInvocable: true }],
   ['disable-model-invocation', 'sometimes', { modelInvocable: true, userInvocable: true }],
