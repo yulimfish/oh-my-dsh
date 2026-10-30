@@ -571,6 +571,29 @@ test('rejects handoff snapshots with missing status metadata', async () => {
   assert.equal(queued.length, 0)
 })
 
+test('fails closed without leaking errors when handoff evidence accessors fail', async () => {
+  for (const field of ['output', 'stopReason']) {
+    const stale = failed()
+    let reads = 0
+    Object.defineProperty(stale, field, {
+      get() {
+        reads += 1
+        if (reads > 6) throw new Error(`private ${field} accessor failure`)
+        return field === 'output' ? 'evidence' : 'failed'
+      },
+    })
+    const queued = []
+    const command = createHandoffCommand({
+      readAsync: async () => stale,
+      read: () => stale,
+    }, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent: { id: 'parent-accessor-error' }, rawInput: 'child-1 retry' })
+    assert.equal(response.kind, 'error', field)
+    assert.equal(response.text.includes(`private ${field} accessor failure`), false)
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('rejects handoff snapshots with boxed output text', async () => {
   const { agent, queued, command } = fixture(failed({ output: new String('evidence') }))
   const response = await command.handler({ agent, rawInput: 'child-1 inspect' })

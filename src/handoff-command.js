@@ -37,18 +37,26 @@ function evidenceForPrompt(output) {
 }
 
 function validResult(value, childId) {
-  return value !== null && typeof value === 'object' && value.childId === childId
-    && ['failed', 'incomplete'].includes(value.status)
-    && typeof value.output === 'string' && value.output.length <= MAX_EVIDENCE_CHARS
-    && (value.truncated === undefined || typeof value.truncated === 'boolean')
-    && (value.omittedNonText === undefined || typeof value.omittedNonText === 'boolean')
-    && (value.stopReason === undefined || (typeof value.stopReason === 'string' && value.stopReason.length <= 80))
+  try {
+    return value !== null && typeof value === 'object' && value.childId === childId
+      && ['failed', 'incomplete'].includes(value.status)
+      && typeof value.output === 'string' && value.output.length <= MAX_EVIDENCE_CHARS
+      && (value.truncated === undefined || typeof value.truncated === 'boolean')
+      && (value.omittedNonText === undefined || typeof value.omittedNonText === 'boolean')
+      && (value.stopReason === undefined || (typeof value.stopReason === 'string' && value.stopReason.length <= 80))
+  } catch {
+    return false
+  }
 }
 
 function sameResult(left, right) {
-  return validResult(right, left?.childId) && left.status === right.status && left.output === right.output
-    && left.truncated === right.truncated && left.omittedNonText === right.omittedNonText
-    && left.stopReason === right.stopReason
+  try {
+    return validResult(right, left?.childId) && left.status === right.status && left.output === right.output
+      && left.truncated === right.truncated && left.omittedNonText === right.omittedNonText
+      && left.stopReason === right.stopReason
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -95,22 +103,30 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
       }
       if (typeof registry.readAsync === 'function' && typeof registry.read === 'function') {
         let current
-        try { current = registry.read(agent, input.childId) } catch {
+        try {
+          current = registry.read(agent, input.childId)
+          if (!sameResult(snapshot, current)) {
+            return result('error', 'The one-shot result changed while handoff was being prepared; inspect the current child before retrying.')
+          }
+        } catch {
           return result('error', 'Could not confirm the current one-shot result; no handoff was queued.')
-        }
-        if (!sameResult(snapshot, current)) {
-          return result('error', 'The one-shot result changed while handoff was being prepared; inspect the current child before retrying.')
         }
       }
 
-      const evidence = snapshot.output
-        ? evidenceForPrompt(snapshot.output
-          .replace(/--- BEGIN CHILD EVIDENCE ---/gu, '[child BEGIN CHILD EVIDENCE]')
-          .replace(/--- END CHILD EVIDENCE ---/gu, '[child END CHILD EVIDENCE]')
-          .replace(CONTROL_OR_BIDI_GLOBAL, ' ').replace(/[ \t]+/gu, ' ').trim())
-        : '(no retained child output)'
+      let evidence
+      let stopReason
+      try {
+        evidence = snapshot.output
+          ? evidenceForPrompt(snapshot.output
+            .replace(/--- BEGIN CHILD EVIDENCE ---/gu, '[child BEGIN CHILD EVIDENCE]')
+            .replace(/--- END CHILD EVIDENCE ---/gu, '[child END CHILD EVIDENCE]')
+            .replace(CONTROL_OR_BIDI_GLOBAL, ' ').replace(/[ \t]+/gu, ' ').trim())
+          : '(no retained child output)'
+        stopReason = cleanMetadata(snapshot.stopReason, 80)
+      } catch {
+        return result('error', 'Could not prepare bounded handoff evidence; no handoff was queued.')
+      }
       const nextStep = input.nextStep || 'Inspect the evidence, identify the unfinished work, and continue with the smallest useful next action.'
-      const stopReason = cleanMetadata(snapshot.stopReason, 80)
       if (args?.signal?.aborted) return result('error', 'Task handoff was cancelled before it was queued.')
       if (isParentCurrent) {
         let current = false
