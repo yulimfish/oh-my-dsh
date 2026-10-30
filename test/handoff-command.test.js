@@ -162,6 +162,34 @@ test('rejects persisted results from another parent without queueing handoff', a
   }
 })
 
+test('rejects expired and future persisted results without queueing handoff', async () => {
+  const agent = { id: 'parent-persisted-time' }
+  for (const timing of [{ settledAt: 900, expiresAt: 1_000 }, { settledAt: 1_001, expiresAt: 2_000 }]) {
+    for (const status of ['failed', 'incomplete']) {
+      const stored = {
+        parentId: agent.id, childId: 'child-1', status, output: 'invalid time evidence',
+        truncated: false, omittedNonText: false, ...timing,
+      }
+      const registry = createTaskResultRegistry({
+        now: () => 1_000,
+        persistentStore: {
+          put: async () => true,
+          delete: async () => true,
+          read: async () => stored,
+          list: async () => [stored],
+        },
+      })
+      const queued = []
+      const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+      const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+      assert.equal(response.kind, 'error', `${status} ${JSON.stringify(timing)}`)
+      assert.match(response.text, /failed or incomplete/u)
+      assert.equal(queued.length, 0)
+      await registry.dispose()
+    }
+  }
+})
+
 test('hands off persisted evidence to the exact same-session replacement Agent', async () => {
   const oldAgent = { id: 'parent-replaced-session' }
   const replacement = { id: oldAgent.id }
