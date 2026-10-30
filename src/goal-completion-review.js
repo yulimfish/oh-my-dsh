@@ -78,6 +78,9 @@ export function createGoalCompletionReview(goals, agents) {
 
   function clearAgent(agent) {
     if (isObject(agent)) disposedAgents.add(agent)
+    for (const [id, state] of states) {
+      if (state.agent === agent) states.delete(id)
+    }
     let id
     try { id = agent?.id } catch { return }
     if (typeof id === 'string' && states.get(id)?.agent === agent) states.delete(id)
