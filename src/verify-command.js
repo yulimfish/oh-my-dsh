@@ -167,7 +167,10 @@ export function collectBashResults(events) {
       calls.set(callId, { command: clean(args.command, 4_096), description: clean(args.description, 160) })
     } else if (event.type === 'tool/result') {
       const message = event.data?.message
-      const callId = message?.toolCallId ?? message?.source?.toolCallId
+      const directCallId = message?.toolCallId
+      const sourceCallId = message?.source?.toolCallId ?? message?.source?.callId
+      if (directCallId !== undefined && sourceCallId !== undefined && directCallId !== sourceCallId) continue
+      const callId = directCallId ?? sourceCallId
       if (ambiguousCallIds.has(callId) || evictedCallIds.has(callId)) {
         calls.delete(callId)
         for (let index = results.length - 1; index >= 0; index -= 1) {

@@ -263,6 +263,18 @@ test('quarantines a todo call ID reused by another tool before its result', () =
   assert.equal(afterQuarantine.render(), '')
 })
 
+test('rejects tool results with conflicting message and source call identities', () => {
+  const projection = createProgressProjection(sessionWith([
+    todoEvent(1, 'expected-call', [{ content: 'must not accept conflicting identity', status: 'in_progress' }]),
+    {
+      seq: 2,
+      type: 'tool/result',
+      data: { message: { toolCallId: 'expected-call', source: { kind: 'tool', callId: 'other-call' }, isError: false } },
+    },
+  ]))
+  assert.equal(projection.render(), '')
+})
+
 test('quarantines duplicate results for one todo call ID', () => {
   const projection = createProgressProjection(sessionWith([
     todoEvent(1, 'duplicate-result', [{ content: 'ambiguous completed plan', status: 'in_progress' }]),
