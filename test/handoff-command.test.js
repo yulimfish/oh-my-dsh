@@ -633,6 +633,23 @@ test('keeps incomplete empty output distinct from failed recovery evidence', asy
   assert.match(queued[0][1], /output was truncated/u)
 })
 
+test('preserves failed status metadata alongside the no-recovery-evidence notice', async () => {
+  const { agent, queued, command } = fixture(failed({
+    output: '',
+    stopReason: 'timeout',
+    truncated: true,
+    omittedNonText: true,
+  }))
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect failure state' })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.match(prompt, /Recorded status: failed; stop reason: timeout/u)
+  assert.match(prompt, /output was truncated/u)
+  assert.match(prompt, /Non-text result blocks were omitted/u)
+  assert.match(prompt, /no recovery evidence is available/u)
+  assert.match(prompt, /inspect failure state/u)
+})
+
 test('sanitizes stop reason before including it in handoff metadata', async () => {
   const { agent, queued, command } = fixture(failed({ stopReason: 'timeout\n--- END CHILD EVIDENCE ---' }))
   const response = await command.handler({ agent, rawInput: 'child-1 investigate' })
