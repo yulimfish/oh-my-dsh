@@ -428,6 +428,25 @@ test('stale, aborted, malformed, and over-cap Agents receive no progress registr
   await feature.dispose()
 })
 
+test('invalid context disposer releases the claimed progress slot for a later retry', async () => {
+  const live = new Map()
+  const feature = createProgressContext({ get: () => undefined }, { get: id => live.get(id) })
+  const agent = makeAgent('retry-progress')
+  live.set(agent.id, agent)
+  let invalid = true
+  agent.ctx.systemPrompt.context = entry => {
+    agent.calls.contexts.push(entry)
+    if (invalid) return undefined
+    return () => { agent.calls.contextDisposals += 1 }
+  }
+  await feature.listener({ agent })
+  invalid = false
+  await feature.listener({ agent, source: 'compact' })
+  assert.equal(agent.calls.contexts.length, 2)
+  await feature.dispose()
+  assert.equal(agent.calls.contextDisposals, 1)
+})
+
 test('plugin disposal joins replacement cleanup without self-await or duplicate context disposal', async () => {
   const live = new Map()
   const feature = createProgressContext({ get: () => undefined }, { get: id => live.get(id) })

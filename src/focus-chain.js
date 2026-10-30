@@ -151,11 +151,15 @@ export function createFocusChain(goalsService, agentsService) {
       if (typeof contextDispose !== 'function') {
         silenceThenable(contextDispose)
         contextDispose = undefined
+        if (registrations.get(agentId) === registration) registrations.delete(agentId)
+        await trackDisposal(registration)
         return
       }
 
       if (disposed || signal?.aborted === true || !exactLiveAgent(agentsService, agentId, agent)) {
-        await trackPromise(callDisposer(contextDispose))
+        if (registrations.get(agentId) === registration) registrations.delete(agentId)
+        registration.contextDispose = contextDispose
+        await trackDisposal(registration)
         contextDispose = undefined
         return
       }

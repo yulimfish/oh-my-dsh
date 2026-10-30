@@ -177,6 +177,26 @@ test('fails open on registry, Goal, context, effect, and cancellation failures',
   await feature.dispose()
 })
 
+test('invalid context disposer releases the claimed slot for a later retry', async () => {
+  const { live, service } = makeService()
+  const feature = createFocusChain({ get: () => activeGoal() }, service)
+  const agent = makeAgent('retry-context')
+  live.set(agent.id, agent)
+  let invalid = true
+  agent.ctx.systemPrompt.context = entry => {
+    agent.calls.contexts.push(entry)
+    if (invalid) return undefined
+    return () => { agent.calls.contextDisposals += 1 }
+  }
+  await notify(feature, agent)
+  invalid = false
+  await notify(feature, agent, 'compact')
+  assert.equal(agent.calls.contexts.length, 2)
+  assert.match(agent.calls.contexts[1].text(), /Implement and verify/u)
+  await feature.dispose()
+  assert.equal(agent.calls.contextDisposals, 1)
+})
+
 test('caps registrations without eviction and releases slots on exact scope cleanup', async () => {
   const { live, service } = makeService()
   const feature = createFocusChain({ get: () => activeGoal() }, service)
