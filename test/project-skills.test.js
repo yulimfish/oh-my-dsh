@@ -2076,6 +2076,81 @@ test('format compatibility exposes frontmatter MCP configuration without initial
   assert.equal((await strict.registry.get('mcp-demo', { cwd })).mcpConfig, undefined)
 })
 
+test('format compatibility reads directory mcp.json before frontmatter without executing it', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'canonical/SKILL.md', '---\nname: canonical\ndescription: MCP JSON\nmcp:\n  fallback: true\n---\nCanonical body.\n')
+  await writeCompatibilityDocument(cwd, 'canonical/mcp.json', JSON.stringify({ mcpServers: { docs: { type: 'remote', url: 'https://example.invalid/mcp' } } }))
+  await writeCompatibilityDocument(cwd, 'nested/flat.md', '---\nname: flat\ndescription: Flat MCP JSON\n---\nFlat body.\n')
+  await writeCompatibilityDocument(cwd, 'nested/mcp.json', JSON.stringify({ local: { command: 'ignored-command' } }))
+  await writeCompatibilityDocument(cwd, 'invalid/SKILL.md', '---\nname: invalid\ndescription: Invalid JSON\nmcp:\n  fallback: true\n---\nInvalid JSON body.\n')
+  await writeCompatibilityDocument(cwd, 'invalid/mcp.json', '{not-json')
+  const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+  const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'], formatCompatibility: true })
+  t.after(() => registration.dispose())
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const candidates = (await provider.list({ cwd })).candidates
+  assert.deepEqual(candidates.find(item => item.name === 'canonical').mcpConfig, { docs: { type: 'remote', url: 'https://example.invalid/mcp' } })
+  assert.deepEqual(candidates.find(item => item.name === 'flat').mcpConfig, { local: { command: 'ignored-command' } })
+  assert.deepEqual(candidates.find(item => item.name === 'invalid').mcpConfig, { fallback: true })
+  assert.deepEqual((await provider.get(candidates.find(item => item.name === 'canonical'), { cwd })).mcpConfig, { docs: { type: 'remote', url: 'https://example.invalid/mcp' } })
+  assert.deepEqual((await registry.get('flat', { cwd })).mcpConfig, { local: { command: 'ignored-command' } })
+  assert.equal((await registry.get('invalid', { cwd })).content, 'Invalid JSON body.')
+  const opaque = makeRegistry(makeFileSystem({ displayPrefix: 'dsh-ui://' }).fs)
+  registerProjectSkillProvider(opaque.ctx, { projectSkillDirs: ['.opencode/skills'], formatCompatibility: true })
+  assert.deepEqual((await opaque.registry.get('canonical', { cwd })).mcpConfig, { docs: { type: 'remote', url: 'https://example.invalid/mcp' } })
+  const external = await makeWorkspace(t)
+  await writeFile(path.join(external, 'outside.json'), JSON.stringify({ outside: { command: 'outside' } }))
+  const escapeCwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(escapeCwd, 'escape/SKILL.md', '---\nname: escape\ndescription: Escape\n---\nEscape body.\n')
+  await symlink(path.join(external, 'outside.json'), path.join(escapeCwd, '.opencode/skills/escape/mcp.json'))
+  const { registry: escapeRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
+  assert.equal((await escapeRegistry.get('escape', { cwd: escapeCwd })).mcpConfig, undefined)
+  const raceCwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(raceCwd, 'raced/SKILL.md', '---\nname: raced\ndescription: Race\n---\nRaced body.\n')
+  await writeCompatibilityDocument(raceCwd, 'raced/mcp.json', JSON.stringify({ inside: { command: 'inside' } }))
+  const racedPath = await realpath(path.join(raceCwd, '.opencode/skills/raced/mcp.json'))
+  const { fs: raceFs } = makeFileSystem()
+  const originalStat = raceFs.stat
+  let swapped = false
+  raceFs.stat = async (target, signal) => {
+    const result = await originalStat(target, signal)
+    if (!swapped && target.targetKey === racedPath) {
+      swapped = true
+      await unlink(racedPath)
+      await symlink(path.join(external, 'outside.json'), racedPath)
+    }
+    return result
+  }
+  const { registry: raceRegistry } = compatibilityRegistry(t, raceFs)
+  const raced = await raceRegistry.get('raced', { cwd: raceCwd })
+  assert.equal(swapped, true)
+  assert.equal(raced.mcpConfig?.outside, undefined)
+  assert.equal(raced.content, 'Raced body.')
+})
+
+test('format compatibility charges mcp.json reads against aggregate scan bytes', async t => {
+  const cwd = await makeWorkspace(t)
+  const mcpJson = JSON.stringify({ mcpServers: { docs: { type: 'remote', url: `https://example.invalid/${'x'.repeat(200_000)}` } } })
+  for (let index = 0; index < 43; index += 1) {
+    const name = `skill-${String(index).padStart(2, '0')}`
+    await writeCompatibilityDocument(cwd, `${name}/SKILL.md`, `---\nname: ${name}\ndescription: MCP budget\n---\nBody.\n`)
+    await writeCompatibilityDocument(cwd, `${name}/mcp.json`, mcpJson)
+  }
+  const { ctx } = makeRegistry(makeFileSystem().fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const listed = await provider.list({ cwd })
+  assert.equal(listed.complete, false)
+  assert.equal(listed.candidates.length < 43, true)
+})
+
 test('format compatibility treats falsy NaN allowed-tools as absent during list and get', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'shared.md', '---\nname: shared\ndescription: Valid winner\nallowed-tools: !!float .NaN\n---\nValid wins.\n')

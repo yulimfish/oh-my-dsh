@@ -473,6 +473,39 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
   }
 }
 
+async function readMcpJsonConfig(ctx, { rootTarget, resolverPath, cwd, signal, byteLimit = MAX_SKILL_BYTES }) {
+  let bytesRead = 0
+  try {
+    const relativePath = `${dirname(resolverPath)}/mcp.json`
+    const resolveTarget = () => ctx.fs.resolve(relativePath, { cwd, signal })
+    const target = await resolveTarget()
+    if (!ctx.fs.contains(rootTarget, target)) return { bytesRead }
+    const info = await ctx.fs.stat(target, signal)
+    if (!info || info.type !== 'file') return { bytesRead }
+    const bytes = await ctx.fs.readBytes(target, signal, byteLimit)
+    if (!(bytes instanceof Uint8Array)) return { bytesRead }
+    bytesRead = bytes.byteLength
+    if (bytes.byteLength > byteLimit) return { bytesRead, exhausted: true }
+    const afterTarget = await resolveTarget()
+    const afterInfo = await ctx.fs.stat(afterTarget, signal)
+    if (!afterInfo || afterInfo.type !== 'file' || target.targetKey !== afterTarget.targetKey
+      || !ctx.fs.contains(rootTarget, afterTarget)
+      || (info.version !== undefined && afterInfo.version !== info.version)
+      || (info.size !== undefined && afterInfo.size !== info.size)) return { bytesRead }
+    const source = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    const parsed = JSON.parse(source)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { bytesRead }
+    if (parsed.mcpServers) return { config: parsed.mcpServers, bytesRead }
+    if (!Object.hasOwn(parsed, 'mcpServers')
+      && Object.values(parsed).some(value => value && typeof value === 'object' && 'command' in value)) return { config: parsed, bytesRead }
+    return { bytesRead }
+  } catch (error) {
+    if (signal?.aborted) throw error
+    if (error?.code === 'FS_TOO_LARGE') throw new ScanBudgetError('project skill MCP scan byte budget reached', byteLimit)
+    return { bytesRead }
+  }
+}
+
 async function readSkillFile(ctx, target, signal, byteLimit = MAX_SKILL_BYTES, formatOptions) {
   throwIfAborted(signal)
   const info = await ctx.fs.stat(target, signal)
@@ -1370,6 +1403,16 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 }
                 skill = await readSkillFile(ctx, fileTarget, signal, Math.min(MAX_SKILL_BYTES, remainingBytes), { formatCompatibility, defaultName: formatPaths?.defaultName, modelScope: userRoot?.source === 'user-opencode' || rootPath === '.opencode/skills' || rootPath === '.opencode/skill' ? 'opencode' : 'claude-code' })
                 scannedBytes += skill.byteLength
+                if (formatCompatibility) {
+                  const mcp = await readMcpJsonConfig(ctx, { rootTarget, resolverPath, cwd: userRoot ? rootPath : cwd, signal, byteLimit: Math.min(MAX_SKILL_BYTES, MAX_SCAN_BYTES - scannedBytes) })
+                  scannedBytes += mcp.bytesRead
+                  if (mcp.config) skill = { ...skill, mcpConfig: mcp.config }
+                  if (mcp.exhausted || scannedBytes > MAX_SCAN_BYTES) {
+                    markIncomplete()
+                    scanExhausted = true
+                    break
+                  }
+                }
                 if (formatCompatibility && !await formatPathsStillEligible(formatPaths, cwd, signal)) {
                   markIncomplete()
                   continue
@@ -1456,7 +1499,11 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           invalidateObservation()
           return undefined
         }
-        const skill = await readSkillFile(ctx, fileTarget, signal, MAX_SKILL_BYTES, { formatCompatibility, defaultName: formatPaths?.defaultName, modelScope: userRoot?.source === 'user-opencode' || locator.rootPath === '.opencode/skills' || locator.rootPath === '.opencode/skill' ? 'opencode' : 'claude-code' })
+        let skill = await readSkillFile(ctx, fileTarget, signal, MAX_SKILL_BYTES, { formatCompatibility, defaultName: formatPaths?.defaultName, modelScope: userRoot?.source === 'user-opencode' || locator.rootPath === '.opencode/skills' || locator.rootPath === '.opencode/skill' ? 'opencode' : 'claude-code' })
+        if (formatCompatibility) {
+          const mcp = await readMcpJsonConfig(ctx, { rootTarget, resolverPath: locator.resolverPath, cwd: userRoot ? locator.rootPath : lookup.cwd, signal })
+          if (mcp.config) skill = { ...skill, mcpConfig: mcp.config }
+        }
         if (formatCompatibility && !await formatPathsStillEligible(formatPaths, userRoot ? locator.rootPath : lookup.cwd, signal)) {
           invalidateObservation()
           return undefined
