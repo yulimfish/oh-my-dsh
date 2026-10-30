@@ -232,6 +232,17 @@ test('rejects invisible or confusable child identities before reading the regist
   assert.equal(bomTrimmed.kind, 'error', 'BOM is rejected as an invisible format character even at the input boundary')
 })
 
+test('accepts ordinary Unicode child identities and next-step text', async () => {
+  for (const childId of ['child-汉', 'child-😀']) {
+    const { agent, queued, calls, command } = fixture(failed({ childId }))
+    const response = await command.handler({ agent, rawInput: `${childId} 继续调查` })
+    assert.equal(response.kind, 'success', childId)
+    assert.deepEqual(calls, [[agent, childId]])
+    assert.match(queued[0][1], /继续调查/u)
+    assert.match(queued[0][1], new RegExp(childId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'u'))
+  }
+})
+
 test('validates input, Agent, cancellation, and registry contracts before queueing', async () => {
   const { agent, queued, command } = fixture(failed())
   for (const rawInput of ['', '   ', 'child-1\nchild-2', 'child-1\u202e', `${'x'.repeat(2_049)}`]) {
