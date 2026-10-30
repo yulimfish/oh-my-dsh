@@ -2954,6 +2954,19 @@ test('format compatibility accepts explicit decimal integers with leading zeros'
   assert.equal(skill.content, 'Body.')
 })
 
+test('format compatibility recovers from overflowing explicit integer metadata', async t => {
+  const cwd = await makeWorkspace(t)
+  const source = `---\nname: chosen\ndescription: Custom description\nmetadata:\n  rank: !!int "${'9'.repeat(400)}"\n---\nBody.\n`
+  await writeCompatibilityDocument(cwd, 'flat-demo.md', source)
+  const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const skill = await registry.get('flat-demo', { cwd })
+  assert.ok(skill)
+  assert.equal(skill.description, '(opencode-project - Skill) Project skill flat-demo')
+  assert.equal(skill.metadata, undefined)
+  assert.equal(skill.content, 'Body.')
+  assert.equal(await registry.get('chosen', { cwd }), undefined)
+})
+
 test('format compatibility accepts explicit NaN as a falsy name while preserving sibling metadata', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'flat-demo.md', '---\nname: !!float ".NaN"\ndescription: Custom description\n---\nBody.\n')

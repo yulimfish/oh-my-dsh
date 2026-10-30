@@ -47,10 +47,18 @@ const JSON_TAG_RESOLVERS = Object.freeze({
     const unsigned = normalized.replace(/^[+-]/u, '')
     if (unsigned === '0') return 0
     const sign = negative ? -1 : 1
-    if (unsigned.startsWith('0x')) return sign * Number.parseInt(unsigned.slice(2), 16)
-    if (unsigned.startsWith('0o')) return sign * Number.parseInt(unsigned.slice(2), 8)
-    if (unsigned.startsWith('0b')) return sign * Number.parseInt(unsigned.slice(2), 2)
-    return sign * Number.parseInt(unsigned, 10)
+    const result = unsigned.startsWith('0x')
+      ? sign * Number.parseInt(unsigned.slice(2), 16)
+      : unsigned.startsWith('0o')
+        ? sign * Number.parseInt(unsigned.slice(2), 8)
+        : unsigned.startsWith('0b')
+          ? sign * Number.parseInt(unsigned.slice(2), 2)
+          : sign * Number.parseInt(unsigned, 10)
+    if (!Number.isFinite(result)) {
+      onError(`cannot resolve integer scalar ${JSON.stringify(value)}`)
+      return value
+    }
+    return result
   },
   'tag:yaml.org,2002:float': (value, onError) => {
     if (value === '.nan' || value === '.NaN' || value === '.NAN') return Number.NaN
