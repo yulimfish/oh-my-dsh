@@ -110,6 +110,9 @@ test('explicit persistence restores a terminal snapshot for a same-session Agent
   const replacement = agent('shared-session')
   const stored = persistedResult(old.id, 'persisted-child')
   stored.status = 'failed'
+  stored.output = 'Unreliable persisted failure output that must not become recovery evidence.'
+  stored.truncated = true
+  stored.omittedNonText = true
   stored.stopReason = 'error'
   const registry = createTaskResultRegistry({
     now: () => 100,
