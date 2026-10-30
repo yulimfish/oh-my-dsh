@@ -104,6 +104,37 @@ test('hands off a persisted incomplete result after restoring the exact Agent ca
   await registry.dispose()
 })
 
+test('does not reuse persisted failed output as handoff recovery evidence', async () => {
+  const agent = { id: 'parent-persisted-failed' }
+  const stored = {
+    parentId: agent.id, childId: 'child-1', status: 'failed',
+    output: 'stale failed output must not be reused', truncated: true,
+    omittedNonText: true, stopReason: 'error', settledAt: 900, expiresAt: 2_000,
+  }
+  const registry = createTaskResultRegistry({
+    now: () => 1_000,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => stored,
+      list: async () => [stored],
+    },
+  })
+  const queued = []
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect the failure state' })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.match(prompt, /Recorded status: failed/u)
+  assert.match(prompt, /no recovery evidence is available/u)
+  assert.match(prompt, /inspect the failure state/u)
+  assert.doesNotMatch(prompt, /stale failed output must not be reused/u)
+  assert.doesNotMatch(prompt, /output was truncated/u)
+  assert.doesNotMatch(prompt, /Non-text result blocks were omitted/u)
+  assert.doesNotMatch(prompt, /stop reason:/u)
+  await registry.dispose()
+})
+
 test('hands off persisted evidence to the exact same-session replacement Agent', async () => {
   const oldAgent = { id: 'parent-replaced-session' }
   const replacement = { id: oldAgent.id }
