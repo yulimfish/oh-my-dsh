@@ -596,6 +596,22 @@ test('storage failure falls back to current local state rather than the pre-I/O 
   await registry.dispose()
 })
 
+test('storage read and list failures return no restored result when memory is empty', async () => {
+  const parent = agent('empty-storage-failure')
+  const registry = createTaskResultRegistry({
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => { throw new Error('storage unavailable') },
+      list: async () => { throw new Error('storage unavailable') },
+    },
+  })
+  assert.equal(await registry.readAsync(parent, 'missing-child'), undefined)
+  assert.deepEqual(await registry.listAsync(parent), [])
+  assert.equal(registry.size(), 0)
+  await registry.dispose()
+})
+
 test('result Tool renders its untrusted-output guidance through the Host output contract', () => {
   const registry = createTaskResultRegistry()
   const tool = createTaskResultTool(registry)
