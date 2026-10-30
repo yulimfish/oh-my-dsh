@@ -262,7 +262,9 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
     if (!summary || !['completed', 'incomplete', 'failed'].includes(summary.status)) return false
     const existing = byParent.get(parent)?.get(stored.childId)
     if (existing) {
-      return existing.status === stored.status
+      return existing.status === summary.status && existing.output === summary.output
+        && existing.truncated === summary.truncated && existing.omittedNonText === summary.omittedNonText
+        && existing.stopReason === summary.stopReason
         && existing.updatedAt === stored.settledAt && existing.expiresAt === stored.expiresAt
     }
     const record = reserve(parent, stored.childId)

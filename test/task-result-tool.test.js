@@ -314,6 +314,32 @@ test('two concurrent readAsync calls restore the same snapshot idempotently', as
   await registry.dispose()
 })
 
+test('does not treat a changed persisted output as the same restored snapshot', async () => {
+  const parent = agent('changed-restore-output')
+  const first = persistedResult(parent.id, 'shared-child')
+  const second = { ...first, output: 'changed persisted output' }
+  const firstGate = deferred()
+  const secondGate = deferred()
+  let reads = 0
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => { reads += 1; return reads === 1 ? firstGate.promise : secondGate.promise },
+      list: async () => [],
+    },
+  })
+  const firstRead = registry.readAsync(parent, first.childId)
+  const secondRead = registry.readAsync(parent, first.childId)
+  firstGate.resolve(first)
+  assert.equal((await firstRead)?.output, first.output)
+  secondGate.resolve(second)
+  assert.equal(await secondRead, undefined, 'a different output is not an idempotent restore and must not reuse old text')
+  assert.equal(registry.read(parent, first.childId).output, first.output, 'the existing local evidence remains unchanged')
+  await registry.dispose()
+})
+
 test('restoring results does not write stale snapshots back to persistence', async () => {
   const parent = agent('restore-read-only')
   const stored = persistedResult(parent.id, 'stored-child')
