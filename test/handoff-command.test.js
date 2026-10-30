@@ -1567,6 +1567,16 @@ test('fails closed when the stop reason accessor throws without leaking errors',
   assert.equal(queued.length, 0)
 })
 
+test('fails closed on revoked proxy snapshots without leaking proxy errors', async () => {
+  const { proxy, revoke } = Proxy.revocable(failed({ status: 'incomplete', output: 'ordinary evidence' }), {})
+  revoke()
+  const { agent, queued, command } = fixture(proxy)
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /failed or incomplete/u)
+  assert.equal(queued.length, 0)
+})
+
 test('bounds the complete handoff prompt and marks additional evidence truncation', async () => {
   const { agent, queued, command } = fixture(failed({ output: 'x'.repeat(8_192) }))
   const response = await command.handler({ agent, rawInput: 'child-1' })
