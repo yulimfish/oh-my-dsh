@@ -2801,6 +2801,36 @@ test('format compatibility cached flat skill is invalidated when a same-name dir
   assert.equal((await provider.get(directory, { cwd })).content, 'DIRECTORY')
 })
 
+test('format compatibility rejects a cached flat skill when incomplete classification hides its new directory competitor', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'shared.md', '---\nname: shared\ndescription: Same\n---\nFLAT')
+  const { fs } = makeFileSystem()
+  const { ctx } = makeRegistry(fs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+    projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+  })
+  const cached = (await provider.list({ cwd })).candidates.find(candidate => candidate.name === 'shared')
+  await writeCompatibilityDocument(cwd, 'directory/SKILL.md', '---\nname: shared\ndescription: Same\n---\nDIRECTORY')
+  const stat = fs.stat
+  let failCompetitor = false
+  fs.stat = async (target, signal) => {
+    if (failCompetitor && target.targetKey.endsWith(`${path.sep}directory`)) {
+      const error = new Error('classification denied')
+      error.code = 'EACCES'
+      throw error
+    }
+    return stat(target, signal)
+  }
+  failCompetitor = true
+  assert.equal(await provider.get(cached, { cwd }), undefined)
+  const fresh = await provider.list({ cwd })
+  assert.equal(fresh.complete, false)
+  assert.equal(fresh.priorityComplete, false)
+  assert.equal(fresh.candidates.some(candidate => candidate.locator.resolverPath === '.opencode/skills/shared.md'), true)
+})
+
 for (const timing of ['before', 'during']) {
   test(`delivered directory change ${timing} provider loading rejects the stale candidate`, async t => {
     const cwd = await makeWorkspace(t)
@@ -3791,6 +3821,17 @@ test('format compatibility falls through an inaccessible canonical self-loop to 
   assert.equal(listed.complete, true, JSON.stringify(warnings))
   assert.deepEqual(listed.candidates.map(candidate => candidate.name), ['review'])
   assert.equal((await provider.get(cached, { cwd })).content, 'NAMED_FALLBACK')
+})
+
+test('format compatibility preserves valid siblings after a root-level symlink loop', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'good/SKILL.md', 'GOOD_BODY')
+  await symlink('loop', path.join(cwd, '.opencode/skills/loop'), 'dir')
+  const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const snapshot = await registry.snapshot({ cwd })
+  assert.equal(snapshot.complete, false)
+  assert.deepEqual(snapshot.skills.map(skill => skill.name), ['good'])
+  assert.equal((await registry.get('good', { cwd })).content, 'GOOD_BODY')
 })
 
 test('format compatibility does not treat a sibling loop as canonical absence', async t => {

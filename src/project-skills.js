@@ -1036,12 +1036,17 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     refresh,
     async list(lookup = {}) {
       const cwd = typeof lookup.cwd === 'string' ? lookup.cwd : ''
-      if (!cwd && userRoots.length === 0) return { candidates: [], complete: true }
+      if (!cwd && userRoots.length === 0) return { candidates: [], complete: true, priorityComplete: true }
       const signal = lifecycleSignal(lookup.signal, control.signal)
       const candidates = []
       const startingWatchRevision = watchRevision
       const startingObservationRevision = observationRevision
       let complete = true
+      let priorityComplete = true
+      const markIncomplete = () => {
+        complete = false
+        priorityComplete = false
+      }
       let scannedEntries = 0
       let scannedBytes = 0
       let scanExhausted = false
@@ -1050,7 +1055,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         const bounded = entries.slice(0, remaining)
         scannedEntries += bounded.length
         if (bounded.length < entries.length) {
-          complete = false
+          markIncomplete()
           scanExhausted = true
         }
         return bounded
@@ -1063,7 +1068,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         } catch (error) {
           if (signal?.aborted) throw error
           warn(ctx, 'dsh-omo could not resolve the skill lookup cwd', error)
-          if (userRoots.length === 0) return { candidates, complete: false }
+          if (userRoots.length === 0) return { candidates, complete: false, priorityComplete: false }
         }
       }
 
@@ -1073,9 +1078,9 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         const discoveryRoot = discoveryRoots[rootIndex]
         const userRoot = 'source' in discoveryRoot ? discoveryRoot : undefined
         const rootPath = discoveryRoot.rootPath
-        if (!userRoot && !cwdTarget) { complete = false; continue }
-        if (!userRoot && !await watchSymlinkParents(rootPath, cwd, cwdTarget, signal, startingWatchRevision)) complete = false
-        if (userRoot && !await watchAbsoluteSkillRoot(rootPath, cwd, signal, startingWatchRevision, false)) complete = false
+        if (!userRoot && !cwdTarget) { markIncomplete(); continue }
+        if (!userRoot && !await watchSymlinkParents(rootPath, cwd, cwdTarget, signal, startingWatchRevision)) markIncomplete()
+        if (userRoot && !await watchAbsoluteSkillRoot(rootPath, cwd, signal, startingWatchRevision, false)) markIncomplete()
         let rootTarget
         try {
           rootTarget = await fs.resolve(rootPath, { cwd, signal })
@@ -1084,38 +1089,57 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           warn(ctx, 'dsh-omo could not resolve a project skill root', error)
           if (error?.code === 'FS_NOT_FOUND') {
             if (userRoot) {
-              if (!await watchAbsoluteSkillRoot(rootPath, cwd, signal, startingWatchRevision, true)) complete = false
-            } else if (!await watchNearestExistingAncestor(rootPath, cwd, cwdTarget, signal, startingWatchRevision)) complete = false
+              if (!await watchAbsoluteSkillRoot(rootPath, cwd, signal, startingWatchRevision, true)) markIncomplete()
+            } else if (!await watchNearestExistingAncestor(rootPath, cwd, cwdTarget, signal, startingWatchRevision)) markIncomplete()
           } else {
-            complete = false
+            markIncomplete()
           }
           continue
         }
         try {
           if (!userRoot && !fs.contains(cwdTarget, rootTarget)) {
-            complete = false
+            markIncomplete()
             warn(ctx, 'dsh-omo skipped a project skill root outside its lookup cwd', new Error('Path containment rejected'))
             continue
           }
           if (userRoot) {
             const rootInfo = await fs.lstat(rootPath, { cwd, signal })
             if (!rootInfo || rootInfo.type !== 'directory') {
-              complete = false
+              markIncomplete()
               continue
             }
           }
-          if (!await ensureWatch(rootTarget, signal, startingWatchRevision, false, true)) complete = false
+          if (!await ensureWatch(rootTarget, signal, startingWatchRevision, false, true)) markIncomplete()
           const rootInfo = await fs.stat(rootTarget, signal)
           if (!rootInfo) continue
           if (rootInfo.type !== 'directory') {
             warn(ctx, 'dsh-omo skipped a project skill root that is not a directory', new Error('Not a directory'))
             continue
           }
-          const entries = limitEntries(await fs.listDir(rootTarget, signal))
+          let rootEntries
+          try {
+            rootEntries = await fs.listDir(rootTarget, signal)
+          } catch (error) {
+            if (signal?.aborted || !formatCompatibility || error?.code !== 'ELOOP') throw error
+            rootEntries = []
+            for (const entry of await readdir(fs.processPath(rootTarget), { withFileTypes: true })) {
+              try {
+                rootEntries.push({
+                  name: entry.name,
+                  type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other',
+                  target: await fs.resolve(`${rootPath}/${entry.name}`, { cwd, signal }),
+                })
+              } catch (entryError) {
+                if (signal?.aborted || entryError?.code !== 'ELOOP') throw entryError
+                complete = false
+              }
+            }
+          }
+          const entries = limitEntries(rootEntries)
           let orderedEntries
           if (formatCompatibility) {
             if (entries.length > 0 && candidates.length >= MAX_SKILLS) {
-              complete = false
+              markIncomplete()
               scanExhausted = true
               continue
             }
@@ -1128,17 +1152,17 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
               throwIfAborted(signal)
               let info
               try {
-                if (!isSafeEntryName(entry?.name)) { complete = false; continue }
+                if (!isSafeEntryName(entry?.name)) { markIncomplete(); continue }
                 if (entry.name.startsWith('.') || !fs.contains(rootTarget, entry.target)) continue
                 info = await fs.stat(entry.target, signal)
               } catch (error) {
                 if (signal?.aborted) throw error
-                if (error?.code === 'ELOOP') complete = false
-                complete = false
+                if (error?.code === 'ELOOP') markIncomplete()
+                markIncomplete()
                 warn(ctx, 'dsh-omo could not classify a project skill entry')
                 continue
               }
-              if (!info) { complete = false; continue }
+              if (!info) { markIncomplete(); continue }
               const classified = { entry, classifiedType: info.type }
               if (info.type === 'directory') directoriesFirst.push(classified)
               else remaining.push(classified)
@@ -1155,24 +1179,24 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
             try {
               throwIfAborted(signal)
               if (candidates.length >= MAX_SKILLS) {
-                complete = false
+                markIncomplete()
                 scanExhausted = true
                 break
               }
               if (!isSafeEntryName(entry.name)) {
-                complete = false
+                markIncomplete()
                 continue
               }
               if (formatCompatibility && entry.name.startsWith('.')) continue
               if (!fs.contains(rootTarget, entry.target)) continue
               const entryInfo = await fs.stat(entry.target, signal)
               if (!entryInfo) {
-                complete = false
+                markIncomplete()
                 continue
               }
               if (formatCompatibility && entryInfo.type !== classifiedType) {
                 // The ordering decision may have become stale since classification.
-                complete = false
+                markIncomplete()
                 continue
               }
 
@@ -1181,7 +1205,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
               let resolverPath
               if (entryInfo.type === 'directory') {
                 skillDirectoryTarget = entry.target
-                if (!await ensureWatch(skillDirectoryTarget, signal, startingWatchRevision, false, true)) complete = false
+                if (!await ensureWatch(skillDirectoryTarget, signal, startingWatchRevision, false, true)) markIncomplete()
                 let allChildren
                 let danglingCanonical = false
                 if (formatCompatibility) {
@@ -1213,7 +1237,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                     } catch (error) {
                       if (signal?.aborted || error?.code !== 'ELOOP') throw error
                       if (entry.name === 'SKILL.md') danglingCanonical = true
-                      else if (entry.name !== `${directoryName}.md`) complete = false
+                      else if (entry.name !== `${directoryName}.md`) markIncomplete()
                     }
                   }
                 }
@@ -1240,7 +1264,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 if (!skillFile && formatCompatibility && children.length === allChildren.length) {
                   canonicalConfirmedAbsent = danglingCanonical || children.every(child => child.name !== 'SKILL.md')
                   if (!canonicalConfirmedAbsent) {
-                    complete = false
+                    markIncomplete()
                     continue
                   }
                   skillFile = children.find(child => child.name === `${directoryName}.md`)
@@ -1268,7 +1292,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                           if (!namedInfo) continue
                         }
                         const childInfo = await fs.stat(child.target, signal)
-                        if (!childInfo) { complete = false; continue }
+                        if (!childInfo) { markIncomplete(); continue }
                         if (childInfo.type === 'directory') {
                           nestedDirectories.push({
                             entry: child,
@@ -1287,7 +1311,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                       } catch (error) {
                         if (signal?.aborted) throw error
                         if (error?.code === 'ELOOP' && child.name === `${directoryName}.md`) continue
-                        complete = false
+                        markIncomplete()
                         warn(ctx, 'dsh-omo could not classify a nested project skill directory')
                       }
                     }
@@ -1301,7 +1325,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 if (!fs.contains(rootTarget, skillFile.target)) continue
                 skillFileInfo ??= await fs.stat(skillFile.target, signal)
                 if (!skillFileInfo) {
-                  complete = false
+                  markIncomplete()
                   continue
                 }
                 if (skillFileInfo.type !== 'file' || !fs.contains(rootTarget, skillFile.target)) continue
@@ -1315,10 +1339,10 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 continue
               }
 
-              if (!await ensureWatch(fileTarget, signal, startingWatchRevision, true)) complete = false
+              if (!await ensureWatch(fileTarget, signal, startingWatchRevision, true)) markIncomplete()
               const remainingBytes = MAX_SCAN_BYTES - scannedBytes
               if (remainingBytes <= 0) {
-                complete = false
+                markIncomplete()
                 scanExhausted = true
                 break
               }
@@ -1327,35 +1351,35 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 const formatPaths = formatCompatibility ? skillFormatPaths(rootPath, resolverPath) : undefined
                 if (formatCompatibility && !formatPaths) continue
                 if (formatCompatibility && !await formatPathsStillEligible(formatPaths, cwd, signal)) {
-                  complete = false
+                  markIncomplete()
                   continue
                 }
                 if (!await isContainedSkillPath(ctx, { cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal, allowSymlink: !formatCompatibility || entryInfo.type !== 'file' })) {
-                  complete = false
+                  markIncomplete()
                   continue
                 }
                 skill = await readSkillFile(ctx, fileTarget, signal, Math.min(MAX_SKILL_BYTES, remainingBytes), { formatCompatibility, defaultName: formatPaths?.defaultName, modelScope: userRoot?.source === 'user-opencode' || rootPath === '.opencode/skills' || rootPath === '.opencode/skill' ? 'opencode' : 'claude-code' })
                 scannedBytes += skill.byteLength
                 if (formatCompatibility && !await formatPathsStillEligible(formatPaths, cwd, signal)) {
-                  complete = false
+                  markIncomplete()
                   continue
                 }
                 if (!await isContainedSkillPath(ctx, { cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal, allowSymlink: !formatCompatibility || entryInfo.type !== 'file' })) {
-                  complete = false
+                  markIncomplete()
                   continue
                 }
               } catch (error) {
                 if (signal?.aborted) throw error
                 if (!skill && Number.isSafeInteger(error?.bytesRead) && error.bytesRead > 0) scannedBytes += error.bytesRead
                 if (error instanceof ScanBudgetError) {
-                  complete = false
+                  markIncomplete()
                   scanExhausted = true
                   break
                 }
                 if (error instanceof SkillFormatError) {
                   warn(ctx, 'dsh-omo skipped an invalid project skill file', error)
                 } else {
-                  complete = false
+                  markIncomplete()
                   warn(ctx, 'dsh-omo could not read a project skill file', error)
                 }
                 continue
@@ -1372,19 +1396,20 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
               if (error instanceof SkillFormatError) {
                 warn(ctx, 'dsh-omo skipped an invalid project skill file', error)
               } else {
-                complete = false
+                markIncomplete()
                 warn(ctx, 'dsh-omo could not process a project skill entry')
               }
             }
           }
         } catch (error) {
           if (signal?.aborted) throw error
-          complete = false
+          markIncomplete()
           warn(ctx, 'dsh-omo could not list a project skill root', error)
         }
       }
       throwIfAborted(signal)
-      return { candidates, complete: complete && startingWatchRevision === watchRevision && startingObservationRevision === observationRevision }
+      const stable = startingWatchRevision === watchRevision && startingObservationRevision === observationRevision
+      return { candidates, complete: complete && stable, priorityComplete: priorityComplete && stable }
     },
     async get(candidate, lookup = {}) {
       const locator = candidate?.locator
@@ -1458,7 +1483,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           const fresh = await provider.list({ cwd: lookup.cwd, signal })
           throwIfAborted(signal)
           const current = fresh.candidates.find(item => item.name === candidate.name)
-          if (!fresh.complete || !current
+          if (!fresh.priorityComplete || !current
             || current.locator.rootPath !== locator.rootPath || current.locator.resolverPath !== locator.resolverPath
             || current.locator.fileTarget.targetKey !== locator.fileTarget.targetKey) {
             invalidateObservation()
