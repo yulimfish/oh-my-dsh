@@ -522,8 +522,8 @@ async function scopeStillMatches(fs, cwd, before, signal) {
     && before.directories.every((directory, index) => sameDirectory(directory, after.directories[index]))
 }
 
-function directMarkdownName(entry) {
-  if (!isObject(entry) || entry.type !== 'file' || typeof entry.name !== 'string'
+function directMarkdownName(entry, allowContainedSymlinks = false) {
+  if (!isObject(entry) || (entry.type !== 'file' && (!allowContainedSymlinks || entry.type !== 'symlink')) || typeof entry.name !== 'string'
     || entry.name.length > MAX_COMMAND_NAME_CHARS + 3 || !entry.name.endsWith('.md')) return undefined
   const name = entry.name.slice(0, -3)
   return isProjectCommandName(name) ? name : undefined
@@ -661,18 +661,19 @@ export function parseProjectCommandDocument(name, input, source = 'opencode', op
   return Object.freeze({ name, description: description.trim(), ...(argumentHint === undefined ? {} : { argumentHint }), body: outputBody })
 }
 
-async function readProjectCommand(fs, cwd, scope, directory, entry, name, signal, readBudget, parseOptions) {
+async function readProjectCommand(fs, cwd, scope, directory, entry, name, signal, readBudget, parseOptions, allowContainedSymlinks = false) {
   const relativePath = directory.userRoot ? join(directory.path, `${name}.md`) : `${directory.path}/${name}.md`
   const containmentRoot = directory.boundaryTarget ?? scope.rootTarget
   const listedKey = targetKey(entry?.target)
-  if (!listedKey || entry?.name !== `${name}.md` || entry?.type !== 'file') return undefined
+  if (!listedKey || entry?.name !== `${name}.md`
+    || (entry?.type !== 'file' && (!allowContainedSymlinks || entry?.type !== 'symlink'))) return undefined
 
   const pathInfo = await awaitWithSignal(() => fs.lstat(relativePath, { cwd, signal }), signal)
   assertNotAborted(signal)
-  if (pathInfo?.type !== 'file') return undefined
+  if (pathInfo?.type !== 'file' && (!allowContainedSymlinks || pathInfo?.type !== 'symlink')) return undefined
   const target = await resolveTarget(fs, relativePath, cwd, signal)
   assertNotAborted(signal)
-  if (!targetKey(target) || targetKey(target) !== listedKey
+  if (!targetKey(target) || (entry.type === 'file' && targetKey(target) !== listedKey)
     || !safeContainment(fs, containmentRoot, target)
     || !safeContainment(fs, directory.target, target)) return undefined
   const beforeInfo = await safeStat(fs, target, signal)
@@ -696,7 +697,7 @@ async function readProjectCommand(fs, cwd, scope, directory, entry, name, signal
 
   const afterPathInfo = await awaitWithSignal(() => fs.lstat(relativePath, { cwd, signal }), signal)
   assertNotAborted(signal)
-  if (afterPathInfo?.type !== 'file') return undefined
+  if (afterPathInfo?.type !== 'file' && (!allowContainedSymlinks || afterPathInfo?.type !== 'symlink')) return undefined
   const afterTarget = await resolveTarget(fs, relativePath, cwd, signal)
   assertNotAborted(signal)
   if (targetKey(afterTarget) !== targetKey(target)
@@ -727,6 +728,7 @@ export function createProjectCommandAdapter(fs, options = {}) {
   const allowEmptyBody = options.allowEmptyBody === true
   const preserveBodyLineEndings = options.preserveBodyLineEndings === true
   const nearestProjectOpenCode = options.nearestProjectOpenCode === true
+  const allowContainedSymlinks = options.allowContainedSymlinks === true
   const commandFs = fs
   const callFs = createFilesystemCallGate()
   if (!sessions || typeof sessions.get !== 'function') throw new TypeError('Project commands require DSH sessions.get.')
@@ -784,7 +786,7 @@ export function createProjectCommandAdapter(fs, options = {}) {
       listedEntries += boundedEntries.length
       if (entries.length > remaining) truncated = true
       for (const entry of boundedEntries) {
-        const name = directMarkdownName(entry)
+        const name = directMarkdownName(entry, allowContainedSymlinks)
         if (!name) continue
         candidates.push({ directory, entry, name, priority })
       }
@@ -809,7 +811,7 @@ export function createProjectCommandAdapter(fs, options = {}) {
       }
       let command
       try {
-        command = await readProjectCommand(gatedFs, cwd, scope, directory, entry, name, signal, readBudget, { allowEmptyDescription, allowBlankDisplayMetadata, allowUnterminatedFrontmatter, allowMalformedFrontmatter, allowEmptyBody, preserveBodyLineEndings })
+        command = await readProjectCommand(gatedFs, cwd, scope, directory, entry, name, signal, readBudget, { allowEmptyDescription, allowBlankDisplayMetadata, allowUnterminatedFrontmatter, allowMalformedFrontmatter, allowEmptyBody, preserveBodyLineEndings }, allowContainedSymlinks)
       } catch (error) {
         if (signal?.aborted || error === ABORTED) throw ABORTED
         if (error === FS_BUSY) throw FS_BUSY

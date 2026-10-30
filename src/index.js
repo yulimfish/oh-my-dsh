@@ -197,6 +197,7 @@ export const Config = z.object({
   enableProjectCommandEmptyBody: z.boolean().default(false),
   enableProjectCommandPreserveBodyLineEndings: z.boolean().default(false),
   enableNearestProjectOpenCodeCommands: z.boolean().default(false),
+  enableProjectCommandContainedSymlinks: z.boolean().default(false),
   enableAutomaticSlashCommands: z.boolean().default(false),
   enableProjectRootCommands: z.boolean().default(false),
   projectCommandsRoot: z.string().default(''),
@@ -677,7 +678,7 @@ function sameProjectCommandScan(left, right) {
   })
 }
 
-function createProjectCommandManager(ctx, sessionsService, agentsService, lifecycle, userOpenCodeCommandRoots, userClaudeCommandRoots, promptFileExpander, enableWatch, projectCommandsRoot, commandRoutes, launchTask, enableAutomatic = false, allowEmptyDescription = false, userAgentsCommandRoots = [], allowBlankDisplayMetadata = false, allowUnterminatedFrontmatter = false, allowMalformedFrontmatter = false, allowEmptyBody = false, preserveBodyLineEndings = false, nearestProjectOpenCode = false) {
+function createProjectCommandManager(ctx, sessionsService, agentsService, lifecycle, userOpenCodeCommandRoots, userClaudeCommandRoots, promptFileExpander, enableWatch, projectCommandsRoot, commandRoutes, launchTask, enableAutomatic = false, allowEmptyDescription = false, userAgentsCommandRoots = [], allowBlankDisplayMetadata = false, allowUnterminatedFrontmatter = false, allowMalformedFrontmatter = false, allowEmptyBody = false, preserveBodyLineEndings = false, nearestProjectOpenCode = false, allowContainedSymlinks = false) {
   const adapter = createProjectCommandAdapter(ctx.fs, {
     sessions: sessionsService,
     userOpenCodeCommandRoots,
@@ -691,6 +692,7 @@ function createProjectCommandManager(ctx, sessionsService, agentsService, lifecy
     allowEmptyBody,
     preserveBodyLineEndings,
     nearestProjectOpenCode,
+    allowContainedSymlinks,
   })
   const scopes = new Map()
   const refreshing = new Set()
@@ -3899,6 +3901,9 @@ export function apply(ctx, rawConfig) {
   if (config.enableProjectCommandPreserveBodyLineEndings && config.enableProjectCommands !== true) {
     throw new Error('dsh-omo: enableProjectCommandPreserveBodyLineEndings requires enableProjectCommands')
   }
+  if (config.enableProjectCommandContainedSymlinks && config.enableProjectCommands !== true) {
+    throw new Error('dsh-omo: enableProjectCommandContainedSymlinks requires enableProjectCommands')
+  }
   if (config.enableNearestProjectOpenCodeCommands && config.enableProjectRootCommands !== true) {
     throw new Error('dsh-omo: enableNearestProjectOpenCodeCommands requires enableProjectRootCommands')
   }
@@ -4375,6 +4380,7 @@ export function apply(ctx, rawConfig) {
       config.enableProjectCommandEmptyBody === true,
       config.enableProjectCommandPreserveBodyLineEndings === true,
       config.enableNearestProjectOpenCodeCommands === true,
+      config.enableProjectCommandContainedSymlinks === true,
     )
     : undefined
   ctx.tools.register(specialist.tool)

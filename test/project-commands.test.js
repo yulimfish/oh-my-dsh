@@ -123,6 +123,7 @@ function fixture(options = {}) {
     allowEmptyBody: options.allowEmptyBody,
     preserveBodyLineEndings: options.preserveBodyLineEndings,
     nearestProjectOpenCode: options.nearestProjectOpenCode,
+    allowContainedSymlinks: options.allowContainedSymlinks,
   })
   return { ...memory, agent, session, sessions, adapter }
 }
@@ -613,6 +614,25 @@ test('lists only direct .md commands from the exact project cwd', async () => {
   assert.deepEqual(listedNames(state), [`${CWD}/${PROJECT_COMMAND_DIRECTORY}`])
   assert.equal(readCalls(state).length, 1)
   assert.ok(state.calls.every(call => call.method !== 'listDir' || call.target.path === `${CWD}/${PROJECT_COMMAND_DIRECTORY}`))
+})
+
+test('opt-in loads only contained file symlinks with canonical containment and stable targets', async () => {
+  const root = `${CWD}/${PROJECT_COMMAND_DIRECTORY}`
+  const state = fixture({ allowContainedSymlinks: true, fsOptions: { aliases: {
+    [`${root}/review.md`]: `${root}/actual.md`,
+    [`${root}/escape.md`]: `${CWD}/outside.md`,
+  } } })
+  state.addFile(`${root}/actual.md`, VALID)
+  state.addSymlink(`${root}/review.md`)
+  state.addSymlink(`${root}/escape.md`)
+  state.addFile(`${CWD}/outside.md`, VALID)
+  const commands = await state.adapter.list(state.agent)
+  assert.deepEqual(commands.commands.map(command => command.name), ['actual', 'review'])
+  assert.equal(readCalls(state).length, 2)
+  const strict = fixture({ fsOptions: { aliases: { [`${root}/review.md`]: `${root}/actual.md` } } })
+  strict.addFile(`${root}/actual.md`, VALID)
+  strict.addSymlink(`${root}/review.md`)
+  assert.deepEqual((await strict.adapter.list(strict.agent)).commands.map(command => command.name), ['actual'])
 })
 
 test('discovers and queues plain Markdown commands without frontmatter', async () => {
