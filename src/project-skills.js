@@ -27,7 +27,7 @@ const FRONTMATTER_FIELDS = new Set([
 const JSON_TAG_RESOLVERS = Object.freeze({
   'tag:yaml.org,2002:str': value => value,
   'tag:yaml.org,2002:null': (value, onError) => {
-    if (value === 'null') return null
+    if (value === 'null' || value === '') return null
     onError(`cannot resolve null scalar ${JSON.stringify(value)}`)
     return value
   },

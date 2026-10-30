@@ -2911,6 +2911,16 @@ test('format compatibility treats an unclosed frontmatter opener as plain Markdo
   assert.equal(skill.content, source)
 })
 
+test('format compatibility accepts an explicitly empty null tag while preserving sibling metadata', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'empty-tagged-null.md', '---\nname: !!null ""\ndescription: Custom description\n---\nBody.\n')
+  const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
+  const skill = await registry.get('empty-tagged-null', { cwd })
+  assert.ok(skill)
+  assert.equal(skill.description, '(opencode-project - Skill) Custom description')
+  assert.equal(skill.content, 'Body.')
+})
+
 test('format compatibility rewrites only bounded nonescaping file-like references', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'guide/SKILL.md', 'Consult @references/guide.md and @docs/.\nKeep @../outside.md, @not-a-path, and mail@example.com.\nKeep @data/#/../../../../outside.txt and @data/file.md\\..\\..\\outside.txt.\nKeep @docs/../..cache/file.md now.\nConsult @references/guide.md now.\n')
