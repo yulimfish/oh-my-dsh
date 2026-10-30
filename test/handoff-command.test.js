@@ -826,6 +826,23 @@ test('rejects a missing status during synchronous revalidation', async () => {
   assert.equal(queued.length, 0)
 })
 
+test('rejects invalid status values during synchronous revalidation', async () => {
+  const stale = failed({ status: 'incomplete', output: 'same evidence' })
+  for (const status of [new String('incomplete'), { value: 'incomplete' }, 'running', 'completed']) {
+    const current = { ...stale, status }
+    const agent = { id: 'parent-invalid-status-revalidation' }
+    const queued = []
+    const command = createHandoffCommand({
+      readAsync: async () => stale,
+      read: () => current,
+    }, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', String(status))
+    assert.match(response.text, /result changed while handoff was being prepared/u)
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('rejects handoff when any retained evidence field changes before enqueue', async () => {
   for (const change of [
     { status: 'failed' },
