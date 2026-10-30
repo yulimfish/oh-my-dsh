@@ -653,6 +653,23 @@ test('does not trust an unversioned async snapshot after same-child replacement'
   await registry.dispose()
 })
 
+test('rejects status-only changes during handoff revalidation', async () => {
+  for (const [from, to] of [['incomplete', 'failed'], ['failed', 'incomplete']]) {
+    const stale = failed({ status: from, output: '', stopReason: undefined })
+    const current = { ...stale, status: to }
+    const agent = { id: 'parent-status-revalidation' }
+    const queued = []
+    const command = createHandoffCommand({
+      readAsync: async () => stale,
+      read: () => current,
+    }, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error', `${from} -> ${to}`)
+    assert.match(response.text, /result changed while handoff was being prepared/u)
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('rejects handoff when any retained evidence field changes before enqueue', async () => {
   for (const change of [
     { status: 'failed' },
