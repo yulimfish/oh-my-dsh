@@ -182,8 +182,23 @@ test('returns a bounded error when the handoff queue rejects delivery', async ()
   })
   const response = await command.handler({ agent: { id: 'parent-1' }, rawInput: 'child-1' })
   assert.equal(response.kind, 'error')
-  assert.match(response.text, /Could not queue/u)
+  assert.match(response.text, /delivery was uncertain/u)
   assert.equal(response.text.includes('private queue failure'), false)
+})
+
+test('does not claim no delivery when queueing fails after partial acceptance', async () => {
+  let accepted = false
+  const command = createHandoffCommand({ read: () => failed() }, {
+    queueMessage() {
+      accepted = true
+      throw new Error('private delivery failure')
+    },
+  })
+  const response = await command.handler({ agent: { id: 'parent-1' }, rawInput: 'child-1' })
+  assert.equal(accepted, true)
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /delivery was uncertain|inspect the current Agent/iu)
+  assert.doesNotMatch(response.text, /no handoff was queued/iu)
 })
 
 test('bounds the complete handoff prompt and marks additional evidence truncation', async () => {

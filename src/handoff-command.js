@@ -111,7 +111,7 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
           'Review this evidence against the current user request. Start a NEW bounded dsh_omo_task only if it is useful, with a self-contained prompt and appropriate role; do not reuse the old child ID, assume its workspace or conversation survives, or claim transparent resume. Verify any new result independently. This handoff itself started no worker and changed no Goal state.',
         ].filter(Boolean).join('\n'))
       } catch {
-        return result('error', 'Could not queue the new-task handoff; no child was resumed or started.')
+        return result('error', 'Handoff delivery was uncertain; inspect the current Agent before retrying. No child was resumed or started by this command.')
       }
       if (args?.signal?.aborted) return result('error', 'Task handoff was cancelled after delivery; inspect the current Agent before starting a new task.')
       if (isParentCurrent) {
