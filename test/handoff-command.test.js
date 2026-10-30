@@ -416,6 +416,33 @@ test('rejects malformed persisted incomplete evidence instead of sanitizing it i
   }
 })
 
+test('accepts persisted results at the exact TTL boundary', async () => {
+  const agent = { id: 'parent-persisted-exact-ttl' }
+  for (const status of ['failed', 'incomplete']) {
+    const stored = {
+      parentId: agent.id, childId: 'child-1', status, output: 'exact TTL evidence',
+      truncated: false, omittedNonText: false, settledAt: 900, expiresAt: 900 + 30 * 60 * 1_000,
+    }
+    const registry = createTaskResultRegistry({
+      now: () => 1_000,
+      persistentStore: {
+        put: async () => true,
+        delete: async () => true,
+        read: async () => stored,
+        list: async () => [stored],
+      },
+    })
+    const queued = []
+    const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'success', status)
+    assert.equal(queued.length, 1, status)
+    if (status === 'incomplete') assert.match(queued[0][1], /exact TTL evidence/u)
+    else assert.match(queued[0][1], /no recovery evidence is available/u)
+    await registry.dispose()
+  }
+})
+
 test('rejects over-TTL persisted results even before their expiry time', async () => {
   const agent = { id: 'parent-persisted-ttl' }
   for (const status of ['failed', 'incomplete']) {
