@@ -261,6 +261,15 @@ test('omits blank stop reason metadata in handoff', async () => {
   assert.doesNotMatch(queued[0][1], /stop reason:/u)
 })
 
+test('preserves truncation caveats when handoff has no retained text', async () => {
+  const { agent, queued, command } = fixture(failed({ output: '', truncated: true, omittedNonText: true }))
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+  assert.equal(response.kind, 'success')
+  assert.match(queued[0][1], /output was truncated/u)
+  assert.match(queued[0][1], /Non-text result blocks were omitted/u)
+  assert.match(queued[0][1], /no retained child output/u)
+})
+
 test('preserves exact child identity when preparing handoff evidence', async () => {
   const { agent, queued, calls, command } = fixture(failed({ childId: 'child-unicode-任务' }))
   const response = await command.handler({ agent, rawInput: 'child-unicode-任务 inspect next' })
