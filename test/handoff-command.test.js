@@ -624,6 +624,18 @@ test('labels failed handoff with no retained output and stop reason', async () =
   assert.doesNotMatch(queued[0][1], /Investigation stopped at a failing test/u)
 })
 
+test('accepts failed empty output with a stop reason but no truncation claims', async () => {
+  const { agent, queued, command } = fixture(failed({ output: '', stopReason: 'timeout', truncated: false, omittedNonText: false }))
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect timeout state' })
+  assert.equal(response.kind, 'success')
+  const prompt = queued[0][1]
+  assert.match(prompt, /Recorded status: failed; stop reason: timeout/u)
+  assert.match(prompt, /no recovery evidence is available/u)
+  assert.match(prompt, /inspect timeout state/u)
+  assert.doesNotMatch(prompt, /output was truncated/u)
+  assert.doesNotMatch(prompt, /Non-text result blocks were omitted/u)
+})
+
 test('uses failure-state guidance instead of inspecting nonexistent evidence by default', async () => {
   const { agent, queued, command } = fixture(failed({ output: '', stopReason: 'failed' }))
   const response = await command.handler({ agent, rawInput: 'child-1' })
