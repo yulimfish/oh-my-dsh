@@ -846,6 +846,25 @@ test('retains long-running entries and expires terminal results from settlement 
   assert.equal(registry.read(parent, 'long-running-child'), undefined, 'listing and reading do not extend the result TTL')
 })
 
+test('rejects a persisted snapshot whose expiry equals the restore time', async () => {
+  const parent = agent('restore-exact-expiry')
+  const stored = { ...persistedResult(parent.id, 'expired-child'), expiresAt: 100 }
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => stored,
+      list: async () => [stored],
+    },
+  })
+  assert.equal(await registry.readAsync(parent, stored.childId), undefined)
+  assert.equal(registry.read(parent, stored.childId), undefined)
+  assert.deepEqual(await registry.listAsync(parent), [])
+  assert.equal(registry.size(), 0)
+  await registry.dispose()
+})
+
 test('restored terminal results expire at their original settlement deadline', async () => {
   let time = 199
   const parent = agent('restored-expiry')
