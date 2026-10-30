@@ -977,6 +977,18 @@ test('keeps stop reason bounded after invisible cleanup and truncation', async (
   }
 })
 
+test('rejects over-budget stop reason markers instead of truncating partial boundaries', async () => {
+  for (const marker of ['--- BEGIN CHILD EVIDENCE ---', '--- END CHILD EVIDENCE ---']) {
+    const stopReason = `${'x'.repeat(70)}${marker}`
+    assert.equal(stopReason.length > 80, true)
+    const { agent, queued, command } = fixture(failed({ stopReason }))
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'error')
+    assert.match(response.text, /failed or incomplete/u)
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('bounds stop reason after metadata sanitization', async () => {
   const { agent, queued, command } = fixture(failed({ stopReason: `timeout ${'x'.repeat(200)}` }))
   const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
