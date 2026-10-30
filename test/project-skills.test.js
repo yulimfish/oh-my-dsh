@@ -3021,7 +3021,7 @@ test('format compatibility derives flat and directory names for absent or falsy 
   for (const [relative, , name] of documents) {
     const skill = await registry.get(name, { cwd })
     assert.ok(skill, relative)
-    assert.equal(skill.description, `(opencode-project - Skill) ${name === 'description-only' ? 'Explicit description' : name === 'scalar-demo' ? '0123' : name === 'fallback' ? 'Demo' : `Project skill ${name}`}`)
+    assert.equal(skill.description, `(opencode-project - Skill) ${name === 'description-only' ? 'Explicit description' : name === 'scalar-demo' ? '0123' : name === 'fallback' ? 'Demo' : ''}`)
     assert.ok(skill.content.includes('body.'))
   }
   assert.equal((await registry.get('indented-guide', { cwd })).content, 'body.\r\n\tindented line')
@@ -3061,7 +3061,7 @@ test('format compatibility treats an EOF closing delimiter as plain Markdown lik
   const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
   const skill = await registry.get('flat-demo', { cwd })
   assert.ok(skill)
-  assert.equal(skill.description, '(opencode-project - Skill) Project skill flat-demo')
+  assert.equal(skill.description, '(opencode-project - Skill) ')
   assert.equal(skill.content, source)
   const strict = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills'] })
@@ -3075,7 +3075,7 @@ test('format compatibility treats an unclosed frontmatter opener as plain Markdo
   const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
   const skill = await registry.get('unclosed', { cwd })
   assert.ok(skill)
-  assert.equal(skill.description, '(opencode-project - Skill) Project skill unclosed')
+  assert.equal(skill.description, '(opencode-project - Skill) ')
   assert.equal(skill.content, source)
 })
 
@@ -3100,6 +3100,35 @@ test('format compatibility exposes reserved metadata directly during list and ca
   assert.equal(skill.metadata.rank, 2)
   assert.equal(skill.metadata.metadata, undefined)
   assert.equal(skill.content, 'Body.')
+})
+
+test('format compatibility preserves non-record metadata verbatim during list and cached get', async t => {
+  for (const [source, expected] of [
+    ['null', null],
+    ['ab', 'ab'],
+    ['7', 7],
+    ['true', true],
+    ['[x, 2, false]', ['x', 2, false]],
+  ]) {
+    const cwd = await makeWorkspace(t)
+    await writeCompatibilityDocument(cwd, 'chosen.md', `---\nname: chosen\ndescription: Custom\nmetadata: ${source}\n---\nBody.\n`)
+    const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+    const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'], formatCompatibility: true })
+    t.after(() => registration.dispose())
+    const lifetime = new AbortController()
+    t.after(() => lifetime.abort())
+    const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, {
+      projectSkillDirs: ['.opencode/skills'], formatCompatibility: true,
+    })
+    const listed = await provider.list({ cwd })
+    const candidate = listed.candidates.find(item => item.name === 'chosen')
+    assert.deepEqual(candidate.metadata, expected, source)
+    const skill = await provider.get(candidate, { cwd })
+    assert.deepEqual(skill.metadata, expected, source)
+    const registered = await registry.get('chosen', { cwd })
+    assert.ok(registered, source)
+    assert.deepEqual(registered.metadata, expected, source)
+  }
 })
 
 test('format compatibility accepts an explicitly empty null tag while preserving sibling metadata', async t => {
@@ -3141,7 +3170,7 @@ test('format compatibility recovers from overflowing explicit integer metadata',
   const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
   const skill = await registry.get('flat-demo', { cwd })
   assert.ok(skill)
-  assert.equal(skill.description, '(opencode-project - Skill) Project skill flat-demo')
+  assert.equal(skill.description, '(opencode-project - Skill) ')
   assert.equal(skill.metadata, undefined)
   assert.equal(skill.content, 'Body.')
   assert.equal(await registry.get('chosen', { cwd }), undefined)
@@ -3153,7 +3182,7 @@ test('format compatibility recovers from overflowing explicit float metadata', a
   const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
   const skill = await registry.get('flat-demo', { cwd })
   assert.ok(skill)
-  assert.equal(skill.description, '(opencode-project - Skill) Project skill flat-demo')
+  assert.equal(skill.description, '(opencode-project - Skill) ')
   assert.equal(skill.metadata, undefined)
   assert.equal(skill.content, 'Body.')
   assert.equal(await registry.get('chosen', { cwd }), undefined)
@@ -3291,10 +3320,10 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
   const cwd = await makeWorkspace(t)
   const invalid = [
     ['blank-name.md', '---\nname: "   "\n---\nPrivate body.'],
-    ['null-name.md', '---\nname: null\ndescription: "   "\n---\nPrivate body.'],
+    ['null name.md', '---\nname: null\ndescription: invalid/name\n---\nPrivate body.'],
     ['bad-name.md', '---\nname: invalid/name\n---\nPrivate body.'],
-    ['blank-description.md', '---\ndescription: "   "\n---\nPrivate body.'],
-    ['null-description.md', '---\ndescription: "   "\n---\nPrivate body.'],
+    ['blank-description.md', '---\nname: invalid/name\ndescription: "   "\n---\nPrivate body.'],
+    ['null-description.md', '---\nname: invalid/name\ndescription: "   "\n---\nPrivate body.'],
     ['control.md', '---\nname: "bad\\u202evalue"\n---\nPrivate body.'],
     ['Bad Name.md', '---\nname: null\n---\nPrivate body.'],
     ['bad name/bad name.md', '---\nname: ""\n---\nPrivate body.'],
@@ -3325,17 +3354,17 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
   const { registry: recoveredRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
   const recovered = await recoveredRegistry.get('broken', { cwd })
   assert.equal(recovered.content, 'Recovered body.')
-  assert.equal(recovered.description, '(opencode-project - Skill) Project skill broken')
+  assert.equal(recovered.description, '(opencode-project - Skill) ')
   await writeCompatibilityDocument(cwd, 'duplicate.md', '---\nname: first\nname: second\n---\nRecovered body.\n')
   const { registry: duplicateRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
   const duplicate = await duplicateRegistry.get('duplicate', { cwd })
   assert.equal(duplicate.content, 'Recovered body.')
-  assert.equal(duplicate.description, '(opencode-project - Skill) Project skill duplicate')
+  assert.equal(duplicate.description, '(opencode-project - Skill) ')
   await writeCompatibilityDocument(cwd, 'complex-key.md', '---\nname: chosen\ndescription: Custom\n? [a,b]\n: c\n---\nBody.\n')
   const { registry: complexRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
   const complex = await complexRegistry.get('complex-key', { cwd })
   assert.equal(complex.content, 'Body.')
-  assert.equal(complex.description, '(opencode-project - Skill) Project skill complex-key')
+  assert.equal(complex.description, '(opencode-project - Skill) ')
   assert.equal(complex.metadata, undefined)
   assert.equal(await complexRegistry.get('chosen', { cwd }), undefined)
   for (const [name, source] of [
@@ -3347,7 +3376,7 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
     const derived = name.replace(/\.md$/u, '')
     const skill = await registry.get(derived, { cwd })
     assert.equal(skill.content, 'Body.')
-    assert.equal(skill.description, `(opencode-project - Skill) Project skill ${derived}`)
+    assert.equal(skill.description, '(opencode-project - Skill) ')
     assert.equal(skill.metadata, undefined)
     assert.equal(await registry.get('chosen', { cwd }), undefined)
   }
@@ -3359,7 +3388,7 @@ test('format compatibility rejects explicit invalid metadata, malformed YAML, co
   const { registry: taggedRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
   const tagged = await taggedRegistry.get('good', { cwd })
   assert.equal(tagged.content, 'Recovered body.')
-  assert.equal(tagged.description, '(opencode-project - Skill) Project skill good')
+  assert.equal(tagged.description, '(opencode-project - Skill) ')
   const strict = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(strict.ctx, { projectSkillDirs: ['.opencode/skills'] })
   assert.equal(await strict.registry.get('broken', { cwd }), undefined)

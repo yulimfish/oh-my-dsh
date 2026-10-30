@@ -363,11 +363,11 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
 
   const name = formatCompatibility ? String(frontmatter.name || defaultName) : frontmatter.name
   const description = formatCompatibility
-    ? String(frontmatter.description || `Project skill ${name}`)
+    ? String(frontmatter.description || '')
     : frontmatter.description
   const whenToUse = frontmatter.whenToUse
   if (typeof name !== 'string' || !isSkillName(name)) throw new SkillFormatError('skill frontmatter name must be a valid kebab-case name')
-  if (typeof description !== 'string' || description.trim().length === 0 || description.length > 2_000) {
+  if (typeof description !== 'string' || (!formatCompatibility && description.trim().length === 0) || description.length > 2_000) {
     throw new SkillFormatError('skill frontmatter description must be a non-empty string no longer than 2000 characters')
   }
   if (!formatCompatibility && whenToUse !== undefined && (typeof whenToUse !== 'string' || whenToUse.length > 2_000)) {
@@ -379,21 +379,22 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName }
     throw new SkillFormatError('skill frontmatter allowed-tools must be a string or an array of strings')
   }
 
-  const metadata = Object.create(null)
-  if (formatCompatibility && frontmatter.metadata !== undefined) {
-    assertJsonValue(frontmatter.metadata)
-    if (frontmatter.metadata !== null) Object.assign(metadata, frontmatter.metadata)
-  }
+  const reservedMetadata = formatCompatibility && Object.hasOwn(frontmatter, 'metadata')
+  const metadata = reservedMetadata ? frontmatter.metadata : Object.create(null)
+  if (reservedMetadata && frontmatter.metadata !== undefined) assertJsonValue(frontmatter.metadata)
   for (const [key, value] of Object.entries(frontmatter)) {
     if (FRONTMATTER_FIELDS.has(key) || (formatCompatibility && (key === 'metadata' || (key === 'allowed-tools' && !allowedTools)))) continue
     if (formatCompatibility && key === 'model') {
-      if (typeof value === 'string' && value.trim().length > 0) metadata.model = value.trim()
+      if (typeof value === 'string' && value.trim().length > 0) {
+        if (!reservedMetadata) metadata.model = value.trim()
+        else if (metadata && (typeof metadata === 'object' || typeof metadata === 'function')) metadata.model = value.trim()
+      }
       continue
     }
     assertJsonValue(value)
-    metadata[key] = value
+    if (!reservedMetadata) metadata[key] = value
   }
-  const hasMetadata = Object.keys(metadata).length > 0
+  const hasMetadata = reservedMetadata || Object.keys(metadata).length > 0
   const invocation = {
     modelInvocable: !parseYamlBoolean(frontmatter['disable-model-invocation'], 'disable-model-invocation', false, formatCompatibility),
     userInvocable: parseYamlBoolean(frontmatter['user-invocable'], 'user-invocable', true, formatCompatibility),
@@ -525,7 +526,8 @@ function matchesCandidate(skill, candidate, disabledSkills) {
     && skill.whenToUse === candidate.whenToUse
     && invocation.modelInvocable === candidate.invocation.modelInvocable
     && invocation.userInvocable === candidate.invocation.userInvocable
-    && JSON.stringify(skill.metadata ?? null) === JSON.stringify(candidate.metadata ?? null)
+    && (Object.is(skill.metadata, candidate.metadata)
+      || JSON.stringify(skill.metadata ?? null) === JSON.stringify(candidate.metadata ?? null))
 }
 
 function skillFormatPaths(rootPath, resolverPath) {
@@ -907,7 +909,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       rank: userRoot ? userRoot.rank : PROJECT_SKILL_RANK + rootIndex,
       userRoot: userRoot?.source,
       locator: { rootTarget, skillDirectoryTarget, fileTarget, rootPath, resolverPath, userRoot: userRoot?.source, observationRevision: revision, allowSymlink },
-      ...(skill.metadata ? { metadata: skill.metadata } : {}),
+      ...(skill.metadata !== undefined ? { metadata: skill.metadata } : {}),
     }
   }
 
@@ -1328,7 +1330,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           content: formatCompatibility
             ? resolveCompatibleSkillReferences(skill.content, locator.skillDirectoryTarget.displayPath)
             : skill.content,
-          ...(skill.metadata ? { metadata: skill.metadata } : {}),
+          ...(skill.metadata !== undefined ? { metadata: skill.metadata } : {}),
         }
       } catch (error) {
         if (signal?.aborted) throw error
