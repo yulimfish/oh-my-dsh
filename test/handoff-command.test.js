@@ -632,6 +632,8 @@ test('uses failure-state guidance instead of inspecting nonexistent evidence by 
   assert.match(prompt, /no recovery evidence is available/u)
   assert.match(prompt, /Review the recorded failure state and the current user request/u)
   assert.doesNotMatch(prompt, /Inspect the evidence, identify the unfinished work/u)
+  assert.doesNotMatch(prompt, /Review this evidence against the current user request/u)
+  assert.match(prompt, /Review the recorded failure state against the current user request/u)
 })
 
 test('keeps incomplete empty output distinct from failed recovery evidence', async () => {

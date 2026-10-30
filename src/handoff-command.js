@@ -40,7 +40,7 @@ function evidenceForPrompt(output, maxChars = MAX_PROMPT_EVIDENCE_CHARS) {
   return `${output.slice(0, half)}${marker}${output.slice(-half)}`
 }
 
-function handoffPrompt({ childId, status, stopReason, truncated, omittedNonText, evidence, nextStep }) {
+function handoffPrompt({ childId, status, stopReason, truncated, omittedNonText, evidence, nextStep, hasRecoveryEvidence = true }) {
   const prefix = [
     '[DSH new-task handoff — not a child-session resume]',
     `Previous one-shot child ID: ${JSON.stringify(childId)}`,
@@ -53,7 +53,7 @@ function handoffPrompt({ childId, status, stopReason, truncated, omittedNonText,
   const suffix = [
     '--- END CHILD EVIDENCE ---',
     `Requested next step from the current user: ${nextStep}`,
-    'Review this evidence against the current user request. Start a NEW bounded dsh_omo_task only if it is useful, with a self-contained prompt and appropriate role; do not reuse the old child ID, assume its workspace or conversation survives, or claim transparent resume. Verify any new result independently. This handoff itself started no worker and changed no Goal state.',
+    `${hasRecoveryEvidence ? 'Review this evidence' : 'Review the recorded failure state'} against the current user request. Start a NEW bounded dsh_omo_task only if it is useful, with a self-contained prompt and appropriate role; do not reuse the old child ID, assume its workspace or conversation survives, or claim transparent resume. Verify any new result independently. This handoff itself started no worker and changed no Goal state.`,
   ].join('\n')
   const marker = '\n[… additional evidence omitted for prompt budget …]\n'
   let text = `${prefix}\n${evidence}\n${suffix}`
@@ -198,6 +198,7 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
           omittedNonText: snapshot.omittedNonText,
           evidence,
           nextStep,
+          hasRecoveryEvidence: snapshot.status !== 'failed' || Boolean(snapshot.output),
         }))
       } catch {
         return result('error', 'Handoff delivery was uncertain; inspect the current Agent before retrying. No child was resumed or started by this command.')
