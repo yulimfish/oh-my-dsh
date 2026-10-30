@@ -25,6 +25,16 @@ const FRONTMATTER_FIELDS = new Set([
   'user-invocable',
 ])
 
+const COMPATIBLE_YAML_TAGS = new Set([
+  'tag:yaml.org,2002:str',
+  'tag:yaml.org,2002:seq',
+  'tag:yaml.org,2002:map',
+  'tag:yaml.org,2002:null',
+  'tag:yaml.org,2002:bool',
+  'tag:yaml.org,2002:int',
+  'tag:yaml.org,2002:float',
+])
+
 const JSON_TAG_RESOLVERS = Object.freeze({
   'tag:yaml.org,2002:str': value => value,
   'tag:yaml.org,2002:null': (value, onError) => {
@@ -248,6 +258,17 @@ function hasComplexMappingKey(node, seen = new WeakSet()) {
   })
 }
 
+function hasUnsupportedExplicitTag(node, seen = new WeakSet()) {
+  if (!node || typeof node !== 'object' || seen.has(node)) return false
+  seen.add(node)
+  if (typeof node.tag === 'string' && !COMPATIBLE_YAML_TAGS.has(node.tag)) return true
+  if (!Array.isArray(node.items)) return false
+  return node.items.some(item => {
+    if (!item || typeof item !== 'object') return false
+    return hasUnsupportedExplicitTag(item.key, seen) || hasUnsupportedExplicitTag(item.value, seen) || hasUnsupportedExplicitTag(item, seen)
+  })
+}
+
 function assertJsonValue(value, depth = 0) {
   if (depth > 12) throw new SkillFormatError('frontmatter metadata is too deeply nested')
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return
@@ -358,7 +379,8 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
       ? [
           ...document.errors.filter(error => error?.code !== 'TAG_RESOLVE_FAILED' || !String(error.message).startsWith('Unresolved plain scalar ')),
           ...document.warnings.filter(error => error?.code === 'TAG_RESOLVE_FAILED'),
-          ...(hasComplexMappingKey(document.contents) ? [new Error('complex mapping key') ] : []),
+          ...(hasComplexMappingKey(document.contents) ? [new Error('complex mapping key')] : []),
+          ...(hasUnsupportedExplicitTag(document.contents) ? [new Error('unsupported explicit YAML tag')] : []),
         ]
       : document.errors
     if (parseErrors.length > 0 && !(formatCompatibility && pinnedFrontmatter)) {
