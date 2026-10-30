@@ -287,6 +287,22 @@ test('clearAgent removes pending abort listeners even when the Agent ID becomes 
   assert.equal(removals, 1, 'the pending entry must not remain for global disposal')
 })
 
+test('unreadable old Agent ID does not leak state into a same-ID replacement', async () => {
+  const { live, feature } = makeHarness()
+  const oldAgent = { id: 'replacement-after-error' }
+  live.set(oldAgent.id, oldAgent)
+  for (let index = 0; index < 2; index += 1) await complete(feature, makeExec(oldAgent))
+  Object.defineProperty(oldAgent, 'id', { get() { throw new Error('private id failure') } })
+  feature.clearAgent(oldAgent)
+  const replacement = { id: 'replacement-after-error' }
+  live.set(replacement.id, replacement)
+  for (let index = 0; index < 2; index += 1) {
+    assert.equal(warningCount((await complete(feature, makeExec(replacement))).returned), 0)
+  }
+  assert.equal(warningCount((await complete(feature, makeExec(replacement))).returned), 1)
+  feature.dispose()
+})
+
 test('bounds Agent state without eviction and exact disposal frees capacity', async () => {
   const { live, feature } = makeHarness()
   const agents = Array.from({ length: 257 }, (_value, index) => ({ id: `agent-${index}` }))
