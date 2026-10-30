@@ -1969,6 +1969,22 @@ function compatibilityRegistry(t, fs, options = {}) {
   return { ...fixture, provider }
 }
 
+test('format compatibility rejects malformed allowed-tools so a valid fallback can win', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'shared.md', '---\nname: shared\ndescription: Bad winner\nallowed-tools: 1\n---\nBad wins.\n')
+  await writeSkill(path.join(cwd, '.claude/skills/fallback/SKILL.md'), { name: 'shared', content: 'Fallback wins.' })
+  const { registry } = compatibilityRegistry(t, makeFileSystem().fs, { projectSkillDirs: ['.opencode/skills', '.claude/skills'] })
+  const snapshot = await registry.snapshot({ cwd })
+  assert.equal(snapshot.skills.find(skill => skill.name === 'shared').path, path.join(await realpath(cwd), '.claude/skills/fallback/SKILL.md'))
+  assert.equal((await registry.get('shared', { cwd })).content, 'Fallback wins.')
+  for (const [index, allowedTools] of ['"read write"', '[read, write]', 'false', '0', 'null', '""'].entries()) {
+    const name = `valid-tools-${index}`
+    await writeCompatibilityDocument(cwd, `${name}.md`, `---\nname: ${name}\ndescription: Valid tools\nallowed-tools: ${allowedTools}\n---\nValid body.\n`)
+    const { registry: validRegistry } = compatibilityRegistry(t, makeFileSystem().fs)
+    assert.equal((await validRegistry.get(name, { cwd })).content, 'Valid body.')
+  }
+})
+
 test('format compatibility prioritizes directory candidates within each root through native SkillRegistry', async t => {
   const cwd = await makeWorkspace(t)
   const root = path.join(cwd, '.opencode/skills')
