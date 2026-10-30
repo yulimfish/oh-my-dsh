@@ -117,6 +117,40 @@ test('declares a bounded versioned domain schema for terminal snapshots only', a
     settledAt: 10,
     expiresAt: 10 + TASK_RESULT_TTL_MS + 1,
   }).success, false, 'stored rows cannot extend beyond the documented 30-minute TTL')
+  assert.equal(schema.safeParse({
+    version: 2,
+    parentId: 'session-a',
+    childId: 'child-a',
+    status: 'completed',
+    output: 'result',
+    truncated: false,
+    omittedNonText: false,
+    settledAt: 10,
+    expiresAt: 20,
+  }).success, false, 'unsupported schema versions are rejected')
+  assert.equal(schema.safeParse({
+    version: 1,
+    parentId: 'session-a',
+    childId: 'child-a',
+    status: 'completed',
+    output: 'result',
+    truncated: false,
+    omittedNonText: false,
+    settledAt: 10,
+    expiresAt: 20,
+    extra: 'untrusted',
+  }).success, false, 'unknown persisted fields are rejected')
+  assert.equal(schema.safeParse({
+    version: 1,
+    parentId: 'session-a',
+    childId: 'child-a',
+    status: 'completed',
+    output: 'é'.repeat(12_289),
+    truncated: false,
+    omittedNonText: false,
+    settledAt: 10,
+    expiresAt: 20,
+  }).success, false, 'multibyte output is bounded by UTF-8 bytes as well as characters')
 
   const storage = backend()
   const store = createTaskResultStorage({ storageDomain: storage.storageDomain })
