@@ -862,6 +862,31 @@ test('restore capacity failure leaves no partial running record', async () => {
   await registry.dispose()
 })
 
+test('restoring a result refreshes its LRU position without extending its TTL', async () => {
+  let time = 100
+  const parent = agent('restore-lru')
+  const stored = persistedResult(parent.id, 'restored-child')
+  const registry = createTaskResultRegistry({
+    now: () => time,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => stored,
+      list: async () => [],
+    },
+  })
+  registry.recordStart(parent, 'older-child')
+  registry.recordResult(parent, 'older-child', result)
+  time = 101
+  assert.equal((await registry.readAsync(parent, stored.childId))?.output, stored.output)
+  for (let index = 0; index < 31; index += 1) {
+    assert.equal(registry.recordStart(parent, `active-${index}`), true)
+  }
+  assert.equal(registry.read(parent, 'older-child'), undefined, 'the older unread record is evicted before the freshly restored result')
+  assert.equal(registry.read(parent, stored.childId)?.status, 'completed')
+  await registry.dispose()
+})
+
 test('caps each parent and refuses excess active records without expiring live work', () => {
   let time = 100
   const registry = createTaskResultRegistry({ now: () => time })

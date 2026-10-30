@@ -265,11 +265,11 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
       return existing.status === summary.status && existing.output === summary.output
         && existing.truncated === summary.truncated && existing.omittedNonText === summary.omittedNonText
         && existing.stopReason === summary.stopReason
-        && existing.updatedAt === stored.settledAt && existing.expiresAt === stored.expiresAt
+        && existing.settledAt === stored.settledAt && existing.expiresAt === stored.expiresAt
     }
     const record = reserve(parent, stored.childId)
     if (!record) return false
-    Object.assign(record, summary, { updatedAt: stored.settledAt, expiresAt: stored.expiresAt })
+    Object.assign(record, summary, { settledAt: stored.settledAt, updatedAt: time, expiresAt: stored.expiresAt })
     return true
   }
 
@@ -359,8 +359,12 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
       }
       if (disposed || parentEpochs.get(parent) !== epoch
         || (childEpochs.get(parent)?.get(childId) ?? 0) !== generation) return undefined
+      const hadLocal = byParent.get(parent)?.has(childId) === true
       const restored = restoreTerminal(parent, stored)
-      return restored ? snapshot(childId, byParent.get(parent).get(childId)) : undefined
+      if (!restored) return undefined
+      const record = byParent.get(parent).get(childId)
+      if (!hadLocal) record.updatedAt = now()
+      return snapshot(childId, record)
     },
     list: listLocal,
     async listAsync(parent) {
