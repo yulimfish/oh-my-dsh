@@ -446,13 +446,12 @@ function skillFormatPaths(rootPath, resolverPath) {
       const directoryPath = `${rootPath}/${directories.slice(0, index + 1).join('/')}`
       return [`${directoryPath}/SKILL.md`, `${directoryPath}/${name}.md`]
     })
-    if (fileName === 'SKILL.md') return { defaultName: directoryName, ancestorPaths, directoryTarget: directories.at(-1) }
+    if (fileName === 'SKILL.md') return { defaultName: directoryName, ancestorPaths }
     if (fileName === `${directoryName}.md`) {
       return {
         defaultName: directoryName,
         ancestorPaths,
         primaryPath: `${rootPath}/${directories.join('/')}/SKILL.md`,
-        directoryTarget: directories.at(-1),
       }
     }
     if (directories.length < MAX_COMPAT_DIRECTORY_DEPTH && fileName.toLowerCase().endsWith('.md')) {
@@ -466,22 +465,17 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
   const fs = ctx.fs
   const formatCompatibility = options.formatCompatibility === undefined ? false : options.formatCompatibility
   if (typeof formatCompatibility !== 'boolean') throw new TypeError('formatCompatibility must be boolean')
-  const primaryIsAbsent = async (path, cwd, signal, directoryTarget) => {
-    if (directoryTarget) {
-      const children = await fs.listDir(directoryTarget, signal)
-      return Array.isArray(children) && children.every(child => child.name === basename(path))
-    }
-    try { return await fs.lstat(path, { cwd }, signal) === undefined } catch (error) {
-      if (signal?.aborted || error?.code !== 'FS_NOT_FOUND') throw error
-      return true
-    }
+  const primaryIsAbsent = async (path, cwd, signal) => {
+    const directory = await fs.resolve(dirname(path), { cwd, signal })
+    const entries = await fs.listDir(directory, signal)
+    // Directory entries preserve exact case even when lstat is case-insensitive.
+    return Array.isArray(entries) && entries.every(entry => entry.name !== basename(path))
   }
   const formatPathsStillEligible = async (paths, cwd, signal) => {
     if (!paths) return false
-    for (const path of paths.ancestorPaths ?? []) {
+    for (const path of [...(paths.ancestorPaths ?? []), ...(paths.primaryPath ? [paths.primaryPath] : [])]) {
       if (!await primaryIsAbsent(path, cwd, signal)) return false
     }
-    if (paths.primaryPath && !await primaryIsAbsent(paths.primaryPath, cwd, signal, paths.directoryTarget)) return false
     return true
   }
   const userOpenCodeRoots = normalizeUserSkillRoots(options.userOpenCodeSkillRoots, 'userOpenCodeSkillRoots')
@@ -986,7 +980,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 const directoryName = relativeDirectoryPath.slice(relativeDirectoryPath.lastIndexOf('/') + 1)
                 let canonicalConfirmedAbsent = false
                 if (!skillFile && formatCompatibility && children.length === allChildren.length) {
-                  canonicalConfirmedAbsent = children.every(child => child.name === 'SKILL.md')
+                  canonicalConfirmedAbsent = children.every(child => child.name !== 'SKILL.md')
                   if (!canonicalConfirmedAbsent) {
                     complete = false
                     continue
