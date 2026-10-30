@@ -172,7 +172,9 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
             .replace(/--- BEGIN CHILD EVIDENCE ---/gu, '[child BEGIN CHILD EVIDENCE]')
             .replace(/--- END CHILD EVIDENCE ---/gu, '[child END CHILD EVIDENCE]')
             .replace(CONTROL_OR_BIDI_GLOBAL, ' ').replace(/[ \t]+/gu, ' ').trim())
-          : '(no retained child output)'
+          : snapshot.status === 'failed'
+            ? '(no recovery evidence is available; the specialist failed without a retained child result)'
+            : '(no retained child output)'
         stopReason = cleanMetadata(snapshot.stopReason, 80)
       } catch {
         return result('error', 'Could not prepare bounded handoff evidence; no handoff was queued.')

@@ -619,8 +619,18 @@ test('labels failed handoff with no retained output and stop reason', async () =
   const response = await command.handler({ agent, rawInput: 'child-1 investigate timeout' })
   assert.equal(response.kind, 'success')
   assert.match(queued[0][1], /status: failed; stop reason: timeout/u)
-  assert.match(queued[0][1], /no retained child output/u)
+  assert.match(queued[0][1], /failed without a retained child result/u)
+  assert.match(queued[0][1], /no recovery evidence is available/u)
   assert.doesNotMatch(queued[0][1], /Investigation stopped at a failing test/u)
+})
+
+test('keeps incomplete empty output distinct from failed recovery evidence', async () => {
+  const { agent, queued, command } = fixture(failed({ status: 'incomplete', output: '', truncated: true }))
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect partial work' })
+  assert.equal(response.kind, 'success')
+  assert.match(queued[0][1], /no retained child output/u)
+  assert.doesNotMatch(queued[0][1], /no recovery evidence is available/u)
+  assert.match(queued[0][1], /output was truncated/u)
 })
 
 test('sanitizes stop reason before including it in handoff metadata', async () => {
@@ -653,7 +663,7 @@ test('preserves truncation caveats when handoff has no retained text', async () 
   assert.equal(response.kind, 'success')
   assert.match(queued[0][1], /output was truncated/u)
   assert.match(queued[0][1], /Non-text result blocks were omitted/u)
-  assert.match(queued[0][1], /no retained child output/u)
+  assert.match(queued[0][1], /failed without a retained child result/u)
 })
 
 test('bounds stop reason after metadata sanitization', async () => {
