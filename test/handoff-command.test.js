@@ -992,6 +992,25 @@ test('rejects non-string output values from the initial async result read', asyn
   }
 })
 
+test('rejects non-boolean caveat values from the initial async result read', async () => {
+  for (const field of ['truncated', 'omittedNonText']) {
+    for (const value of ['false', { value: false }, [false], null]) {
+      const snapshot = failed({ status: 'incomplete', output: 'same evidence', [field]: value })
+      let revalidated = false
+      const queued = []
+      const command = createHandoffCommand({
+        readAsync: async () => snapshot,
+        read() { revalidated = true; return snapshot },
+      }, { queueMessage: (...args) => queued.push(args) })
+      const response = await command.handler({ agent: { id: 'parent-non-boolean-caveat-initial' }, rawInput: 'child-1 inspect' })
+      assert.equal(response.kind, 'error', `${field}: ${String(value)}`)
+      assert.match(response.text, /failed or incomplete/u)
+      assert.equal(revalidated, false, 'invalid initial caveat never reaches synchronous revalidation')
+      assert.equal(queued.length, 0)
+    }
+  }
+})
+
 test('rejects array snapshots from the initial async result read', async () => {
   const snapshot = Object.assign([], failed({ status: 'incomplete', output: 'same evidence' }))
   let revalidated = false
