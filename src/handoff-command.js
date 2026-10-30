@@ -92,7 +92,7 @@ function handoffPrompt({ childId, status, stopReason, truncated, omittedNonText,
 
 function validResult(value, childId) {
   try {
-    return value !== null && typeof value === 'object' && value.childId === childId
+    return value !== null && typeof value === 'object' && !Array.isArray(value) && value.childId === childId
       && ['failed', 'incomplete'].includes(value.status)
       && typeof value.output === 'string' && value.output.length <= MAX_EVIDENCE_CHARS
       && (value.truncated === undefined || typeof value.truncated === 'boolean')
