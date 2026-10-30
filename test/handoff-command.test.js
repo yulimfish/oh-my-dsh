@@ -664,6 +664,25 @@ test('rejects boolean caveat changes in either direction during revalidation', a
   }
 })
 
+test('rejects non-boolean caveat values during synchronous revalidation', async () => {
+  const stale = failed({ status: 'incomplete', output: 'same evidence' })
+  for (const field of ['truncated', 'omittedNonText']) {
+    for (const value of ['false', { value: false }, [false], null]) {
+      const current = { ...stale, [field]: value }
+      const agent = { id: 'parent-non-boolean-caveat' }
+      const queued = []
+      const command = createHandoffCommand({
+        readAsync: async () => stale,
+        read: () => current,
+      }, { queueMessage: (...args) => queued.push(args) })
+      const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+      assert.equal(response.kind, 'error', `${field}: ${String(value)}`)
+      assert.match(response.text, /result changed while handoff was being prepared/u)
+      assert.equal(queued.length, 0)
+    }
+  }
+})
+
 test('rejects a child identity change during synchronous handoff revalidation', async () => {
   const stale = failed({ status: 'incomplete', output: 'same evidence' })
   const current = { ...stale, childId: 'another-child' }
