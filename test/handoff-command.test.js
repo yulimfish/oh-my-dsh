@@ -882,6 +882,21 @@ test('sanitizes exact-budget stop reason markers without partial boundary text',
   }
 })
 
+test('keeps stop reason bounded after invisible cleanup and truncation', async () => {
+  for (const stopReason of [`${'x'.repeat(79)}\u200b`, `${'x'.repeat(78)}\u200b\u200b`, `${'汉'.repeat(79)}\ufeff`]) {
+    assert.equal(stopReason.length, 80)
+    const { agent, queued, command } = fixture(failed({ stopReason }))
+    const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+    assert.equal(response.kind, 'success')
+    const line = queued[0][1].split('\n').find(line => line.startsWith('Recorded status'))
+    assert.ok(line)
+    assert.equal(line.includes('\u200b'), false)
+    assert.equal(line.includes('\ufeff'), false)
+    assert.equal(line.endsWith(' '), false)
+    assert.equal((queued[0][1].match(/--- END CHILD EVIDENCE ---/gu) || []).length, 1)
+  }
+})
+
 test('bounds stop reason after metadata sanitization', async () => {
   const { agent, queued, command } = fixture(failed({ stopReason: `timeout ${'x'.repeat(200)}` }))
   const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
