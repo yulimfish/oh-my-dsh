@@ -3060,6 +3060,7 @@ test('format compatibility falls through dangling canonical symlinks to named an
   await symlink('missing-ancestor.md', path.join(cwd, '.opencode/skills/container/SKILL.md'))
   const { registry } = compatibilityRegistry(t, makeFileSystem().fs)
   const snapshot = await registry.snapshot({ cwd })
+  assert.equal(snapshot.complete, true)
   assert.deepEqual(snapshot.skills.map(skill => skill.name).sort(), ['child', 'review'])
   assert.equal((await registry.get('review', { cwd })).content, 'Named fallback after dangling canonical.')
   assert.equal((await registry.get('child', { cwd })).content, 'Nested child after dangling ancestor.')
@@ -3151,6 +3152,23 @@ test('format compatibility cached named fallback is invalidated when a canonical
   await writeCompatibilityDocument(cwd, 'review/SKILL.md', 'New canonical primary body.')
   assert.equal(await registry.get('review', { cwd }), undefined, 'stale lower-priority locator must not load')
   assert.equal((await registry.get('review', { cwd })).content, 'New canonical primary body.', 'the invalidated catalog must recover with the canonical document')
+})
+
+test('format compatibility cached named and nested locators accept an absent-to-dangling canonical transition', async t => {
+  const cwd = await makeWorkspace(t)
+  await writeCompatibilityDocument(cwd, 'review/review.md', 'Cached named fallback body.')
+  await writeCompatibilityDocument(cwd, 'container/child/SKILL.md', 'Cached nested child body.')
+  const { fs } = makeFileSystem()
+  const { registry } = compatibilityRegistry(t, fs)
+  const snapshot = await registry.snapshot({ cwd })
+  assert.equal(snapshot.complete, true)
+  assert.deepEqual(snapshot.skills.map(skill => skill.name).sort(), ['child', 'review'])
+  assert.equal((await registry.get('review', { cwd })).content, 'Cached named fallback body.')
+  assert.equal((await registry.get('child', { cwd })).content, 'Cached nested child body.')
+  await symlink('missing-named.md', path.join(cwd, '.opencode/skills/review/SKILL.md'))
+  await symlink('missing-nested.md', path.join(cwd, '.opencode/skills/container/SKILL.md'))
+  assert.equal((await registry.get('review', { cwd })).content, 'Cached named fallback body.')
+  assert.equal((await registry.get('child', { cwd })).content, 'Cached nested child body.')
 })
 
 test('three-level fallback invalidates its stale locator when a canonical file appears', async t => {
