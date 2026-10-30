@@ -127,6 +127,29 @@ test('does not trust an unversioned async snapshot after same-child replacement'
   await registry.dispose()
 })
 
+test('rejects handoff when any retained evidence field changes before enqueue', async () => {
+  for (const change of [
+    { status: 'failed' },
+    { output: 'changed evidence' },
+    { truncated: true },
+    { omittedNonText: true },
+    { stopReason: 'timeout' },
+  ]) {
+    const agent = { id: 'parent-evidence-change' }
+    const stale = failed({ status: 'incomplete', output: 'old evidence' })
+    const current = { ...stale, ...change }
+    const queued = []
+    const command = createHandoffCommand({
+      readAsync: async () => stale,
+      read: () => current,
+    }, { queueMessage: (...args) => queued.push(args) })
+    const response = await command.handler({ agent, rawInput: 'child-1 retry' })
+    assert.equal(response.kind, 'error', JSON.stringify(change))
+    assert.match(response.text, /result changed while handoff was being prepared/u)
+    assert.equal(queued.length, 0)
+  }
+})
+
 test('reports post-delivery child replacement without claiming a stable handoff', async () => {
   const agent = { id: 'parent-delivery-generation' }
   const registry = createTaskResultRegistry()
