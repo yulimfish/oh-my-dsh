@@ -45,6 +45,12 @@ function validResult(value, childId) {
     && (value.stopReason === undefined || (typeof value.stopReason === 'string' && value.stopReason.length <= 80))
 }
 
+function sameResult(left, right) {
+  return validResult(right, left?.childId) && left.status === right.status && left.output === right.output
+    && left.truncated === right.truncated && left.omittedNonText === right.omittedNonText
+    && left.stopReason === right.stopReason
+}
+
 /**
  * Queue an explicitly new-task handoff, never a transparent child-session resume.
  * The command itself does not launch a worker or mutate task/Goal state.
@@ -86,6 +92,15 @@ export function createHandoffCommand(registry, { queueMessage, isParentCurrent }
       }
       if (!validResult(snapshot, input.childId)) {
         return result('error', 'Handoff requires a retained failed or incomplete one-shot result for this exact Agent and child ID.')
+      }
+      if (typeof registry.readAsync === 'function' && typeof registry.read === 'function') {
+        let current
+        try { current = registry.read(agent, input.childId) } catch {
+          return result('error', 'Could not confirm the current one-shot result; no handoff was queued.')
+        }
+        if (!sameResult(snapshot, current)) {
+          return result('error', 'The one-shot result changed while handoff was being prepared; inspect the current child before retrying.')
+        }
       }
 
       const evidence = snapshot.output

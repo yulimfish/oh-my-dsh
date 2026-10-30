@@ -65,6 +65,68 @@ test('does not hand off stale failure evidence after the same child ID starts ne
   await registry.dispose()
 })
 
+test('rejects a stale async result when the same child ID restarts before handoff', async () => {
+  const agent = { id: 'parent-stale-read' }
+  let release
+  let resolveRead
+  const readGate = new Promise(resolve => { release = resolve })
+  const registry = createTaskResultRegistry({
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => readGate,
+      list: async () => [],
+    },
+  })
+  registry.recordStart(agent, 'child-1')
+  registry.recordResult(agent, 'child-1', {
+    status: 'incomplete', output: 'old attempt failed', truncated: false, omittedNonText: false,
+  })
+  registry.clearAgent(agent)
+  const queued = []
+  const command = createHandoffCommand(registry, { queueMessage: (...args) => queued.push(args) })
+  const pending = command.handler({ agent, rawInput: 'child-1 retry' })
+  registry.recordStart(agent, 'child-1')
+  release({
+    parentId: agent.id, childId: 'child-1', status: 'incomplete', output: 'old attempt failed',
+    truncated: false, omittedNonText: false, settledAt: Date.now() - 1,
+    expiresAt: Date.now() + 60_000,
+  })
+  const response = await pending
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /failed or incomplete/u)
+  assert.equal(queued.length, 0)
+  assert.equal(registry.read(agent, 'child-1').status, 'running')
+  await registry.dispose()
+})
+
+test('does not trust an unversioned async snapshot after same-child replacement', async () => {
+  const agent = { id: 'parent-unversioned-stale' }
+  const registry = createTaskResultRegistry()
+  registry.recordStart(agent, 'child-1')
+  registry.recordResult(agent, 'child-1', {
+    status: 'incomplete', output: 'old attempt failed', truncated: false, omittedNonText: false,
+  })
+  const stale = registry.read(agent, 'child-1')
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const queued = []
+  const command = createHandoffCommand({
+    readAsync: async () => gate,
+    read: registry.read,
+  }, { queueMessage: (...args) => queued.push(args) })
+  const pending = command.handler({ agent, rawInput: 'child-1 retry' })
+  registry.clearAgent(agent)
+  registry.recordStart(agent, 'child-1')
+  release(stale)
+  const response = await pending
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /result changed while handoff was being prepared/u)
+  assert.equal(queued.length, 0)
+  assert.equal(registry.read(agent, 'child-1').status, 'running')
+  await registry.dispose()
+})
+
 test('rejects running, completed, unknown, cross-session, malformed, and service-failure results without queueing', async () => {
   for (const snapshot of [
     failed({ status: 'running' }),
