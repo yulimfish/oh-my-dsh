@@ -268,6 +268,30 @@ test('keeps newer local terminal state when an old persistence list resolves', a
   await registry.dispose()
 })
 
+test('concurrent read and list restore the same child without invalidating each other', async () => {
+  const parent = agent('concurrent-restore')
+  const readGate = deferred()
+  const listGate = deferred()
+  const stored = persistedResult(parent.id, 'shared-child')
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async () => readGate.promise,
+      list: async () => listGate.promise,
+    },
+  })
+  const reading = registry.readAsync(parent, stored.childId)
+  const listing = registry.listAsync(parent)
+  listGate.resolve([stored])
+  assert.deepEqual(await listing, [{ childId: stored.childId, status: 'completed' }])
+  readGate.resolve(stored)
+  assert.equal((await reading)?.output, stored.output, 'a concurrent restore must not make the same snapshot look stale')
+  assert.equal(registry.read(parent, stored.childId).output, stored.output)
+  await registry.dispose()
+})
+
 test('restoring results does not write stale snapshots back to persistence', async () => {
   const parent = agent('restore-read-only')
   const stored = persistedResult(parent.id, 'stored-child')
