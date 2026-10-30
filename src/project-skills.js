@@ -464,7 +464,7 @@ function skillFormatPaths(rootPath, resolverPath) {
         primaryPath: `${rootPath}/${directories.join('/')}/SKILL.md`,
       }
     }
-    if (directories.length < MAX_COMPAT_DIRECTORY_DEPTH && fileName.toLowerCase().endsWith('.md')) {
+    if (directories.length < MAX_COMPAT_DIRECTORY_DEPTH && fileName.endsWith('.md')) {
       return { defaultName: fileName.slice(0, -3), ancestorPaths }
     }
   }
