@@ -626,6 +626,25 @@ test('rejects stop reason presence changes during handoff revalidation', async (
   }
 })
 
+test('rejects optional caveat presence changes during handoff revalidation', async () => {
+  for (const field of ['truncated', 'omittedNonText']) {
+    for (const initial of [false, undefined]) {
+      const stale = failed({ status: 'incomplete', output: 'same evidence', [field]: initial })
+      const current = { ...stale, [field]: initial === undefined ? false : undefined }
+      const agent = { id: 'parent-caveat-presence' }
+      const queued = []
+      const command = createHandoffCommand({
+        readAsync: async () => stale,
+        read: () => current,
+      }, { queueMessage: (...args) => queued.push(args) })
+      const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+      assert.equal(response.kind, 'error', `${field}: ${initial}`)
+      assert.match(response.text, /result changed while handoff was being prepared/u)
+      assert.equal(queued.length, 0)
+    }
+  }
+})
+
 test('rejects a child identity change during synchronous handoff revalidation', async () => {
   const stale = failed({ status: 'incomplete', output: 'same evidence' })
   const current = { ...stale, childId: 'another-child' }
