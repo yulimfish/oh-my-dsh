@@ -147,12 +147,12 @@ export function createRepeatedCallAdvisory(agentsService) {
 
   function clearAgent(agent) {
     if (isObject(agent)) disposedAgents.add(agent)
-    let agentId
-    try { agentId = agent?.id } catch { return }
-    if (typeof agentId === 'string' && states.get(agentId)?.agent === agent) states.delete(agentId)
     for (const [token, entry] of pending) {
       if (entry.agent === agent) clearPending(token)
     }
+    let agentId
+    try { agentId = agent?.id } catch { return }
+    if (typeof agentId === 'string' && states.get(agentId)?.agent === agent) states.delete(agentId)
   }
 
   function resetState(agentId, agent) {

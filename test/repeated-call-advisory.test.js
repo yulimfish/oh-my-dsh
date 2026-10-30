@@ -267,6 +267,26 @@ test('same-ID replacement starts fresh and late old-Agent disposal preserves its
   feature.dispose()
 })
 
+test('clearAgent removes pending abort listeners even when the Agent ID becomes unreadable', async () => {
+  const { live, feature } = makeHarness()
+  const agent = { id: 'unreadable-id' }
+  live.set(agent.id, agent)
+  const controller = new AbortController()
+  const originalRemove = controller.signal.removeEventListener.bind(controller.signal)
+  let removals = 0
+  controller.signal.removeEventListener = (...args) => {
+    removals += 1
+    return originalRemove(...args)
+  }
+  const exec = makeExec(agent, {}, { signal: controller.signal })
+  await feature.preExecute(exec, async () => ({ kind: 'allow' }))
+  Object.defineProperty(agent, 'id', { get() { throw new Error('private id failure') } })
+  assert.doesNotThrow(() => feature.clearAgent(agent))
+  assert.equal(removals, 1, 'pending abort listeners must be removed before reading a hostile Agent ID')
+  feature.dispose()
+  assert.equal(removals, 1, 'the pending entry must not remain for global disposal')
+})
+
 test('bounds Agent state without eviction and exact disposal frees capacity', async () => {
   const { live, feature } = makeHarness()
   const agents = Array.from({ length: 257 }, (_value, index) => ({ id: `agent-${index}` }))
