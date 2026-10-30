@@ -810,6 +810,22 @@ test('rejects a missing child identity during synchronous revalidation', async (
   assert.equal(queued.length, 0)
 })
 
+test('rejects a missing status during synchronous revalidation', async () => {
+  const stale = failed({ status: 'incomplete', output: 'same evidence' })
+  const current = { ...stale }
+  delete current.status
+  const agent = { id: 'parent-missing-status-revalidation' }
+  const queued = []
+  const command = createHandoffCommand({
+    readAsync: async () => stale,
+    read: () => current,
+  }, { queueMessage: (...args) => queued.push(args) })
+  const response = await command.handler({ agent, rawInput: 'child-1 inspect' })
+  assert.equal(response.kind, 'error')
+  assert.match(response.text, /result changed while handoff was being prepared/u)
+  assert.equal(queued.length, 0)
+})
+
 test('rejects handoff when any retained evidence field changes before enqueue', async () => {
   for (const change of [
     { status: 'failed' },
