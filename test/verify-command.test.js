@@ -354,6 +354,22 @@ test('retains cwd attribution warnings when long evidence is compacted', async (
   assert.match(response.text, /not verification of the current project/u)
 })
 
+test('retains cwd warnings with one maximally sized evidence record', async () => {
+  const events = [
+    call(1, 'single-long', `pnpm test -- ${'x'.repeat(4_000)}`),
+    resultEvent(2, 'single-long', 'y'.repeat(2_000)),
+  ]
+  const response = await createVerifyCommand({
+    observeSession: async () => observation(events),
+  }, fsFixture(), '/workspace/new-project').handler({ agent: { id: 'agent-1' }, rawInput: '' })
+  assert.equal(response.kind, 'success')
+  assert.ok(response.text.length <= 4_000)
+  assert.match(response.text, /per-call working directory is not recorded/u)
+  assert.match(response.text, /effective working directory differs from the session header/u)
+  assert.match(response.text, /#2 completed without Tool error/u)
+  assert.match(response.text, /Missing evidence means unverified, not failed/u)
+})
+
 test('prioritizes bash evidence and disclaimer when scripts exceed the display budget', async () => {
   const largeManifest = JSON.stringify({ scripts: Object.fromEntries(Array.from({ length: 8 }, (_v, i) => [`test:script-${i}`, 'x'.repeat(500)])) })
   const command = createVerifyCommand({
