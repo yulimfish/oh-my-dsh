@@ -140,6 +140,8 @@ test('rejects cross-parent, empty-child, and running persisted snapshots', async
     { parentId: '' },
     { parentId: 'x'.repeat(257) },
     { childId: '' },
+    { childId: 'x'.repeat(257) },
+    { childId: 42 },
     { status: 'running' },
   ]) {
     const parent = agent('identity-restore')
