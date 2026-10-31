@@ -39,6 +39,8 @@ test('normalizes immutable category primary routes and rejects invalid entries',
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', skills: ['debugging', 'debugging'] }]), /duplicate names/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', skills: ['debugging', 'git-master', 'review-work', 'visual-qa', 'security-research'] }]), /at most 4/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', disable: 'true' }]), /disable must be a boolean/u)
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', disable: 1 }]), /disable must be a boolean/u)
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', disable: null }]), /disable must be a boolean/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', disable: true }]), /requires both provider and model/u)
   assert.throws(() => resolveCategoryRoute(routes(), 'build', { maxTokens: 1.5 }), /role route maxTokens must be a positive safe integer/u)
   for (const temperature of [-0.1, 2.1, Number.NaN, Number.POSITIVE_INFINITY, '0.4']) {
