@@ -1086,6 +1086,35 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.equal(path.win32.isAbsolute('C:foo'), false)
   assert.equal(path.win32.join('C:\\base', 'C:foo'), 'C:\\base\\C:foo')
   assert.match('C:foo', /^[a-z]:/iu)
+  const patchFile = path.join(cwd, 'patch-target.md')
+  await writeFile(patchFile, '---\nname: shared\ndescription: Original description\n---\nPATCH_BODY')
+  const patchRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(patchRegistry.ctx, {
+    projectSkillDirs: [], configSkillPaths: [patchFile],
+    configSkillEntries: { shared: { description: 'Patched description' } },
+    formatCompatibility: true,
+  })
+  const patched = await patchRegistry.registry.get('shared', { cwd })
+  assert.equal(patched.description, '(config - Skill) Patched description')
+  assert.equal(patched.content, 'PATCH_BODY')
+  assert.equal(patched.source, 'config')
+  const strictPatchRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strictPatchRegistry.ctx, { projectSkillDirs: [], configSkillPaths: [patchFile], configSkillEntries: { shared: { description: 'Patched description' } } })
+  const strictPatched = await strictPatchRegistry.registry.get('shared', { cwd })
+  assert.equal(strictPatched.description, 'Patched description')
+  assert.equal(strictPatched.content, 'PATCH_BODY')
+  assert.equal(strictPatched.source, 'config')
+  const literalPatchRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(literalPatchRegistry.ctx, { projectSkillDirs: [], configSkillPaths: [patchFile], configSkillEntries: { shared: { description: 'Use $& literally' } }, formatCompatibility: true })
+  assert.equal((await literalPatchRegistry.registry.get('shared', { cwd })).description, '(config - Skill) Use $& literally')
+  const { fs: forgedPatchFs } = makeFileSystem()
+  const { ctx: forgedPatchCtx } = makeRegistry(forgedPatchFs)
+  const forgedProvider = createProjectSkillProvider(forgedPatchCtx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillPaths: [patchFile], formatCompatibility: true })
+  const forgedCandidate = (await forgedProvider.list({ cwd })).candidates.find(item => item.name === 'shared')
+  assert.equal(await forgedProvider.get({ ...forgedCandidate, description: '(config - Skill) Forged' }, { cwd }), undefined)
+  const noWinnerRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(noWinnerRegistry.ctx, { projectSkillDirs: [], configSkillEntries: { missing: { description: 'No winner' } }, formatCompatibility: true })
+  assert.deepEqual((await noWinnerRegistry.registry.snapshot({})).skills, [])
   const inline = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(inline.ctx, {
     projectSkillDirs: [],
@@ -1217,6 +1246,7 @@ test('format compatibility loads direct skills from an explicit config directory
   const otherInline = createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Other description', template: 'INLINE_BODY' } }, formatCompatibility: true })
   assert.equal(await otherInline.get(inlineCandidate, {}), undefined)
   assert.throws(() => createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY', disable: 'yes' } } }), /disable|boolean/u)
+  for (const template of [null, 42, {}]) assert.throws(() => createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template } } }), /template/u)
   const boundaryDescription = 'x'.repeat(2_000)
   const boundaryProvider = createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: boundaryDescription, template: 'INLINE_BODY' } }, formatCompatibility: true })
   await assert.rejects(boundaryProvider.list({}), /description|2000/u)

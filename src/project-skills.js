@@ -184,11 +184,11 @@ function normalizeConfigSkillEntries(value) {
       || (entry.disable !== undefined && typeof entry.disable !== 'boolean')
       || typeof entry.description !== 'string' || (entry.from === undefined && entry.description.length === 0) || entry.description.length > 2_000
       || (entry.from !== undefined && (typeof entry.from !== 'string' || entry.from.length === 0 || entry.from.length > 4_096 || entry.from.includes('\0')))
-      || (entry.from !== undefined && entry.template !== undefined && typeof entry.template !== 'string')
-      || (entry.from === undefined && typeof entry.template !== 'string')) {
+      || (entry.template !== undefined && typeof entry.template !== 'string')
+      || (entry.from === undefined && entry.template === undefined && entry.description === undefined)) {
       throw new TypeError(`configSkillEntries.${name} must contain only description and template, with boolean disable when provided`)
     }
-    entries.push(Object.freeze({ name, description: entry.description, ...(entry.template === undefined ? {} : { template: entry.template }), ...(entry.from === undefined ? {} : { from: entry.from }) }))
+    entries.push(Object.freeze({ name, description: entry.description, ...(entry.template === undefined ? {} : { template: entry.template }), ...(entry.from === undefined ? {} : { from: entry.from }), ...(entry.template === undefined && entry.from === undefined ? { patchOnly: true } : {}) }))
   }
   return Object.freeze(entries)
 }
@@ -1201,6 +1201,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       const signal = lifecycleSignal(lookup.signal, control.signal)
       const candidates = []
       for (const entry of configSkillEntries) {
+        if (entry.patchOnly) continue
         if (disabledConfigEntryNames.has(entry.name) || disabledSkills.has(entry.name)
           || (enabledProjectSkillSet && !enabledProjectSkillSet.has(entry.name)) || disabledProjectSkillSet.has(entry.name)) continue
         let description = entry.description
@@ -1623,6 +1624,13 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         }
       }
       throwIfAborted(signal)
+      for (const entry of configSkillEntries.filter(entry => entry.patchOnly && entry.description)) {
+        const existing = candidates.find(candidate => candidate.name === entry.name && !candidate.locator?.inlineEntry)
+        if (existing) {
+          const scope = formatCompatibility ? existing.description.match(/^\(([^)]+) - Skill\) /u)?.[1] : undefined
+          existing.description = formatCompatibility && scope ? compatibleSkillDescription(entry.description, scope) : entry.description
+        }
+      }
       const stable = startingWatchRevision === watchRevision && startingObservationRevision === observationRevision
       return { candidates, complete: complete && stable, priorityComplete: priorityComplete && stable }
     },
@@ -1643,10 +1651,13 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           description = loaded.description
           resourceBase = loaded.resourceBase
         }
-        if (candidate.description !== (formatCompatibility ? compatibleSkillDescription(description, 'config') : description)) return undefined
+        if (entry.patchOnly) return undefined
+        if (candidate.description !== (formatCompatibility ? compatibleSkillDescription(description, 'config') : description)
+          && !configSkillEntries.some(patch => patch.patchOnly && patch.name === entry.name
+            && candidate.description === (formatCompatibility ? compatibleSkillDescription(patch.description, 'config') : patch.description))) return undefined
         return {
           name: entry.name,
-          description: formatCompatibility ? compatibleSkillDescription(description, 'config') : description,
+          description: candidate.description,
           invocation: {
             modelInvocable: !disabledSkills.has(entry.name),
             userInvocable: !disabledSkills.has(entry.name),
@@ -1730,9 +1741,11 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         }
         throwIfAborted(signal)
         if (locator.observationRevision !== observationRevision) return undefined
-        const candidateMatches = matchesCandidate(formatCompatibility
-          ? { ...skill, description: compatibleSkillDescription(skill.description, skillDescriptionScope(locator.rootPath, externalRoot)) }
-          : skill, candidate, disabledSkills)
+        const patch = configSkillEntries.find(entry => entry.patchOnly && entry.name === candidate.name && entry.description)
+        const expectedDescription = patch
+          ? formatCompatibility ? compatibleSkillDescription(patch.description, skillDescriptionScope(locator.rootPath, externalRoot)) : patch.description
+          : formatCompatibility ? compatibleSkillDescription(skill.description, skillDescriptionScope(locator.rootPath, externalRoot)) : skill.description
+        const candidateMatches = matchesCandidate({ ...skill, description: expectedDescription }, candidate, disabledSkills)
         if (!candidateMatches) {
           invalidateObservation()
           return undefined
@@ -1741,7 +1754,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           const fresh = await provider.list({ cwd: lookup.cwd, signal })
           throwIfAborted(signal)
           const current = fresh.candidates.find(item => item.name === candidate.name)
-          if (!fresh.priorityComplete || !current
+          if (!fresh.priorityComplete || !current || current.description !== expectedDescription
             || current.locator.rootPath !== locator.rootPath || current.locator.resolverPath !== locator.resolverPath
             || current.locator.fileTarget.targetKey !== locator.fileTarget.targetKey) {
             invalidateObservation()
