@@ -500,6 +500,8 @@ enableAgentTerminalTools: true
 enableToolResultPruning: true
 ```
 
+Inline `userAgents`, `roleRoutes`, and `categoryRoutes` are normalized at plugin apply. Changing their configured strings, route pairs, or `promptAppend` references requires the Host configuration path: `configEditor.edit(...)` validates and persists the raw config and completes Loader reconciliation; `app-boot/config-reload` then indicates that running-tree updates settled. There is no parallel plugin file watcher for these inline maps. In contrast, an already configured `file://…` `promptAppend` is expanded again while each task prompt is built, so editing the referenced file alone takes effect on the next launch without a config reload. These are source/API contracts; no live Profile edit or activation was performed during this audit.
+
 ## Optional foreground delegation
 
 Added in 0.1.14, `enableForegroundTaskTool: true` exposes `dsh_omo_task_join` with the ordinary task's role/category/skill arguments. It shares the same launcher, admission limits and settlement cleanup, waits up to eight seconds after startup (subject to the Host call deadline), and returns bounded untrusted terminal text or the real running child ID. It requires native `agents.get`, Cordis lifecycle events and native ToolRuntime final-result dispatch; direct calls to its definition without final events are not a supported integration.
