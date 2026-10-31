@@ -428,6 +428,29 @@ export function resolveCompatibleSkillReferences(content, basePath) {
   return Buffer.byteLength(result) <= MAX_SKILL_BYTES ? result : content
 }
 
+function parseCompatibleMcpFrontmatter(source) {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(source.replace(/^\uFEFF/u, ''))
+  if (!match) return undefined
+  try {
+    const document = parseDocument(match[1], {
+      schema: 'json', uniqueKeys: true,
+      customTags: tags => tags.concat(Object.entries(JSON_TAG_RESOLVERS).map(([tag, resolve]) => ({ tag, default: false, resolve }))),
+    })
+    const errors = [
+      ...document.errors.filter(error => error?.code !== 'TAG_RESOLVE_FAILED' || !String(error.message).startsWith('Unresolved plain scalar ')),
+      ...document.warnings.filter(error => error?.code === 'TAG_RESOLVE_FAILED'),
+    ]
+    if (errors.length > 0 || hasComplexMappingKey(document.contents) || hasUnsupportedExplicitTag(document.contents)) return undefined
+    preserveOverflowingPlainNumbers(document.contents)
+    const data = document.toJS({})
+    if (!data || typeof data !== 'object' || Array.isArray(data) || !data.mcp) return undefined
+    assertJsonValue(data.mcp)
+    return data.mcp
+  } catch {
+    return undefined
+  }
+}
+
 function parseSkillDocument(source, { formatCompatibility = false, defaultName, modelScope = 'opencode' } = {}) {
   if (typeof source !== 'string') throw new SkillFormatError('skill file is not text')
   const unprefixed = source.replace(/^\uFEFF/u, '')
@@ -568,7 +591,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
       license: frontmatter.license,
       compatibility: frontmatter.compatibility,
       allowedTools: parsedAllowedTools,
-      mcpConfig: frontmatter.mcp || undefined,
+      mcpConfig: frontmatter.mcp || (!hasFrontmatter ? parseCompatibleMcpFrontmatter(unprefixed) : undefined),
       model: frontmatter.model,
     } : {}),
     invocation,
