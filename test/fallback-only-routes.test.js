@@ -290,6 +290,28 @@ test('new fallback-only chain has one aggregate five-second deadline and no late
   assert.equal(fixture.starts.length, 0)
 })
 
+test('pinned fallback timeout rejects without late activation', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const calls = []
+  const fixture = makeContext((config, signal) => new Promise(resolve => { calls.push({ config, signal, resolve }) }))
+  const tool = mount(fixture, { roleRoutes: [{ role: 'explore', ...chain[0], fallbackModels: [chain[1]] }] })
+  const pending = execute(tool)
+  const rejected = assert.rejects(pending, /No configured model route passed/u)
+  await tick()
+  t.mock.timers.tick(5000)
+  await tick()
+  assert.equal(calls.length, 2, 'primary timeout advances to fallback')
+  assert.ok(calls[0].signal.aborted)
+  t.mock.timers.tick(5000)
+  await rejected
+  assert.equal(calls.length, 2)
+  assert.ok(calls[1].signal.aborted)
+  calls[0].resolve(chain[0])
+  calls[1].resolve(chain[1])
+  await tick()
+  assert.equal(fixture.starts.length, 0)
+})
+
 test('unsettled Host calls share the 64-call gate across one-shot and continuable routes', async () => {
   const calls = []
   const fixture = makeContext((config, signal) => new Promise((resolve, reject) => {
