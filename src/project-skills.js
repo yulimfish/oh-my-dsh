@@ -167,7 +167,7 @@ export function normalizeUserSkillRoots(value, field) {
   return Object.freeze(roots)
 }
 
-function normalizeConfigSkillEntries(value) {
+function normalizeConfigSkillEntries(value, formatCompatibility = false) {
   if (value === undefined) return Object.freeze([])
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
@@ -211,7 +211,7 @@ function normalizeConfigSkillEntries(value) {
       ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
       ...(normalizedTools === undefined ? {} : { allowedTools: normalizedTools }),
       ...(entry['argument-hint'] === undefined ? {} : { argumentHint: entry['argument-hint'] }),
-      ...(entry.template === undefined && entry.from === undefined ? { patchOnly: true } : {}) }))
+      ...(entry.from === undefined && (entry.template === undefined || (formatCompatibility && entry.template === '')) ? { patchOnly: true } : {}) }))
   }
   return Object.freeze(entries)
 }
@@ -860,7 +860,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     if (typeof source !== 'string' || typeof rootPath !== 'string' || candidate.source !== source) return undefined
     return userRoots.find(root => root.rootPath === rootPath && root.source === source)
   }
-  const configSkillEntries = normalizeConfigSkillEntries(options.configSkillEntries)
+  const configSkillEntries = normalizeConfigSkillEntries(options.configSkillEntries, formatCompatibility)
   const disabledConfigEntryNames = new Set(Object.entries(options.configSkillEntries ?? {}).filter(([, entry]) => entry === false || (entry && typeof entry === 'object' && entry.disable === true)).map(([name]) => name))
   const configSkillBase = options.configSkillBase
   const configSkillPaths = normalizeConfigSkillPaths(options.configSkillPaths, configSkillBase)

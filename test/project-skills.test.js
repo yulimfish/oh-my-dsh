@@ -1106,6 +1106,14 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.equal(strictPatched.description, 'Patched description')
   assert.equal(strictPatched.content, 'PATCH_BODY')
   assert.equal(strictPatched.source, 'config')
+  const emptyTemplatePatchRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(emptyTemplatePatchRegistry.ctx, { projectSkillDirs: [], configSkillPaths: [patchFile], configSkillEntries: { shared: { description: 'Patched description', template: '' } }, formatCompatibility: true })
+  const emptyTemplatePatched = await emptyTemplatePatchRegistry.registry.get('shared', { cwd })
+  assert.equal(emptyTemplatePatched.description, '(config - Skill) Patched description')
+  assert.equal(emptyTemplatePatched.content, 'PATCH_BODY')
+  const strictEmptyTemplateRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strictEmptyTemplateRegistry.ctx, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Empty inline', template: '' } } })
+  assert.equal((await strictEmptyTemplateRegistry.registry.get('inline', {})).content, '')
   const strictMetadataPatchRegistry = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(strictMetadataPatchRegistry.ctx, {
     projectSkillDirs: [], configSkillPaths: [metadataPatchFile],
