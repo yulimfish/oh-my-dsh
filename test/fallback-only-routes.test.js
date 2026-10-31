@@ -108,6 +108,18 @@ test('real Config rejects snake-case fallbacks on a pinned primary role', () => 
   assert.equal(fixture.starts.length, 0)
 })
 
+test('empty fallback chain preserves the configured primary without preflight', async () => {
+  const calls = []
+  const fixture = makeContext(async config => { calls.push(config); return config })
+  const tool = mount(fixture, {
+    enablePinnedRoutePreflight: true,
+    roleRoutes: [{ role: 'explore', ...chain[0], fallbackModels: [] }],
+  })
+  await execute(tool)
+  assert.deepEqual(calls, [chain[0]])
+  assert.deepEqual(fixture.starts[0].request.agentOptions, chain[0])
+})
+
 test('disabled category rejects before any fallback preflight or activation', async () => {
   const calls = []
   const fixture = makeContext(async config => { calls.push(config); return config })
