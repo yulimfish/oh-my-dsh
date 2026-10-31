@@ -632,6 +632,9 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     if (Object.hasOwn(entry, 'textVerbosity')) {
       throw new Error(`dsh-omo: role route "${entry.role}" textVerbosity is unsupported; DSH has no text-verbosity request control`)
     }
+    if (Object.hasOwn(entry, 'provider_options') || Object.hasOwn(entry, 'providerOptions')) {
+      throw new Error(`dsh-omo: role route "${entry.role}" provider options are unsupported; use DSH-native request controls instead`)
+    }
     if (entry.temperature !== undefined && (typeof entry.temperature !== 'number' || !Number.isFinite(entry.temperature) || entry.temperature < 0 || entry.temperature > 2)) {
       throw new Error(`dsh-omo: role route "${entry.role}" temperature must be a finite number from 0 to 2`)
     }

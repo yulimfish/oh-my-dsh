@@ -9515,6 +9515,12 @@ test('validates bounded role fallback chains with or without explicit primary pi
   assert.throws(() => apply(primaryTextVerbosity.ctx, { ...baseConfig, roleRoutes: [{ role: 'explore', provider: 'p', model: 'm', textVerbosity: 'low' }] }), /textVerbosity is unsupported/u)
   assert.equal(primaryTextVerbosity.tools.size, 0)
 
+  for (const field of ['provider_options', 'providerOptions']) {
+    const primaryProviderOptions = makeContext()
+    assert.throws(() => apply(primaryProviderOptions.ctx, { ...baseConfig, roleRoutes: [{ role: 'explore', provider: 'p', model: 'm', [field]: { reasoningEffort: 'high' } }] }), /provider options are unsupported/u)
+    assert.equal(primaryProviderOptions.tools.size, 0)
+  }
+
   for (const maxTokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY]) {
     const invalidTokens = makeContext()
     assert.throws(() => apply(invalidTokens.ctx, {
