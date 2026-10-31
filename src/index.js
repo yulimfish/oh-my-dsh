@@ -248,6 +248,7 @@ export const Config = z.object({
   userAgentsSkillRoots: z.array(z.string()).default([]),
   configSkillPaths: z.array(z.union([z.string(), z.object({ path: z.string().required(), glob: z.string().required(), recursive: z.boolean().default(false) })])).default([]),
   configSkillBase: z.union([z.object({ configDir: z.string(), homeDirectory: z.string() }), z.const(null)]).default(null),
+  configSkillEntries: z.dict(z.union([z.boolean(), z.object({ description: z.string(), template: z.string(), disable: z.boolean().default(false) })])).default({}),
   enabledProjectSkills: z.union([z.array(z.string()), z.const(null)]),
   disabledProjectSkills: z.array(z.string()).default([]),
   disabledOmoBundledSkills: z.array(z.string()).default([]),
@@ -4229,6 +4230,7 @@ export function apply(ctx, rawConfig) {
   const activeBundledSkills = SKILLS.filter(skill => !disabledOmoBundledSkills.has(skill.name))
   const disabledSkillSet = normalizeDisabledSkills(config.disabledSkills)
   const configSkillPaths = normalizeConfigSkillPaths(config.configSkillPaths, config.configSkillBase ?? undefined)
+  const configSkillEntries = config.configSkillEntries
   const projectSkills = registerProjectSkillProvider(ctx, {
     projectSkillDirs, disabledSkills: [...disabledSkillSet], enabledProjectSkills, disabledProjectSkills,
     formatCompatibility: config.enableProjectSkillFormatCompatibility,
@@ -4236,6 +4238,7 @@ export function apply(ctx, rawConfig) {
     userClaudeSkillRoots: config.userClaudeSkillRoots,
     userAgentsSkillRoots: config.userAgentsSkillRoots,
     configSkillPaths,
+    configSkillEntries,
   })
   const activeChildren = new Set()
   const activeRuns = new Map()

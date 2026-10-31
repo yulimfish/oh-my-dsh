@@ -1086,6 +1086,42 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.equal(path.win32.isAbsolute('C:foo'), false)
   assert.equal(path.win32.join('C:\\base', 'C:foo'), 'C:\\base\\C:foo')
   assert.match('C:foo', /^[a-z]:/iu)
+  const inline = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(inline.ctx, {
+    projectSkillDirs: [],
+    configSkillEntries: {
+      inline: { description: 'Inline config', template: 'INLINE_BODY' },
+      disabled: { description: 'Disabled', template: 'DISABLED_BODY', disable: true },
+      removed: false,
+    },
+    formatCompatibility: true,
+  })
+  const inlineSnapshot = await inline.registry.snapshot({})
+  assert.deepEqual(inlineSnapshot.skills.map(skill => skill.name), ['inline'])
+  const inlineSkill = await inline.registry.get('inline', {})
+  assert.equal(inlineSkill.content, 'INLINE_BODY')
+  assert.equal(inlineSkill.description, '(config - Skill) Inline config')
+  assert.equal(await inline.registry.get('disabled', {}), undefined)
+  assert.equal(await inline.registry.get('removed', {}), undefined)
+  const collision = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(collision.ctx, {
+    projectSkillDirs: [], configSkillPaths: [file],
+    configSkillEntries: { shared: { description: 'Inline wins', template: 'INLINE_SHARED' } },
+    formatCompatibility: true,
+  })
+  assert.equal((await collision.registry.get('shared', { cwd })).content, 'INLINE_SHARED')
+  const strictInline = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strictInline.ctx, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY' } } })
+  assert.equal((await strictInline.registry.get('inline', {})).description, 'Inline config')
+  const inlineProvider = createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY' } }, formatCompatibility: true })
+  const inlineCandidate = (await inlineProvider.list({})).candidates[0]
+  assert.equal(await inlineProvider.get({ ...inlineCandidate, description: 'Forged' }, {}), undefined)
+  const otherInline = createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Other description', template: 'INLINE_BODY' } }, formatCompatibility: true })
+  assert.equal(await otherInline.get(inlineCandidate, {}), undefined)
+  assert.throws(() => createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY', disable: 'yes' } } }), /disable|boolean/u)
+  const boundaryDescription = 'x'.repeat(2_000)
+  const boundaryProvider = createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: boundaryDescription, template: 'INLINE_BODY' } }, formatCompatibility: true })
+  await assert.rejects(boundaryProvider.list({}), /description|2000/u)
 })
 
 test('project candidates override same-named runtime skills in DSH rank order', async t => {

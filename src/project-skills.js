@@ -167,6 +167,30 @@ export function normalizeUserSkillRoots(value, field) {
   return Object.freeze(roots)
 }
 
+function normalizeConfigSkillEntries(value) {
+  if (value === undefined) return Object.freeze([])
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
+    throw new TypeError('configSkillEntries must be a plain object of inline Skill definitions')
+  }
+  const entries = []
+  for (const [name, entry] of Object.entries(value)) {
+    if (!isSkillName(name)) throw new TypeError(`configSkillEntries contains an invalid skill name: ${name}`)
+    if (entry === false || (entry && typeof entry === 'object' && entry.disable === true)) continue
+    if (entry === true) continue
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+      || (Object.getPrototypeOf(entry) !== Object.prototype && Object.getPrototypeOf(entry) !== null)
+      || Object.keys(entry).some(key => !['description', 'template', 'disable'].includes(key))
+      || (entry.disable !== undefined && typeof entry.disable !== 'boolean')
+      || typeof entry.description !== 'string' || entry.description.length === 0 || entry.description.length > 2_000
+      || typeof entry.template !== 'string') {
+      throw new TypeError(`configSkillEntries.${name} must contain only description and template, with boolean disable when provided`)
+    }
+    entries.push(Object.freeze({ name, description: entry.description, template: entry.template }))
+  }
+  return Object.freeze(entries)
+}
+
 function normalizeConfigSkillBase(value) {
   if (value === undefined) return undefined
   if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -778,6 +802,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     if (typeof source !== 'string' || typeof rootPath !== 'string' || candidate.source !== source) return undefined
     return userRoots.find(root => root.rootPath === rootPath && root.source === source)
   }
+  const configSkillEntries = normalizeConfigSkillEntries(options.configSkillEntries)
   const configSkillPaths = normalizeConfigSkillPaths(options.configSkillPaths, options.configSkillBase)
   const configRoots = configSkillPaths.map(source => {
     const sourcePath = typeof source === 'string' ? source : source.path
@@ -1151,9 +1176,17 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     refresh,
     async list(lookup = {}) {
       const cwd = typeof lookup.cwd === 'string' ? lookup.cwd : ''
-      if (!cwd && userRoots.length === 0 && configRoots.length === 0) return { candidates: [], complete: true, priorityComplete: true }
+      if (!cwd && userRoots.length === 0 && configRoots.length === 0 && configSkillEntries.length === 0) return { candidates: [], complete: true, priorityComplete: true }
       const signal = lifecycleSignal(lookup.signal, control.signal)
-      const candidates = []
+      const candidates = configSkillEntries.filter(entry => !disabledSkills.has(entry.name)
+        && (!enabledProjectSkillSet || enabledProjectSkillSet.has(entry.name))
+        && !disabledProjectSkillSet.has(entry.name)).map(entry => ({
+        name: entry.name,
+        description: formatCompatibility ? compatibleSkillDescription(entry.description, 'config') : entry.description,
+        invocation: { modelInvocable: !disabledSkills.has(entry.name), userInvocable: !disabledSkills.has(entry.name) },
+        source: 'config', provider: PROJECT_SKILL_PROVIDER, rank: PROJECT_SKILL_RANK - 1,
+        locator: { inlineEntry: entry },
+      }))
       const startingWatchRevision = watchRevision
       const startingObservationRevision = observationRevision
       let complete = true
@@ -1563,6 +1596,23 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     },
     async get(candidate, lookup = {}) {
       const locator = candidate?.locator
+      if (locator?.inlineEntry) {
+        const entry = configSkillEntries.find(item => item === locator.inlineEntry)
+        if (!entry || candidate.name !== entry.name || candidate.source !== 'config'
+          || candidate.description !== (formatCompatibility ? compatibleSkillDescription(entry.description, 'config') : entry.description)
+          || disabledSkills.has(entry.name)
+          || (enabledProjectSkillSet && !enabledProjectSkillSet.has(entry.name)) || disabledProjectSkillSet.has(entry.name)) return undefined
+        return {
+          name: entry.name,
+          description: formatCompatibility ? compatibleSkillDescription(entry.description, 'config') : entry.description,
+          invocation: {
+            modelInvocable: !disabledSkills.has(entry.name),
+            userInvocable: !disabledSkills.has(entry.name),
+          },
+          source: 'config', provider: PROJECT_SKILL_PROVIDER,
+          content: entry.template,
+        }
+      }
       const configRoot = configuredConfigRoot(candidate)
       if (candidate?.source === 'config' && !configRoot) return undefined
       const externalRoot = configRoot ?? configuredUserRoot(candidate)
