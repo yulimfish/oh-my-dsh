@@ -169,7 +169,7 @@ test('an explicit pinned role still wins over its category fallback chain', asyn
   await tick()
 })
 
-test('role reasoning overrides candidate reasoning while selected candidate tokens override role tokens', async () => {
+test('candidate reasoning overrides role reasoning while selected candidate tokens override role tokens', async () => {
   const calls = []
   const fixture = makeContext(async config => { calls.push(config); return { ...config, reasoningEffort: 'materialized-default' } })
   const tool = mount(fixture, { roleRoutes: [{
@@ -177,7 +177,7 @@ test('role reasoning overrides candidate reasoning while selected candidate toke
     fallbackModels: [{ ...chain[0], reasoningEffort: 'low', maxTokens: 512 }],
   }] })
   await execute(tool)
-  const expected = { ...chain[0], reasoningEffort: 'medium', maxTokens: 512 }
+  const expected = { ...chain[0], reasoningEffort: 'low', maxTokens: 512 }
   assert.deepEqual(calls, [expected])
   assert.deepEqual(fixture.starts[0].request.agentOptions, expected)
   await tick()

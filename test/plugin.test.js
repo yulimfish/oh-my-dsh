@@ -8790,9 +8790,9 @@ test('selects the first valid category fallback for one-shot and continuable chi
   assert.deepEqual(fixture.continuableStarts[0].request.agentOptions, {
     provider: 'durable-fallback', model: 'durable-backup', reasoningEffort: 'low',
   })
-  await oneShot.execute({ role: 'explore', category: 'durable', task: 'Keep role reasoning precedence.' }, { agent: parent, signal })
+  await oneShot.execute({ role: 'explore', category: 'durable', task: 'Keep candidate reasoning precedence.' }, { agent: parent, signal })
   assert.deepEqual(fixture.starts[1].request.agentOptions, {
-    provider: 'durable-fallback', model: 'durable-backup', reasoningEffort: 'high',
+    provider: 'durable-fallback', model: 'durable-backup', reasoningEffort: 'low',
   })
 
   assert.deepEqual(calls.map(({ config }) => [config.provider, config.model, config.reasoningEffort, config.maxTokens]), [
@@ -8801,7 +8801,7 @@ test('selects the first valid category fallback for one-shot and continuable chi
     ['durable-primary', 'durable-model', 'medium', undefined],
     ['durable-fallback', 'durable-backup', 'low', undefined],
     ['durable-primary', 'durable-model', 'high', undefined],
-    ['durable-fallback', 'durable-backup', 'high', undefined],
+    ['durable-fallback', 'durable-backup', 'low', undefined],
   ])
   assert.ok(calls.every(({ signal: preflightSignal }) => preflightSignal instanceof AbortSignal && !preflightSignal.aborted))
   assert.ok(calls.every(({ signal: preflightSignal }) => preflightSignal !== signal), 'each candidate gets a derived deadline signal')
@@ -8866,7 +8866,7 @@ test('role provider/model pins bypass category fallback resolution', async () =>
   })
 })
 
-test('preflights no-category role fallback chains with role settings over candidate settings', async () => {
+test('preflights no-category role fallback chains with candidate settings over role settings', async () => {
   const calls = []
   const fixture = makeContext({ services: {
     llm: {
@@ -8895,13 +8895,13 @@ test('preflights no-category role fallback chains with role settings over candid
   )
   assert.deepEqual(calls.map(({ config }) => config), [
     { provider: 'role-primary', model: 'primary-model', reasoningEffort: 'medium', maxTokens: 1024 },
-    { provider: 'role-first', model: 'first-model', reasoningEffort: 'medium', maxTokens: 1024 },
-    { provider: 'role-last', model: 'last-model', reasoningEffort: 'medium', maxTokens: 512 }
+    { provider: 'role-first', model: 'first-model', reasoningEffort: 'low', maxTokens: 1024 },
+    { provider: 'role-last', model: 'last-model', reasoningEffort: 'high', maxTokens: 512 }
   ])
   assert.ok(calls.every(({ signal: preflightSignal }) => preflightSignal instanceof AbortSignal && !preflightSignal.aborted))
   assert.ok(calls.every(({ signal: preflightSignal }) => preflightSignal !== signal))
   assert.deepEqual(fixture.starts[0].request.agentOptions, {
-    provider: 'role-last', model: 'last-model', reasoningEffort: 'medium', maxTokens: 512,
+    provider: 'role-last', model: 'last-model', reasoningEffort: 'high', maxTokens: 512,
   })
 })
 

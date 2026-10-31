@@ -100,7 +100,7 @@ for (const winner of ['backup-provider', 'alternate-provider']) {
   })
 }
 
-test('role override wins over catalog and candidate reasoning while selected candidate tokens win over role tokens', async () => {
+test('candidate reasoning wins over role and catalog while selected candidate tokens win over role tokens', async () => {
   const fixture = nativeContext(rejectPrimary)
   const tool = mount(fixture, { roleRoutes: [{
     role: 'explore', ...primary, reasoningEffort: 'medium', maxTokens: 1024,
@@ -109,9 +109,9 @@ test('role override wins over catalog and candidate reasoning while selected can
   await execute(fixture, tool)
   assert.deepEqual(fixture.calls, [
     { ...primary, reasoningEffort: 'medium', maxTokens: 1024 },
-    { ...backup, reasoningEffort: 'medium', maxTokens: 256 },
+    { ...backup, reasoningEffort: 'low', maxTokens: 256 },
   ])
-  assert.deepEqual(fixture.starts[0].request.agentOptions, { ...backup, reasoningEffort: 'medium', maxTokens: 256 })
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { ...backup, reasoningEffort: 'low', maxTokens: 256 })
   await tick()
 })
 

@@ -1765,8 +1765,8 @@ async function resolveSelectedFallbackRoute(ctx, route, roleRoute, signal, enabl
     ...fallbackModels.map(fallback => ({
       provider: fallback.provider,
       model: fallback.model,
-      reasoningEffort: roleRoute?.reasoningEffort
-        ?? fallback.reasoningEffort
+      reasoningEffort: fallback.reasoningEffort
+        ?? roleRoute?.reasoningEffort
         ?? route.reasoningEffort
         ?? fallback.routeAlias?.reasoningEffort,
       temperature: fallback.temperature ?? roleRoute?.temperature ?? route.temperature,
