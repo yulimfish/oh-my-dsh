@@ -46,12 +46,19 @@ test('normalizes immutable category primary routes and rejects invalid entries',
   }
   assert.equal(resolveCategoryRoute(routes(), 'build', { temperature: 0.7 }).temperature, 0.7)
   assert.equal(resolveCategoryRoute(routes(), 'build', {}).temperature, 0.2)
+  assert.equal(normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', temperature: 2 }]).get('build').temperature, 2)
+  for (const temperature of [Number.POSITIVE_INFINITY, '0.4']) {
+    assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', temperature }]), /temperature/u)
+  }
   assert.equal(normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', prompt_append: 'bounded guidance' }]).get('build').promptAppend, 'bounded guidance')
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', promptAppend: 'one', prompt_append: 'two' }]), /must not set both/u)
   assert.equal(normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', max_tokens: 256 }]).get('build').maxTokens, 256)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', maxTokens: 1, max_tokens: 2 }]), /must not set both/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', maxTokens: undefined, max_tokens: 2 }]), /must not set both/u)
   assert.equal(normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', fallbackModels: [{ provider: 'b', model: 'b', max_tokens: 128 }] }]).get('build').fallbackModels[0].maxTokens, 128)
+  for (const temperature of [0, 2]) {
+    assert.equal(normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', fallbackModels: [{ provider: 'b', model: 'b', temperature }] }]).get('build').fallbackModels[0].temperature, temperature)
+  }
 })
 
 test('normalizes bounded explicit category fallback model chains immutably', () => {
@@ -88,6 +95,10 @@ test('normalizes bounded explicit category fallback model chains immutably', () 
     ['fractional fallback maxTokens', [{ provider: 'backup-provider', model: 'backup-model', maxTokens: 1.5 }]],
     ['unsupported field', [{ provider: 'backup-provider', model: 'backup-model', topP: 0 }]],
     ['invalid temperature', [{ provider: 'backup-provider', model: 'backup-model', temperature: Number.NaN }]],
+    ['infinite temperature', [{ provider: 'backup-provider', model: 'backup-model', temperature: Number.POSITIVE_INFINITY }]],
+    ['string temperature', [{ provider: 'backup-provider', model: 'backup-model', temperature: '0.4' }]],
+    ['negative temperature', [{ provider: 'backup-provider', model: 'backup-model', temperature: -0.1 }]],
+    ['excess temperature', [{ provider: 'backup-provider', model: 'backup-model', temperature: 2.1 }]],
     ['duplicate primary', [{ provider: 'primary-provider', model: 'primary-model' }]],
     ['duplicate candidate', [
       { provider: 'backup-provider', model: 'backup-model' },

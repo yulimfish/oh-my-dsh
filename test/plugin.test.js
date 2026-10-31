@@ -9655,6 +9655,11 @@ test('validates bounded role fallback chains with or without explicit primary pi
   const tempAlias = makeContext()
   assert.throws(() => apply(tempAlias.ctx, Config({ ...baseConfig, roleRoutes: [{ role: 'explore', provider: 'p', model: 'm', temp: 0.4 }] })), /temp is unsupported; use temperature/u)
   assert.equal(tempAlias.tools.size, 0)
+  for (const temperature of [Number.POSITIVE_INFINITY, '0.4']) {
+    const invalidTemperature = makeContext()
+    assert.throws(() => apply(invalidTemperature.ctx, Config({ ...baseConfig, roleRoutes: [{ role: 'explore', provider: 'p', model: 'm', temperature }] })), /temperature/u)
+    assert.equal(invalidTemperature.tools.size, 0)
+  }
 
   for (const [reasoningEffort, message] of [[' ', /reasoningEffort/u], [0, /expected string/u], [null, /reasoningEffort/u], ['x'.repeat(65), /reasoningEffort/u], ['high\0', /reasoningEffort/u], ['high\nlow', /reasoningEffort/u], ['high\u200e', /reasoningEffort/u], ['high\u061c', /reasoningEffort/u], ['high\u2028low', /reasoningEffort/u], ['high\u2029low', /reasoningEffort/u], [` ${'x'.repeat(64)} `, /reasoningEffort/u]]) {
     const invalidReasoning = makeContext()
