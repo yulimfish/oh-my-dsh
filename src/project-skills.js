@@ -703,6 +703,7 @@ function compatibleSkillDescription(description, scope) {
 function skillDescriptionScope(rootPath, userRoot) {
   if (userRoot?.source === 'config') return 'config'
   if (userRoot?.source === 'user-opencode') return 'opencode'
+  if (userRoot?.source === 'shared') return 'shared'
   if (userRoot) return 'user'
   return rootPath === '.opencode/skills' || rootPath === '.opencode/skill' ? 'opencode-project' : 'project'
 }
@@ -848,11 +849,13 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
   const userOpenCodeRoots = normalizeUserSkillRoots(options.userOpenCodeSkillRoots, 'userOpenCodeSkillRoots')
   const userClaudeRoots = normalizeUserSkillRoots(options.userClaudeSkillRoots, 'userClaudeSkillRoots')
   const userAgentsRoots = normalizeUserSkillRoots(options.userAgentsSkillRoots, 'userAgentsSkillRoots')
+  const sharedSkillRoots = normalizeUserSkillRoots(options.sharedSkillsRootPath === undefined || options.sharedSkillsRootPath === '' ? [] : [options.sharedSkillsRootPath], 'sharedSkillsRootPath')
   const userRoots = [
     ...userOpenCodeRoots.map((rootPath, index) => ({ rootPath, source: 'user-opencode', rank: USER_SKILL_RANK + index })),
     ...userClaudeRoots.map((rootPath, index) => ({ rootPath, source: 'user-claude', rank: USER_SKILL_RANK + userOpenCodeRoots.length + index })),
     // Keep the existing roots' numeric ranks unchanged and all user roots below runtime rank 250.
     ...userAgentsRoots.map((rootPath, index) => ({ rootPath, source: 'user-agents', rank: USER_SKILL_RANK + userOpenCodeRoots.length + userClaudeRoots.length - 0.5 + index * 0.25 })),
+    ...sharedSkillRoots.map(rootPath => ({ rootPath, source: 'shared', rank: 249.95 })),
   ]
   const configuredUserRoot = candidate => {
     const source = candidate?.locator?.userRoot
@@ -918,6 +921,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     ...directories.filter(rootPath => rootPath === '.agents/skills').map((rootPath, index) => ({ rootPath, rank: USER_SKILL_RANK + userClaudeRoots.length * 0.25 + index * 0.25 })),
     ...userRoots.filter(root => root.source === 'user-claude').map((root, index) => ({ ...root, rank: USER_SKILL_RANK + 1 + index * 0.25 })),
     ...userRoots.filter(root => root.source === 'user-agents').map((root, index) => ({ ...root, rank: USER_SKILL_RANK + 1 + userClaudeRoots.length * 0.25 + index * 0.25 })),
+    ...userRoots.filter(root => root.source === 'shared'),
   ] : [...configRoots, ...directories.map((rootPath, index) => ({ rootPath, rank: PROJECT_SKILL_RANK + index })), ...userRoots]
   const disabledSkills = normalizeDisabledSkills(options.disabledSkills)
   const enabledProjectSkills = normalizeEnabledProjectSkills(options.enabledProjectSkills)

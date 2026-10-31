@@ -6,6 +6,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { SkillRegistry } from '@deepseek-ai/dsh-skill'
 import { apply, Config } from '../src/index.js'
+import { createProjectSkillProvider } from '../src/project-skills.js'
 
 // Real file reads and identity checks; inert watches suffice for an immutable fixture.
 function fileSystem() {
@@ -96,6 +97,33 @@ test('full Config defaults userAgentsSkillRoots to an empty list and preserves e
   assert.deepEqual(Config(JSON.parse(JSON.stringify(defaults))).userAgentsSkillRoots, [])
   const roots = ['/example/.agents/skills']
   assert.deepEqual(Config({ userAgentsSkillRoots: roots }).userAgentsSkillRoots, roots)
+})
+
+test('Config loads an explicit shared skills root without cwd or vendored content', async t => {
+  const temp = await mkdtemp(path.join(tmpdir(), 'dsh-shared-skill-config-'))
+  t.after(() => rm(temp, { recursive: true, force: true }))
+  const root = path.join(temp, 'shared', 'skills')
+  await skill(root, 'ast-grep', 'SHARED_BODY')
+  const { ctx, skills } = makeContext(t)
+  apply(ctx, Config({ projectSkillDirs: [], sharedSkillsRootPath: root, enableProjectSkillFormatCompatibility: true }))
+  const loaded = await skills.get('ast-grep', {})
+  assert.equal(loaded.source, 'shared')
+  assert.equal(loaded.description, '(shared - Skill) Fixture ast-grep')
+  assert.equal(loaded.content.trim(), 'SHARED_BODY')
+  const userRoot = path.join(temp, 'user', 'skills')
+  await skill(userRoot, 'ast-grep', 'USER_BODY')
+  const precedence = makeContext(t)
+  apply(precedence.ctx, Config({ projectSkillDirs: [], sharedSkillsRootPath: root, userClaudeSkillRoots: [userRoot], enableProjectSkillFormatCompatibility: true }))
+  assert.equal((await precedence.skills.get('ast-grep', {})).content.trim(), 'USER_BODY')
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, { projectSkillDirs: [], sharedSkillsRootPath: root, formatCompatibility: true })
+  const sharedCandidate = (await provider.list({})).candidates.find(candidate => candidate.name === 'ast-grep')
+  assert.equal(sharedCandidate.rank, 249.95)
+  assert.equal(await provider.get({ ...sharedCandidate, locator: { ...sharedCandidate.locator, userRoot: 'user-claude' } }, {}), undefined)
+  assert.equal(Config({}).sharedSkillsRootPath, '')
+  const invalid = makeContext(t)
+  assert.throws(() => apply(invalid.ctx, Config({ sharedSkillsRootPath: 'relative/skills' })), /sharedSkillsRootPath/u)
 })
 
 test('Config preserves kebab inline tools and from-file metadata fallback', async t => {
