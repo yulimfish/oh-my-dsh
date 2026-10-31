@@ -1042,7 +1042,7 @@ test('format compatibility loads direct skills from an explicit config directory
   const malformedProvider = createProjectSkillProvider(malformedCtx, { signal: malformedLifetime.signal, invalidate() {} }, { projectSkillDirs: [], configSkillPaths: [{ path: source, glob: 'review/**' }], formatCompatibility: true })
   const validCandidate = (await malformedProvider.list({})).candidates.find(item => item.name === 'review')
   assert.equal(await malformedProvider.get({ ...validCandidate, locator: { ...validCandidate.locator, resolverPath: undefined } }, {}), undefined)
-  const { registry: recursiveRegistry } = compatibilityRegistry(t, makeFileSystem().fs, { projectSkillDirs: [], configSkillPaths: [{ path: source, glob: '{container/nested/**,deep/reference/**}', recursive: true }] })
+  const { registry: recursiveRegistry } = compatibilityRegistry(t, makeFileSystem().fs, { projectSkillDirs: [], configSkillPaths: [{ path: source, glob: '{container/nested/**,deep/reference/**,too/deep/**}', recursive: true }] })
   const recursiveSnapshot = await recursiveRegistry.snapshot({})
   assert.deepEqual(recursiveSnapshot.skills.map(skill => skill.name).sort(), ['nested', 'operations'])
   assert.equal((await recursiveRegistry.get('nested', {})).content, 'EXCLUDED_BODY')
