@@ -892,7 +892,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     return {
       rootPath: sourcePath.endsWith('.md') ? dirname(sourcePath) : sourcePath,
       ...(sourcePath.endsWith('.md') ? { filePath: sourcePath } : {}),
-      sourcePath, source: 'config', rank: PROJECT_SKILL_RANK - 1,
+      sourcePath, source: 'config', rank: formatCompatibility ? 249.9 : PROJECT_SKILL_RANK - 1,
       ...(typeof source === 'string' ? {} : { glob: source.glob, matches: picomatch(source.glob, { dot: true, bash: true }), recursive: source.recursive === true }),
     }
   })
@@ -1281,7 +1281,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           name: entry.name,
           description: formatCompatibility ? compatibleSkillDescription(description, 'config') : description,
           invocation: { modelInvocable: !disabledSkills.has(entry.name), userInvocable: !disabledSkills.has(entry.name) },
-          source: 'config', provider: PROJECT_SKILL_PROVIDER, rank: PROJECT_SKILL_RANK - 1,
+          source: 'config', provider: PROJECT_SKILL_PROVIDER, rank: formatCompatibility ? 249.9 : PROJECT_SKILL_RANK - 1,
           locator: { inlineEntry: entry },
           ...(metadata !== undefined ? { metadata } : {}),
           ...(formatCompatibility ? { license, compatibility, allowedTools, argumentHint } : {}),
@@ -1694,6 +1694,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         }
       }
       throwIfAborted(signal)
+      if (formatCompatibility) candidates.sort((left, right) => left.rank - right.rank)
       for (const entry of configSkillEntries.filter(entry => entry.patchOnly)) {
         const existing = candidates.find(candidate => candidate.name === entry.name && !candidate.locator?.inlineEntry)
         if (existing) {
