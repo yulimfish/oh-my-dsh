@@ -180,13 +180,15 @@ function normalizeConfigSkillEntries(value) {
     if (entry === true) continue
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)
       || (Object.getPrototypeOf(entry) !== Object.prototype && Object.getPrototypeOf(entry) !== null)
-      || Object.keys(entry).some(key => !['description', 'template', 'disable'].includes(key))
+      || Object.keys(entry).some(key => !['description', 'template', 'disable', 'from'].includes(key))
       || (entry.disable !== undefined && typeof entry.disable !== 'boolean')
-      || typeof entry.description !== 'string' || entry.description.length === 0 || entry.description.length > 2_000
-      || typeof entry.template !== 'string') {
+      || typeof entry.description !== 'string' || (entry.from === undefined && entry.description.length === 0) || entry.description.length > 2_000
+      || (entry.from !== undefined && (typeof entry.from !== 'string' || entry.from.length === 0 || entry.from.length > 4_096 || entry.from.includes('\0')))
+      || (entry.from !== undefined && entry.template !== undefined && typeof entry.template !== 'string')
+      || (entry.from === undefined && typeof entry.template !== 'string')) {
       throw new TypeError(`configSkillEntries.${name} must contain only description and template, with boolean disable when provided`)
     }
-    entries.push(Object.freeze({ name, description: entry.description, template: entry.template }))
+    entries.push(Object.freeze({ name, description: entry.description, ...(entry.template === undefined ? {} : { template: entry.template }), ...(entry.from === undefined ? {} : { from: entry.from }) }))
   }
   return Object.freeze(entries)
 }
@@ -804,7 +806,25 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
   }
   const configSkillEntries = normalizeConfigSkillEntries(options.configSkillEntries)
   const disabledConfigEntryNames = new Set(Object.entries(options.configSkillEntries ?? {}).filter(([, entry]) => entry === false || (entry && typeof entry === 'object' && entry.disable === true)).map(([name]) => name))
-  const configSkillPaths = normalizeConfigSkillPaths(options.configSkillPaths, options.configSkillBase)
+  const configSkillBase = options.configSkillBase
+  const configSkillPaths = normalizeConfigSkillPaths(options.configSkillPaths, configSkillBase)
+  const readInlineFrom = async (entry, signal) => {
+    if (!entry.from || !configSkillBase?.configDir) return undefined
+    const from = entry.from.startsWith('{file:') && entry.from.endsWith('}') ? entry.from.slice(6, -1) : entry.from
+    if (from.includes('\0')) return undefined
+    try {
+      const configDirTarget = await ctx.fs.resolve(configSkillBase.configDir, { cwd: configSkillBase.configDir, signal })
+      const fileTarget = await ctx.fs.resolve(from, { cwd: configSkillBase.configDir, signal })
+      if (!ctx.fs.contains(configDirTarget, fileTarget)) return undefined
+      const parsed = await readSkillFile(ctx, fileTarget, signal, MAX_SKILL_BYTES, { formatCompatibility: true, defaultName: entry.name, modelScope: 'opencode' })
+      const afterConfigDir = await ctx.fs.resolve(configSkillBase.configDir, { cwd: configSkillBase.configDir, signal })
+      const afterTarget = await ctx.fs.resolve(from, { cwd: configSkillBase.configDir, signal })
+      if (!ctx.fs.contains(afterConfigDir, afterTarget) || afterTarget.targetKey !== fileTarget.targetKey) return undefined
+      return { template: parsed.content, description: entry.description || parsed.description, resourceBase: dirname(fileTarget.displayPath) }
+    } catch {
+      return undefined
+    }
+  }
   const configRoots = configSkillPaths.map(source => {
     const sourcePath = typeof source === 'string' ? source : source.path
     return {
@@ -1179,15 +1199,24 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       const cwd = typeof lookup.cwd === 'string' ? lookup.cwd : ''
       if (!cwd && userRoots.length === 0 && configRoots.length === 0 && configSkillEntries.length === 0) return { candidates: [], complete: true, priorityComplete: true }
       const signal = lifecycleSignal(lookup.signal, control.signal)
-      const candidates = configSkillEntries.filter(entry => !disabledConfigEntryNames.has(entry.name) && !disabledSkills.has(entry.name)
-        && (!enabledProjectSkillSet || enabledProjectSkillSet.has(entry.name))
-        && !disabledProjectSkillSet.has(entry.name)).map(entry => ({
-        name: entry.name,
-        description: formatCompatibility ? compatibleSkillDescription(entry.description, 'config') : entry.description,
-        invocation: { modelInvocable: !disabledSkills.has(entry.name), userInvocable: !disabledSkills.has(entry.name) },
-        source: 'config', provider: PROJECT_SKILL_PROVIDER, rank: PROJECT_SKILL_RANK - 1,
-        locator: { inlineEntry: entry },
-      }))
+      const candidates = []
+      for (const entry of configSkillEntries) {
+        if (disabledConfigEntryNames.has(entry.name) || disabledSkills.has(entry.name)
+          || (enabledProjectSkillSet && !enabledProjectSkillSet.has(entry.name)) || disabledProjectSkillSet.has(entry.name)) continue
+        let description = entry.description
+        if (entry.from && !description) {
+          const loaded = await readInlineFrom(entry, signal)
+          if (!loaded) continue
+          description = loaded.description
+        }
+        candidates.push({
+          name: entry.name,
+          description: formatCompatibility ? compatibleSkillDescription(description, 'config') : description,
+          invocation: { modelInvocable: !disabledSkills.has(entry.name), userInvocable: !disabledSkills.has(entry.name) },
+          source: 'config', provider: PROJECT_SKILL_PROVIDER, rank: PROJECT_SKILL_RANK - 1,
+          locator: { inlineEntry: entry },
+        })
+      }
       const startingWatchRevision = watchRevision
       const startingObservationRevision = observationRevision
       let complete = true
@@ -1602,20 +1631,31 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       if (locator?.inlineEntry) {
         const entry = configSkillEntries.find(item => item === locator.inlineEntry)
         if (!entry || candidate.name !== entry.name || candidate.source !== 'config'
-          || candidate.description !== (formatCompatibility ? compatibleSkillDescription(entry.description, 'config') : entry.description)
           || disabledConfigEntryNames.has(entry.name) || disabledSkills.has(entry.name)
           || (enabledProjectSkillSet && !enabledProjectSkillSet.has(entry.name)) || disabledProjectSkillSet.has(entry.name)) return undefined
+        let template = entry.template
+        let description = entry.description
+        let resourceBase = configSkillBase?.configDir ?? process.cwd()
+        if (entry.from) {
+          const loaded = await readInlineFrom(entry, lookup.signal)
+          if (!loaded) return undefined
+          template = loaded.template
+          description = loaded.description
+          resourceBase = loaded.resourceBase
+        }
+        if (candidate.description !== (formatCompatibility ? compatibleSkillDescription(description, 'config') : description)) return undefined
         return {
           name: entry.name,
-          description: formatCompatibility ? compatibleSkillDescription(entry.description, 'config') : entry.description,
+          description: formatCompatibility ? compatibleSkillDescription(description, 'config') : description,
           invocation: {
             modelInvocable: !disabledSkills.has(entry.name),
             userInvocable: !disabledSkills.has(entry.name),
           },
           source: 'config', provider: PROJECT_SKILL_PROVIDER,
+          ...(entry.from ? { resourceBase: { kind: 'directory', path: resourceBase } } : {}),
           content: formatCompatibility
-            ? `<skill-instruction>\nBase directory for this skill: ${options.configSkillBase?.configDir ?? process.cwd()}/\nFile references (@path) in this skill are relative to this directory.\n\n${resolveCompatibleSkillReferences(entry.template.trim(), options.configSkillBase?.configDir ?? process.cwd())}\n</skill-instruction>\n\n<user-request>\n$ARGUMENTS\n</user-request>`
-            : entry.template,
+            ? `<skill-instruction>\nBase directory for this skill: ${resourceBase}/\nFile references (@path) in this skill are relative to this directory.\n\n${resolveCompatibleSkillReferences(template.trim(), resourceBase)}\n</skill-instruction>\n\n<user-request>\n$ARGUMENTS\n</user-request>`
+            : template,
         }
       }
       const configRoot = configuredConfigRoot(candidate)

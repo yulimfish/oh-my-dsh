@@ -1103,6 +1103,90 @@ test('format compatibility loads direct skills from an explicit config directory
   const referenced = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(referenced.ctx, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'Use @docs/guide.md' } }, configSkillBase: { configDir: cwd }, formatCompatibility: true })
   assert.match((await referenced.registry.get('inline', {})).content, new RegExp(`Use ${cwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/docs/guide.md`, 'u'))
+  await mkdir(path.join(cwd, 'nested'), { recursive: true })
+  await writeFile(path.join(cwd, 'nested/from.md'), '---\ndescription: File description\n---\nUse @nested/reference.md\nFROM_BODY')
+  await writeFile(path.join(cwd, 'nested/reference.md'), 'REFERENCE')
+  const fromRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(fromRegistry.ctx, {
+    projectSkillDirs: [], configSkillBase: { configDir: cwd },
+    configSkillEntries: { inline: { description: 'Entry description', template: 'INLINE_IGNORED', from: 'nested/from.md' } },
+    formatCompatibility: true,
+  })
+  const fromSkill = await fromRegistry.registry.get('inline', {})
+  assert.equal(fromSkill.description, '(config - Skill) Entry description')
+  assert.match(fromSkill.content, /FROM_BODY/u)
+  const canonicalCwd = await realpath(cwd)
+  assert.match(fromSkill.content, new RegExp(`Use ${canonicalCwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/nested/nested/reference.md`, 'u'))
+  const wrappedRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(wrappedRegistry.ctx, {
+    projectSkillDirs: [], configSkillBase: { configDir: cwd },
+    configSkillEntries: { inline: { description: '', from: '{file:nested/from.md}' } },
+    formatCompatibility: true,
+  })
+  assert.equal((await wrappedRegistry.registry.get('inline', {})).description, '(config - Skill) File description')
+  assert.equal(fromSkill.resourceBase.path, path.join(canonicalCwd, 'nested'))
+  const outsideRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(outsideRegistry.ctx, {
+    projectSkillDirs: [], configSkillBase: { configDir: path.join(cwd, 'nested') },
+    configSkillEntries: { inline: { description: 'Outside', from: '../from.md' } },
+    formatCompatibility: true,
+  })
+  assert.equal(await outsideRegistry.registry.get('inline', {}), undefined)
+  const outsideDescriptionRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(outsideDescriptionRegistry.ctx, {
+    projectSkillDirs: [], configSkillBase: { configDir: path.join(cwd, 'nested') },
+    configSkillEntries: { inline: { description: '', from: '../outside-secret.md' } },
+    formatCompatibility: true,
+  })
+  assert.deepEqual((await outsideDescriptionRegistry.registry.snapshot({})).skills, [])
+  const outside = await makeWorkspace(t)
+  await writeFile(path.join(outside, 'secret.md'), 'SECRET')
+  await symlink(path.join(outside, 'secret.md'), path.join(cwd, 'linked-secret.md'))
+  const escapingRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(escapingRegistry.ctx, {
+    projectSkillDirs: [], configSkillBase: { configDir: cwd },
+    configSkillEntries: { inline: { description: 'Escaping', from: 'linked-secret.md' } },
+    formatCompatibility: true,
+  })
+  assert.equal(await escapingRegistry.registry.get('inline', {}), undefined)
+  const hugeRegistry = makeRegistry(makeFileSystem().fs)
+  await writeFile(path.join(cwd, 'huge.md'), 'x'.repeat(256 * 1024 + 1))
+  registerProjectSkillProvider(hugeRegistry.ctx, {
+    projectSkillDirs: [], configSkillBase: { configDir: cwd },
+    configSkillEntries: { inline: { description: 'Huge', from: 'huge.md' } },
+    formatCompatibility: true,
+  })
+  assert.equal(await hugeRegistry.registry.get('inline', {}), undefined)
+  const racePath = path.join(cwd, 'nested/from.md')
+  const { fs: raceFs } = makeFileSystem()
+  const originalRead = raceFs.readBytes
+  let retargeted = false
+  raceFs.readBytes = async (target, signal, limit) => {
+    const bytes = await originalRead(target, signal, limit)
+    if (!retargeted && target.targetKey === await realpath(racePath)) {
+      retargeted = true
+      await unlink(racePath)
+      await symlink(path.join(outside, 'secret.md'), racePath)
+    }
+    return bytes
+  }
+  const raceRegistry = makeRegistry(raceFs)
+  registerProjectSkillProvider(raceRegistry.ctx, {
+    projectSkillDirs: [], configSkillBase: { configDir: cwd },
+    configSkillEntries: { inline: { description: 'Race', from: 'nested/from.md' } },
+    formatCompatibility: true,
+  })
+  assert.equal(await raceRegistry.registry.get('inline', {}), undefined)
+  assert.equal(retargeted, true)
+  await writeFile(path.join(cwd, 'nested/strict-from.md'), '---\ndescription: File description\n---\nSTRICT_FROM_BODY')
+  const strictFromRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strictFromRegistry.ctx, {
+    projectSkillDirs: [], configSkillBase: { configDir: cwd },
+    configSkillEntries: { inline: { description: '', from: 'nested/strict-from.md' } },
+  })
+  const strictFrom = await strictFromRegistry.registry.get('inline', {})
+  assert.equal(strictFrom.description, 'File description')
+  assert.equal(strictFrom.resourceBase.path, path.join(canonicalCwd, 'nested'))
   assert.equal(inlineSkill.description, '(config - Skill) Inline config')
   assert.equal(await inline.registry.get('disabled', {}), undefined)
   assert.equal(await inline.registry.get('removed', {}), undefined)
