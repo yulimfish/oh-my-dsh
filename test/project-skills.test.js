@@ -1051,6 +1051,17 @@ test('format compatibility loads direct skills from an explicit config directory
   const { registry: nonRecursiveRegistry } = compatibilityRegistry(t, makeFileSystem().fs, { projectSkillDirs: [], configSkillPaths: [{ path: source, glob: 'container/nested/**', recursive: false }] })
   assert.deepEqual((await nonRecursiveRegistry.snapshot({})).skills, [])
   assert.throws(() => normalizeConfigSkillPaths([{ path: source, glob: '**', recursive: 'yes' }]), /recursive|bounded/u)
+  const relativeBase = { configDir: source, homeDirectory: cwd }
+  const { registry: relativeRegistry } = compatibilityRegistry(t, makeFileSystem().fs, { projectSkillDirs: [], configSkillPaths: ['./review'], configSkillBase: { configDir: source } })
+  assert.equal((await relativeRegistry.get('review', {})).content, 'CONFIG_DIR_BODY')
+  const { registry: homeRegistry } = compatibilityRegistry(t, makeFileSystem().fs, { projectSkillDirs: [], configSkillPaths: [{ path: '~/source', glob: 'review/**' }], configSkillBase: relativeBase })
+  assert.equal((await homeRegistry.get('review', {})).content, 'CONFIG_DIR_BODY')
+  assert.throws(() => normalizeConfigSkillPaths(['../outside'], relativeBase), /normalized|outside/u)
+  assert.throws(() => normalizeConfigSkillPaths(['~/../outside'], relativeBase), /normalized|outside/u)
+  assert.throws(() => normalizeConfigSkillPaths(['review']), /absolute/u)
+  assert.deepEqual(normalizeConfigSkillPaths(['nested/../review'], { configDir: source }), [path.join(source, 'review')])
+  if (path.sep === '\\') assert.throws(() => normalizeConfigSkillPaths(['C:foo'], { configDir: source }), /absolute/u)
+  else assert.deepEqual(normalizeConfigSkillPaths(['C:foo'], { configDir: source }), [path.join(source, 'C:foo')])
 })
 
 test('project candidates override same-named runtime skills in DSH rank order', async t => {

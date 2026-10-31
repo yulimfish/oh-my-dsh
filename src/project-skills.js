@@ -2,7 +2,7 @@ import { isSkillName } from '@deepseek-ai/dsh-skill'
 import picomatch from 'picomatch'
 import { parseDocument } from 'yaml'
 import { readdir } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, normalize, parse as parsePath, posix, relative, win32 } from 'node:path'
+import { basename, dirname, isAbsolute, join, normalize, parse as parsePath, posix, relative, sep, win32 } from 'node:path'
 
 export const PROJECT_SKILL_PROVIDER = 'dsh-omo-project-skills'
 export const DEFAULT_PROJECT_SKILL_DIRS = Object.freeze(['.opencode/skills', '.opencode/skill', '.claude/skills', '.agents/skills'])
@@ -167,7 +167,22 @@ export function normalizeUserSkillRoots(value, field) {
   return Object.freeze(roots)
 }
 
-export function normalizeConfigSkillPaths(value) {
+function normalizeConfigSkillBase(value) {
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
+    throw new TypeError('configSkillBase must be a plain object with normalized absolute configDir and homeDirectory')
+  }
+  if (Object.keys(value).some(key => !['configDir', 'homeDirectory'].includes(key))
+    || (value.configDir !== undefined && (typeof value.configDir !== 'string' || !isAbsolute(value.configDir) || normalize(value.configDir) !== value.configDir))
+    || (value.homeDirectory !== undefined && (typeof value.homeDirectory !== 'string' || !isAbsolute(value.homeDirectory) || normalize(value.homeDirectory) !== value.homeDirectory))) {
+    throw new TypeError('configSkillBase requires normalized absolute configDir and homeDirectory when provided')
+  }
+  return Object.freeze({ configDir: value.configDir, homeDirectory: value.homeDirectory })
+}
+
+export function normalizeConfigSkillPaths(value, base) {
+  const skillBase = normalizeConfigSkillBase(base)
   if (value === undefined) return Object.freeze([])
   if (!Array.isArray(value) || value.length > 16) throw new TypeError('configSkillPaths must contain at most 16 absolute file or directory paths')
   const paths = []
@@ -180,16 +195,23 @@ export function normalizeConfigSkillPaths(value) {
       && (Object.getPrototypeOf(record) === Object.prototype || Object.getPrototypeOf(record) === null)
       && Object.hasOwn(record, 'path') && Object.hasOwn(record, 'glob')
       && (record.recursive === undefined || typeof record.recursive === 'boolean'))
+    const sourcePath = typeof entry !== 'string' ? undefined : isAbsolute(entry) ? entry : entry === '~' ? skillBase?.homeDirectory : entry.startsWith('~/') ? skillBase?.homeDirectory ? join(skillBase.homeDirectory, entry.slice(2)) : undefined : skillBase?.configDir ? join(skillBase.configDir, entry) : undefined
     if (!validRecord || typeof entry !== 'string' || !entry || entry.trim() !== entry || entry.length > 4_096
-      || !isAbsolute(entry) || normalize(entry) !== entry
+      || (sep === '\\' && /^[a-z]:/iu.test(entry))
+      || !sourcePath || !isAbsolute(sourcePath) || normalize(sourcePath) !== sourcePath
+      || (!isAbsolute(entry) && (() => {
+        const basePath = entry === '~' || entry.startsWith('~/') ? skillBase?.homeDirectory : skillBase?.configDir
+        const rel = basePath ? relative(basePath, sourcePath) : '..'
+        return rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)
+      })())
       || (item && typeof item === 'object' && (typeof glob !== 'string' || glob.length === 0 || glob.length > 512 || glob.includes('\0')))
       || (item && typeof item === 'object' && Object.keys(item).some(key => !['path', 'glob', 'recursive'].includes(key)))
       || /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u2066-\u2069]/u.test(entry)) {
       throw new TypeError('configSkillPaths entries must be normalized absolute file or directory paths with an optional bounded glob')
     }
-    if (seen.has(entry)) throw new TypeError('configSkillPaths must not contain duplicates')
-    seen.add(entry)
-    paths.push(glob === undefined ? entry : { path: entry, glob, ...(record.recursive === undefined ? {} : { recursive: record.recursive }) })
+    if (seen.has(sourcePath)) throw new TypeError('configSkillPaths must not contain duplicates')
+    seen.add(sourcePath)
+    paths.push(glob === undefined ? sourcePath : { path: sourcePath, glob, ...(record.recursive === undefined ? {} : { recursive: record.recursive }) })
   }
   return Object.freeze(paths)
 }
@@ -756,7 +778,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     if (typeof source !== 'string' || typeof rootPath !== 'string' || candidate.source !== source) return undefined
     return userRoots.find(root => root.rootPath === rootPath && root.source === source)
   }
-  const configSkillPaths = normalizeConfigSkillPaths(options.configSkillPaths)
+  const configSkillPaths = normalizeConfigSkillPaths(options.configSkillPaths, options.configSkillBase)
   const configRoots = configSkillPaths.map(source => {
     const sourcePath = typeof source === 'string' ? source : source.path
     return {
