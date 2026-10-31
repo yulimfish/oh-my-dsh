@@ -51,6 +51,8 @@ test('normalizes immutable category primary routes and rejects invalid entries',
     assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', temperature }]), /temperature/u)
   }
   assert.equal(normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', prompt_append: 'bounded guidance' }]).get('build').promptAppend, 'bounded guidance')
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', prompt_append: 'x'.repeat(4097) }]), /promptAppend/u)
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', prompt_append: 'bad\0guidance' }]), /promptAppend/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', promptAppend: 'one', prompt_append: 'two' }]), /must not set both/u)
   assert.equal(normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', max_tokens: 256 }]).get('build').maxTokens, 256)
   for (const max_tokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY, '100']) {
