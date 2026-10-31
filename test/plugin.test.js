@@ -1317,7 +1317,7 @@ test('config patch-only entries update matching bundled skills without creating 
     ...baseConfig,
     enableProjectSkillFormatCompatibility: true,
     configSkillEntries: {
-      debugging: { description: 'Patched debug', metadata: { owner: 'entry' } },
+      debugging: { description: 'Patched debug', metadata: { owner: 'entry' }, agent: 'entry-agent', subtask: false },
       'not-a-skill': { description: 'No winner' },
       'git-master': true,
     },
@@ -1325,6 +1325,8 @@ test('config patch-only entries update matching bundled skills without creating 
   assert.equal(compat.skills.get('debugging').description, '(builtin - Skill) Patched debug')
   assert.deepEqual(compat.skills.get('debugging').metadata, { owner: 'entry' })
   assert.equal(compat.skills.get('debugging').content, original.content)
+  assert.equal(compat.skills.get('debugging').agent, 'entry-agent')
+  assert.equal(compat.skills.get('debugging').subtask, false)
   assert.equal(compat.skills.has('not-a-skill'), false)
   assert.equal(compat.skills.get('git-master').description, SKILLS.find(skill => skill.name === 'git-master').description)
   assert.equal(compat.skills.get('debugging').source, 'bundled')

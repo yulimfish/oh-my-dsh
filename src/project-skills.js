@@ -180,8 +180,9 @@ export function normalizeConfigSkillEntries(value, formatCompatibility = false) 
     if (entry === true) continue
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)
       || (Object.getPrototypeOf(entry) !== Object.prototype && Object.getPrototypeOf(entry) !== null)
-      || Object.keys(entry).some(key => !['description', 'template', 'disable', 'from', 'license', 'compatibility', 'metadata', 'allowedTools', 'allowed-tools', 'argument-hint', ...(formatCompatibility ? ['disable-model-invocation', 'user-invocable'] : [])].includes(key))
+      || Object.keys(entry).some(key => !['description', 'template', 'disable', 'from', 'license', 'compatibility', 'metadata', 'allowedTools', 'allowed-tools', 'argument-hint', 'agent', 'subtask', ...(formatCompatibility ? ['disable-model-invocation', 'user-invocable'] : [])].includes(key))
       || ['license', 'compatibility', 'argument-hint'].some(key => entry[key] !== undefined && typeof entry[key] !== 'string')
+      || (entry.subtask !== undefined && typeof entry.subtask !== 'boolean')
       || (entry.disable !== undefined && typeof entry.disable !== 'boolean')
       || typeof entry.description !== 'string' || (entry.from === undefined && entry.description.length === 0) || entry.description.length > 2_000
       || (entry.from !== undefined && (typeof entry.from !== 'string' || entry.from.length === 0 || entry.from.length > 4_096 || entry.from.includes('\0')))
@@ -211,6 +212,8 @@ export function normalizeConfigSkillEntries(value, formatCompatibility = false) 
       ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
       ...(normalizedTools === undefined ? {} : { allowedTools: normalizedTools }),
       ...(entry['argument-hint'] === undefined ? {} : { argumentHint: entry['argument-hint'] }),
+      ...(entry.agent === undefined ? {} : { agent: entry.agent }),
+      ...(entry.subtask === undefined ? {} : { subtask: entry.subtask }),
       ...(entry.from === undefined && (entry.template === undefined || (formatCompatibility && entry.template === '')) ? { patchOnly: true } : {}) }))
   }
   return Object.freeze(entries)
@@ -773,6 +776,8 @@ export function applyConfigPatch(skill, patch, formatCompatibility, scope) {
       license: patch.license || skill.license,
       compatibility: patch.compatibility || skill.compatibility,
       argumentHint: patch.argumentHint || skill.argumentHint,
+      agent: patch.agent || skill.agent,
+      subtask: patch.subtask ?? skill.subtask,
     } : {}),
   }
 }
@@ -888,7 +893,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       return { template: parsed.content, description: entry.description || parsed.description, resourceBase: dirname(fileTarget.displayPath),
         license: entry.license || parsed.license, compatibility: entry.compatibility || parsed.compatibility,
         metadata: entry.metadata || parsed.metadata, allowedTools: entry.allowedTools || parsed.allowedTools,
-        argumentHint: entry.argumentHint || parsed.argumentHint }
+        argumentHint: entry.argumentHint || parsed.argumentHint, agent: entry.agent || parsed.agent, subtask: entry.subtask ?? parsed.subtask }
     } catch {
       return undefined
     }
@@ -1286,6 +1291,8 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         const license = loaded?.license ?? entry.license
         const compatibility = loaded?.compatibility ?? entry.compatibility
         const argumentHint = loaded?.argumentHint ?? entry.argumentHint
+        const agent = loaded ? loaded.agent : entry.agent
+        const subtask = loaded ? loaded.subtask : entry.subtask
         candidates.push({
           name: entry.name,
           description: formatCompatibility ? compatibleSkillDescription(description, 'config') : description,
@@ -1293,7 +1300,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           source: 'config', provider: PROJECT_SKILL_PROVIDER, rank: formatCompatibility ? 249.9 : PROJECT_SKILL_RANK - 1,
           locator: { inlineEntry: entry },
           ...(metadata !== undefined ? { metadata } : {}),
-          ...(formatCompatibility ? { license, compatibility, allowedTools, argumentHint } : {}),
+          ...(formatCompatibility ? { license, compatibility, allowedTools, argumentHint, agent, subtask } : {}),
           ...(loaded ? { resourceBase: { kind: 'directory', path: loaded.resourceBase } } : {}),
         })
       }
@@ -1729,6 +1736,8 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         let metadata = entry.metadata
         let allowedTools = entry.allowedTools
         let argumentHint = entry.argumentHint
+        let agent = entry.agent
+        let subtask = entry.subtask
         if (entry.from) {
           const loaded = await readInlineFrom(entry, lookup.signal)
           if (!loaded) return undefined
@@ -1740,6 +1749,8 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           metadata = loaded.metadata
           allowedTools = loaded.allowedTools
           argumentHint = loaded.argumentHint
+          agent = loaded.agent
+          subtask = loaded.subtask
         }
         if (entry.patchOnly) return undefined
         const expected = {
@@ -1750,7 +1761,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
             userInvocable: !disabledSkills.has(entry.name),
           },
           metadata,
-          ...(formatCompatibility ? { license, compatibility, allowedTools, argumentHint } : {}),
+          ...(formatCompatibility ? { license, compatibility, allowedTools, argumentHint, agent, subtask } : {}),
         }
         if (!matchesCandidate(expected, candidate, disabledSkills)) return undefined
         return {
@@ -1764,7 +1775,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           ...(entry.from ? { resourceBase: { kind: 'directory', path: resourceBase } } : {}),
           metadata,
           ...(formatCompatibility ? {
-            license, compatibility, allowedTools, argumentHint,
+            license, compatibility, allowedTools, argumentHint, agent, subtask,
           } : {}),
           content: formatCompatibility
             ? `<skill-instruction>\nBase directory for this skill: ${resourceBase}/\nFile references (@path) in this skill are relative to this directory.\n\n${resolveCompatibleSkillReferences(template.trim(), resourceBase)}\n</skill-instruction>\n\n<user-request>\n$ARGUMENTS\n</user-request>`
@@ -1881,7 +1892,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
             : skill.content,
           ...(expectedSkill.metadata !== undefined ? { metadata: expectedSkill.metadata } : {}),
           ...(formatCompatibility ? {
-            agent: skill.agent, subtask: skill.subtask, argumentHint: expectedSkill.argumentHint,
+            agent: expectedSkill.agent, subtask: expectedSkill.subtask, argumentHint: expectedSkill.argumentHint,
             license: expectedSkill.license, compatibility: expectedSkill.compatibility, allowedTools: expectedSkill.allowedTools,
             mcpConfig: skill.mcpConfig,
           } : {}),

@@ -1176,7 +1176,7 @@ test('format compatibility loads direct skills from an explicit config directory
     configSkillEntries: { shared: {
       description: 'Patched description', license: 'MIT', compatibility: 'entry',
       metadata: { owner: 'entry', nested: { replace: 'entry' } },
-      'allowed-tools': [' Grep ', '', 'Write', 'Read'], 'argument-hint': 'entry-hint',
+      'allowed-tools': [' Grep ', '', 'Write', 'Read'], 'argument-hint': 'entry-hint', agent: 'entry-agent', subtask: false,
     } },
     formatCompatibility: true,
   })
@@ -1186,6 +1186,8 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.deepEqual(metadataPatched.metadata, { owner: 'entry', nested: { keep: 'retained', replace: 'entry' } })
   assert.deepEqual(metadataPatched.allowedTools, ['Read', 'Grep', 'Write'])
   assert.equal(metadataPatched.argumentHint, 'entry-hint')
+  assert.equal(metadataPatched.agent, 'entry-agent')
+  assert.equal(metadataPatched.subtask, false)
   const { fs: forgedPatchFs } = makeFileSystem()
   const { ctx: forgedPatchCtx } = makeRegistry(forgedPatchFs)
   const forgedProvider = createProjectSkillProvider(forgedPatchCtx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillPaths: [patchFile], formatCompatibility: true })
@@ -1223,12 +1225,12 @@ test('format compatibility loads direct skills from an explicit config directory
   registerProjectSkillProvider(referenced.ctx, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'Use @docs/guide.md' } }, configSkillBase: { configDir: cwd }, formatCompatibility: true })
   assert.match((await referenced.registry.get('inline', {})).content, new RegExp(`Use ${cwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/docs/guide.md`, 'u'))
   await mkdir(path.join(cwd, 'nested'), { recursive: true })
-  await writeFile(path.join(cwd, 'nested/from.md'), '---\ndescription: File description\nlicense: Apache-2.0\ncompatibility: claude\nmetadata: { owner: file }\nallowed-tools: write\nargument-hint: from-file\ndisable-model-invocation: true\nuser-invocable: false\n---\nUse @nested/reference.md\nFROM_BODY')
+  await writeFile(path.join(cwd, 'nested/from.md'), '---\ndescription: File description\nlicense: Apache-2.0\ncompatibility: claude\nmetadata: { owner: file }\nallowed-tools: write\nargument-hint: from-file\ndisable-model-invocation: true\nuser-invocable: false\nagent: file-agent\nsubtask: true\n---\nUse @nested/reference.md\nFROM_BODY')
   await writeFile(path.join(cwd, 'nested/reference.md'), 'REFERENCE')
   const fromRegistry = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(fromRegistry.ctx, {
     projectSkillDirs: [], configSkillBase: { configDir: cwd },
-    configSkillEntries: { inline: { description: 'Entry description', template: 'INLINE_IGNORED', from: 'nested/from.md', license: 'MIT', metadata: { owner: 'entry' }, 'allowed-tools': 'read' } },
+    configSkillEntries: { inline: { description: 'Entry description', template: 'INLINE_IGNORED', from: 'nested/from.md', license: 'MIT', metadata: { owner: 'entry' }, 'allowed-tools': 'read', agent: 'entry-agent', subtask: false } },
     formatCompatibility: true,
   })
   const fromSkill = await fromRegistry.registry.get('inline', {})
@@ -1237,13 +1239,16 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.equal(fromSkill.description, '(config - Skill) Entry description')
   assert.deepEqual(fromSkill.invocation, { modelInvocable: true, userInvocable: true })
   assert.equal(fromSkill.metadata['allowed-tools'], undefined)
+  assert.equal(fromSkill.agent, 'entry-agent')
+  assert.equal(fromSkill.subtask, false)
   assert.match(fromSkill.content, /FROM_BODY/u)
   const canonicalCwd = await realpath(cwd)
   assert.match(fromSkill.content, new RegExp(`Use ${canonicalCwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/nested/nested/reference.md`, 'u'))
+  await writeFile(path.join(cwd, 'nested/wrapped-from.md'), '---\ndescription: File description\nlicense: Apache-2.0\ncompatibility: claude\nmetadata: { owner: file }\nallowed-tools: write\nargument-hint: from-file\nagent: file-agent\nsubtask: true\n---\nFROM_BODY')
   const wrappedRegistry = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(wrappedRegistry.ctx, {
     projectSkillDirs: [], configSkillBase: { configDir: cwd },
-    configSkillEntries: { inline: { description: '', from: '{file:nested/from.md}', license: '', compatibility: '', 'allowed-tools': '', 'argument-hint': '' } },
+    configSkillEntries: { inline: { description: '', from: '{file:nested/wrapped-from.md}', license: '', compatibility: '', 'allowed-tools': '', 'argument-hint': '' } },
     formatCompatibility: true,
   })
   const wrappedSkill = await wrappedRegistry.registry.get('inline', {})
@@ -1252,6 +1257,13 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.equal(wrappedSkill.compatibility, 'claude')
   assert.deepEqual(wrappedSkill.allowedTools, ['write'])
   assert.equal(wrappedSkill.argumentHint, 'from-file')
+  assert.equal(wrappedSkill.agent, 'file-agent')
+  assert.equal(wrappedSkill.subtask, true)
+  for (const agent of [false, 0, '', null]) {
+    const falsyRegistry = makeRegistry(makeFileSystem().fs)
+    registerProjectSkillProvider(falsyRegistry.ctx, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Falsy', template: 'BODY', agent } }, formatCompatibility: true })
+    assert.equal((await falsyRegistry.registry.get('inline', {})).agent, agent)
+  }
   assert.equal(fromSkill.resourceBase.path, path.join(canonicalCwd, 'nested'))
   assert.equal(fromSkill.license, 'MIT')
   assert.equal(fromSkill.compatibility, 'claude')
