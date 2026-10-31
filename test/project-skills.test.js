@@ -983,6 +983,8 @@ test('format compatibility loads config skills below project files and above run
   assert.equal(await enabledRegistry.get('hidden-config'), undefined)
   const { registry: blockedRegistry } = compatibilityRegistry(t, makeFileSystem().fs, { projectSkillDirs: [], configSkillPaths: [hiddenFile], disabledProjectSkills: ['hidden-config'] })
   assert.equal(await blockedRegistry.get('hidden-config'), undefined)
+  const { registry: conflictRegistry } = compatibilityRegistry(t, makeFileSystem().fs, { projectSkillDirs: [], configSkillPaths: [hiddenFile], enabledProjectSkills: ['hidden-config'], disabledProjectSkills: ['hidden-config'] })
+  assert.equal(await conflictRegistry.get('hidden-config'), undefined, 'disabledProjectSkills wins over enabledProjectSkills')
   for (const filters of [{ disabledSkills: ['hidden-config'] }, { enabledProjectSkills: ['other-config'] }, { disabledProjectSkills: ['hidden-config'] }]) {
     const { fs: unfilteredFs } = makeFileSystem()
     const { ctx: unfilteredCtx } = makeRegistry(unfilteredFs)
