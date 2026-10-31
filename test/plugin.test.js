@@ -9505,6 +9505,11 @@ test('validates bounded role fallback chains with or without explicit primary pi
   const primaryTopP = makeContext()
   assert.throws(() => apply(primaryTopP.ctx, { ...baseConfig, roleRoutes: [{ role: 'explore', provider: 'p', model: 'm', topP: 0.7 }] }), /topP is unsupported/u)
   assert.equal(primaryTopP.tools.size, 0)
+  for (const type of ['enabled', 'disabled']) {
+    const primaryThinking = makeContext()
+    assert.throws(() => apply(primaryThinking.ctx, { ...baseConfig, roleRoutes: [{ role: 'explore', provider: 'p', model: 'm', thinking: { type } }] }), /thinking is unsupported/u)
+    assert.equal(primaryThinking.tools.size, 0)
+  }
 
   for (const maxTokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY]) {
     const invalidTokens = makeContext()
