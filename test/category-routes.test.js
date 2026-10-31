@@ -147,6 +147,9 @@ test('validates fallback-only candidates and retains normalized alias metadata',
   assert.throws(() => normalizeExplicitFallbackModels([
     { provider: 'alias', model: 'm' }, { provider: 'actual', model: 'model' },
   ], 'fallbackModels', undefined, aliases), /duplicate/u)
+  assert.throws(() => normalizeExplicitFallbackModels([
+    { provider: ' actual ', model: ' model ' }, { provider: 'actual', model: 'model' },
+  ], 'fallbackModels', undefined, aliases), /duplicate/u)
 
   for (const fallbackModels of [[], null, 'p/m', [null], [{ provider: 'p' }],
     [{ provider: 'p', model: 'm', extra: true }],
