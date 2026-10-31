@@ -20,6 +20,12 @@ test('normalizes a bounded, exact, opt-in one-hop alias table', () => {
     alias('middle', 'model-v2', 'current', 'model-v3'),
   ]), /must not chain or cycle/u)
   assert.throws(() => normalizeRoleCategoryRouteAliases(true, [alias('same', 'model', 'same', 'model')]), /must not map a route to itself/u)
+  assert.throws(() => normalizeRoleCategoryRouteAliases(true, [
+    alias('a', 'one', 'b', 'two'),
+    alias('b', 'two', 'a', 'one'),
+  ]), /must not chain or cycle/u)
+  assert.throws(() => normalizeRoleCategoryRouteAliases(true, [{ from: { provider: 'legacy' }, to: { provider: 'current', model: 'v2' } }]), /from\.model/u)
+  assert.throws(() => normalizeRoleCategoryRouteAliases(true, [{ from: { provider: 'legacy', model: 'v1' }, to: { model: 'v2' } }]), /to\.provider/u)
   assert.throws(() => normalizeRoleCategoryRouteAliases(true, [alias('legacy', 'model\u202e', 'current', 'model-v2')]), /without control or bidi/u)
   assert.throws(() => normalizeRoleCategoryRouteAliases(true, [alias('legacy', 'model-v1', 'current', 'model-v2', ' ')]), /reasoningEffort.*non-empty string/u)
   assert.throws(() => normalizeRoleCategoryRouteAliases(true, [alias('legacy', 'model-v1', 'current', 'model-v2', 'x'.repeat(65))]), /reasoningEffort.*64 characters/u)
