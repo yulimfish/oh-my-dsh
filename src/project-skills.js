@@ -1526,6 +1526,9 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 }
                 continue
               }
+              if (configRoot && disabledSkills.has(skill.name)) continue
+              if (configRoot && enabledProjectSkillSet && !enabledProjectSkillSet.has(skill.name)) continue
+              if (configRoot && disabledProjectSkillSet.has(skill.name)) continue
               if (!(configRoot ?? userRoot) && disabledProjectSkillSet.has(skill.name)) continue
               if (!(configRoot ?? userRoot) && enabledProjectSkillSet && !enabledProjectSkillSet.has(skill.name)) continue
               if (formatCompatibility && entryInfo.type !== 'directory' && orderedEntry.parentTarget
@@ -1563,6 +1566,9 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       const configRoot = configuredConfigRoot(candidate)
       if (candidate?.source === 'config' && !configRoot) return undefined
       const externalRoot = configRoot ?? configuredUserRoot(candidate)
+      if (configRoot && disabledSkills.has(candidate?.name)) return undefined
+      if (configRoot && enabledProjectSkillSet && !enabledProjectSkillSet.has(candidate?.name)) return undefined
+      if (configRoot && disabledProjectSkillSet.has(candidate?.name)) return undefined
       if (configRoot && typeof locator?.resolverPath !== 'string') return undefined
       if (configRoot && !configRootMatches(configRoot, locator.resolverPath)) return undefined
       if (!externalRoot && disabledProjectSkillSet.has(candidate?.name)) return undefined
