@@ -1088,6 +1088,8 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.match('C:foo', /^[a-z]:/iu)
   const patchFile = path.join(cwd, 'patch-target.md')
   await writeFile(patchFile, '---\nname: shared\ndescription: Original description\n---\nPATCH_BODY')
+  const metadataPatchFile = path.join(cwd, 'metadata-patch-target.md')
+  await writeFile(metadataPatchFile, '---\nname: shared\ndescription: Original description\nlicense: Apache-2.0\ncompatibility: file\nmetadata:\n  owner: file\n  nested:\n    keep: retained\n    replace: file\nallowed-tools: [Read, Grep]\nargument-hint: file-hint\n---\nPATCH_BODY')
   const patchRegistry = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(patchRegistry.ctx, {
     projectSkillDirs: [], configSkillPaths: [patchFile],
@@ -1104,9 +1106,38 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.equal(strictPatched.description, 'Patched description')
   assert.equal(strictPatched.content, 'PATCH_BODY')
   assert.equal(strictPatched.source, 'config')
+  const strictMetadataPatchRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strictMetadataPatchRegistry.ctx, {
+    projectSkillDirs: [], configSkillPaths: [metadataPatchFile],
+    configSkillEntries: { shared: { description: 'Patched description', license: 'MIT', compatibility: 'entry', allowedTools: ['Read'], 'argument-hint': 'entry-hint', metadata: { owner: 'entry' } } },
+  })
+  const strictMetadataSnapshot = await strictMetadataPatchRegistry.registry.snapshot({ cwd })
+  assert.equal(strictMetadataSnapshot.complete, true)
+  const strictMetadataPatched = await strictMetadataPatchRegistry.registry.get('shared', { cwd })
+  assert.ok(strictMetadataPatched)
+  assert.equal(strictMetadataPatched.license, undefined)
+  assert.equal(strictMetadataPatched.allowedTools, undefined)
+  assert.equal(strictMetadataPatched.metadata.owner, 'entry')
+  assert.deepEqual(strictMetadataPatched.metadata.metadata.nested, { keep: 'retained', replace: 'file' })
   const literalPatchRegistry = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(literalPatchRegistry.ctx, { projectSkillDirs: [], configSkillPaths: [patchFile], configSkillEntries: { shared: { description: 'Use $& literally' } }, formatCompatibility: true })
   assert.equal((await literalPatchRegistry.registry.get('shared', { cwd })).description, '(config - Skill) Use $& literally')
+  const metadataPatchRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(metadataPatchRegistry.ctx, {
+    projectSkillDirs: [], configSkillPaths: [metadataPatchFile],
+    configSkillEntries: { shared: {
+      description: 'Patched description', license: 'MIT', compatibility: 'entry',
+      metadata: { owner: 'entry', nested: { replace: 'entry' } },
+      'allowed-tools': [' Grep ', '', 'Write', 'Read'], 'argument-hint': 'entry-hint',
+    } },
+    formatCompatibility: true,
+  })
+  const metadataPatched = await metadataPatchRegistry.registry.get('shared', { cwd })
+  assert.equal(metadataPatched.license, 'MIT')
+  assert.equal(metadataPatched.compatibility, 'entry')
+  assert.deepEqual(metadataPatched.metadata, { owner: 'entry', nested: { keep: 'retained', replace: 'entry' } })
+  assert.deepEqual(metadataPatched.allowedTools, ['Read', 'Grep', 'Write'])
+  assert.equal(metadataPatched.argumentHint, 'entry-hint')
   const { fs: forgedPatchFs } = makeFileSystem()
   const { ctx: forgedPatchCtx } = makeRegistry(forgedPatchFs)
   const forgedProvider = createProjectSkillProvider(forgedPatchCtx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillPaths: [patchFile], formatCompatibility: true })
@@ -1119,7 +1150,7 @@ test('format compatibility loads direct skills from an explicit config directory
   registerProjectSkillProvider(inline.ctx, {
     projectSkillDirs: [],
     configSkillEntries: {
-      inline: { description: 'Inline config', template: '  INLINE_BODY\n' },
+      inline: { description: 'Inline config', template: '  INLINE_BODY\n', license: 'MIT', compatibility: 'opencode', metadata: { owner: 'atlas' }, 'allowed-tools': 'read bash_*', 'argument-hint': 'files' },
       disabled: { description: 'Disabled', template: 'DISABLED_BODY', disable: true },
       removed: false,
     },
@@ -1129,16 +1160,21 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.deepEqual(inlineSnapshot.skills.map(skill => skill.name), ['inline'])
   const inlineSkill = await inline.registry.get('inline', {})
   assert.match(inlineSkill.content, /<skill-instruction>[\s\S]*INLINE_BODY[\s\S]*\$ARGUMENTS/u)
+  assert.equal(inlineSkill.license, 'MIT')
+  assert.equal(inlineSkill.compatibility, 'opencode')
+  assert.deepEqual(inlineSkill.metadata, { owner: 'atlas' })
+  assert.deepEqual(inlineSkill.allowedTools, ['read', 'bash_*'])
+  assert.equal(inlineSkill.argumentHint, 'files')
   const referenced = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(referenced.ctx, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'Use @docs/guide.md' } }, configSkillBase: { configDir: cwd }, formatCompatibility: true })
   assert.match((await referenced.registry.get('inline', {})).content, new RegExp(`Use ${cwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/docs/guide.md`, 'u'))
   await mkdir(path.join(cwd, 'nested'), { recursive: true })
-  await writeFile(path.join(cwd, 'nested/from.md'), '---\ndescription: File description\n---\nUse @nested/reference.md\nFROM_BODY')
+  await writeFile(path.join(cwd, 'nested/from.md'), '---\ndescription: File description\nlicense: Apache-2.0\ncompatibility: claude\nmetadata: { owner: file }\nallowed-tools: write\nargument-hint: from-file\n---\nUse @nested/reference.md\nFROM_BODY')
   await writeFile(path.join(cwd, 'nested/reference.md'), 'REFERENCE')
   const fromRegistry = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(fromRegistry.ctx, {
     projectSkillDirs: [], configSkillBase: { configDir: cwd },
-    configSkillEntries: { inline: { description: 'Entry description', template: 'INLINE_IGNORED', from: 'nested/from.md' } },
+    configSkillEntries: { inline: { description: 'Entry description', template: 'INLINE_IGNORED', from: 'nested/from.md', license: 'MIT', metadata: { owner: 'entry' }, 'allowed-tools': 'read' } },
     formatCompatibility: true,
   })
   const fromSkill = await fromRegistry.registry.get('inline', {})
@@ -1149,11 +1185,21 @@ test('format compatibility loads direct skills from an explicit config directory
   const wrappedRegistry = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(wrappedRegistry.ctx, {
     projectSkillDirs: [], configSkillBase: { configDir: cwd },
-    configSkillEntries: { inline: { description: '', from: '{file:nested/from.md}' } },
+    configSkillEntries: { inline: { description: '', from: '{file:nested/from.md}', license: '', compatibility: '', 'allowed-tools': '', 'argument-hint': '' } },
     formatCompatibility: true,
   })
-  assert.equal((await wrappedRegistry.registry.get('inline', {})).description, '(config - Skill) File description')
+  const wrappedSkill = await wrappedRegistry.registry.get('inline', {})
+  assert.equal(wrappedSkill.description, '(config - Skill) File description')
+  assert.equal(wrappedSkill.license, 'Apache-2.0')
+  assert.equal(wrappedSkill.compatibility, 'claude')
+  assert.deepEqual(wrappedSkill.allowedTools, ['write'])
+  assert.equal(wrappedSkill.argumentHint, 'from-file')
   assert.equal(fromSkill.resourceBase.path, path.join(canonicalCwd, 'nested'))
+  assert.equal(fromSkill.license, 'MIT')
+  assert.equal(fromSkill.compatibility, 'claude')
+  assert.deepEqual(fromSkill.metadata, { owner: 'entry' })
+  assert.deepEqual(fromSkill.allowedTools, ['read'])
+  assert.equal(fromSkill.argumentHint, 'from-file')
   const outsideRegistry = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(outsideRegistry.ctx, {
     projectSkillDirs: [], configSkillBase: { configDir: path.join(cwd, 'nested') },
@@ -1213,9 +1259,13 @@ test('format compatibility loads direct skills from an explicit config directory
     projectSkillDirs: [], configSkillBase: { configDir: cwd },
     configSkillEntries: { inline: { description: '', from: 'nested/strict-from.md' } },
   })
+  const strictFromSnapshot = await strictFromRegistry.registry.snapshot({})
+  const strictFromCandidate = strictFromSnapshot.skills.find(skill => skill.name === 'inline')
+  assert.equal(strictFromCandidate.description, 'File description')
   const strictFrom = await strictFromRegistry.registry.get('inline', {})
   assert.equal(strictFrom.description, 'File description')
   assert.equal(strictFrom.resourceBase.path, path.join(canonicalCwd, 'nested'))
+  assert.deepEqual(strictFrom.metadata, strictFromCandidate.metadata)
   assert.equal(inlineSkill.description, '(config - Skill) Inline config')
   assert.equal(await inline.registry.get('disabled', {}), undefined)
   assert.equal(await inline.registry.get('removed', {}), undefined)
@@ -1243,10 +1293,20 @@ test('format compatibility loads direct skills from an explicit config directory
   const inlineProvider = createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY' } }, formatCompatibility: true })
   const inlineCandidate = (await inlineProvider.list({})).candidates[0]
   assert.equal(await inlineProvider.get({ ...inlineCandidate, description: 'Forged' }, {}), undefined)
+  assert.equal(await inlineProvider.get({ ...inlineCandidate, metadata: { owner: 'forged' } }, {}), undefined)
+  assert.equal(await inlineProvider.get({ ...inlineCandidate, allowedTools: ['forged'] }, {}), undefined)
+  const staleFromProvider = createProjectSkillProvider(fromRegistry.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillBase: { configDir: cwd }, configSkillEntries: { inline: { description: 'Entry description', from: 'nested/from.md' } }, formatCompatibility: true })
+  const staleFromCandidate = (await staleFromProvider.list({})).candidates.find(item => item.name === 'inline')
+  const fromContents = await readFile(path.join(cwd, 'nested/from.md'), 'utf8')
+  await writeFile(path.join(cwd, 'nested/from.md'), fromContents.replace('owner: file', 'owner: changed'))
+  assert.equal(await staleFromProvider.get(staleFromCandidate, {}), undefined)
+  await writeFile(path.join(cwd, 'nested/from.md'), fromContents)
   const otherInline = createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Other description', template: 'INLINE_BODY' } }, formatCompatibility: true })
   assert.equal(await otherInline.get(inlineCandidate, {}), undefined)
   assert.throws(() => createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY', disable: 'yes' } } }), /disable|boolean/u)
   for (const template of [null, 42, {}]) assert.throws(() => createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template } } }), /template/u)
+  for (const allowedTools of [42, ['read', 42], {}]) assert.throws(() => createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY', allowedTools } } }), /allowedTools/u)
+  for (const metadata of [null, [], { bad: undefined }, Object.create({ inherited: true })]) assert.throws(() => createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY', metadata } } }), /metadata/u)
   const boundaryDescription = 'x'.repeat(2_000)
   const boundaryProvider = createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: boundaryDescription, template: 'INLINE_BODY' } }, formatCompatibility: true })
   await assert.rejects(boundaryProvider.list({}), /description|2000/u)

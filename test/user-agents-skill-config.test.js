@@ -98,6 +98,25 @@ test('full Config defaults userAgentsSkillRoots to an empty list and preserves e
   assert.deepEqual(Config({ userAgentsSkillRoots: roots }).userAgentsSkillRoots, roots)
 })
 
+test('Config preserves kebab inline tools and from-file metadata fallback', async t => {
+  const temp = await mkdtemp(path.join(tmpdir(), 'dsh-inline-skill-config-'))
+  t.after(() => rm(temp, { recursive: true, force: true }))
+  await writeFile(path.join(temp, 'from.md'), '---\ndescription: File description\nlicense: Apache-2.0\nallowed-tools: write\nargument-hint: from-file\n---\nFROM_BODY')
+  const { ctx, skills } = makeContext(t)
+  const config = Config({
+    projectSkillDirs: [], configSkillPaths: [], configSkillBase: { configDir: temp },
+    enableProjectSkillFormatCompatibility: true,
+    configSkillEntries: { inline: { description: '', from: 'from.md', 'allowed-tools': '' } },
+  })
+  assert.equal(config.configSkillEntries.inline.allowedTools, undefined)
+  apply(ctx, config)
+  const loaded = await skills.get('inline', { cwd: temp })
+  assert.equal(loaded.description, '(config - Skill) File description')
+  assert.deepEqual(loaded.allowedTools, ['write'])
+  assert.equal(loaded.license, 'Apache-2.0')
+  assert.equal(loaded.argumentHint, 'from-file')
+})
+
 test('apply forwards agents roots to the real registry, with OpenCode > Claude > Agents', async t => {
   const temp = await mkdtemp(path.join(tmpdir(), 'dsh-agents-skill-config-'))
   t.after(() => rm(temp, { recursive: true, force: true }))

@@ -180,7 +180,8 @@ function normalizeConfigSkillEntries(value) {
     if (entry === true) continue
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)
       || (Object.getPrototypeOf(entry) !== Object.prototype && Object.getPrototypeOf(entry) !== null)
-      || Object.keys(entry).some(key => !['description', 'template', 'disable', 'from'].includes(key))
+      || Object.keys(entry).some(key => !['description', 'template', 'disable', 'from', 'license', 'compatibility', 'metadata', 'allowedTools', 'allowed-tools', 'argument-hint'].includes(key))
+      || ['license', 'compatibility', 'argument-hint'].some(key => entry[key] !== undefined && typeof entry[key] !== 'string')
       || (entry.disable !== undefined && typeof entry.disable !== 'boolean')
       || typeof entry.description !== 'string' || (entry.from === undefined && entry.description.length === 0) || entry.description.length > 2_000
       || (entry.from !== undefined && (typeof entry.from !== 'string' || entry.from.length === 0 || entry.from.length > 4_096 || entry.from.includes('\0')))
@@ -188,7 +189,29 @@ function normalizeConfigSkillEntries(value) {
       || (entry.from === undefined && entry.template === undefined && entry.description === undefined)) {
       throw new TypeError(`configSkillEntries.${name} must contain only description and template, with boolean disable when provided`)
     }
-    entries.push(Object.freeze({ name, description: entry.description, ...(entry.template === undefined ? {} : { template: entry.template }), ...(entry.from === undefined ? {} : { from: entry.from }), ...(entry.template === undefined && entry.from === undefined ? { patchOnly: true } : {}) }))
+    const allowedTools = entry.allowedTools ?? entry['allowed-tools']
+    if (allowedTools !== undefined && (typeof allowedTools !== 'string' && (!Array.isArray(allowedTools) || allowedTools.some(tool => typeof tool !== 'string')))) {
+      throw new TypeError(`configSkillEntries.${name}.allowedTools must contain strings`)
+    }
+    const normalizedTools = allowedTools ? (Array.isArray(allowedTools) ? allowedTools.map(tool => tool.trim()) : allowedTools.split(/\s+/u)).filter(Boolean) : undefined
+    if (entry.metadata !== undefined) {
+      if (!entry.metadata || typeof entry.metadata !== 'object' || Array.isArray(entry.metadata)
+        || (Object.getPrototypeOf(entry.metadata) !== Object.prototype && Object.getPrototypeOf(entry.metadata) !== null)
+        || Object.keys(entry.metadata).length > 64) throw new TypeError(`configSkillEntries.${name}.metadata must be a bounded plain object`)
+      try {
+        assertJsonValue(entry.metadata)
+      } catch {
+        throw new TypeError(`configSkillEntries.${name}.metadata must contain JSON-compatible values`)
+      }
+    }
+    entries.push(Object.freeze({ name, description: entry.description,
+      ...(entry.template === undefined ? {} : { template: entry.template }), ...(entry.from === undefined ? {} : { from: entry.from }),
+      ...(entry.license === undefined ? {} : { license: entry.license }),
+      ...(entry.compatibility === undefined ? {} : { compatibility: entry.compatibility }),
+      ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
+      ...(normalizedTools === undefined ? {} : { allowedTools: normalizedTools }),
+      ...(entry['argument-hint'] === undefined ? {} : { argumentHint: entry['argument-hint'] }),
+      ...(entry.template === undefined && entry.from === undefined ? { patchOnly: true } : {}) }))
   }
   return Object.freeze(entries)
 }
@@ -717,6 +740,39 @@ function matchesCandidate(skill, candidate, disabledSkills) {
     && sameSkillField(skill.mcpConfig, candidate.mcpConfig)
 }
 
+function mergeConfigMetadata(base, patch) {
+  if (patch === undefined) return base
+  if (base === undefined) return patch
+  if (!base || !patch || typeof base !== 'object' || typeof patch !== 'object' || Array.isArray(base) || Array.isArray(patch)) return patch
+  const result = { ...base }
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue
+    result[key] = mergeConfigMetadata(result[key], value)
+  }
+  return result
+}
+
+function mergeConfigAllowedTools(base, patch) {
+  if (patch === undefined) return base
+  if (base === undefined) return patch
+  return [...new Set([...base, ...patch])]
+}
+
+function applyConfigPatch(skill, patch, formatCompatibility, scope) {
+  if (!patch) return skill
+  return {
+    ...skill,
+    description: formatCompatibility ? compatibleSkillDescription(patch.description, scope) : patch.description,
+    metadata: mergeConfigMetadata(skill.metadata, patch.metadata),
+    ...(formatCompatibility ? {
+      allowedTools: mergeConfigAllowedTools(skill.allowedTools, patch.allowedTools),
+      license: patch.license || skill.license,
+      compatibility: patch.compatibility || skill.compatibility,
+      argumentHint: patch.argumentHint || skill.argumentHint,
+    } : {}),
+  }
+}
+
 function skillFormatPaths(rootPath, resolverPath) {
   if (typeof rootPath !== 'string' || typeof resolverPath !== 'string' || !resolverPath.startsWith(`${rootPath}/`)) return undefined
   const parts = resolverPath.slice(rootPath.length + 1).split('/')
@@ -820,7 +876,10 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       const afterConfigDir = await ctx.fs.resolve(configSkillBase.configDir, { cwd: configSkillBase.configDir, signal })
       const afterTarget = await ctx.fs.resolve(from, { cwd: configSkillBase.configDir, signal })
       if (!ctx.fs.contains(afterConfigDir, afterTarget) || afterTarget.targetKey !== fileTarget.targetKey) return undefined
-      return { template: parsed.content, description: entry.description || parsed.description, resourceBase: dirname(fileTarget.displayPath) }
+      return { template: parsed.content, description: entry.description || parsed.description, resourceBase: dirname(fileTarget.displayPath),
+        license: entry.license || parsed.license, compatibility: entry.compatibility || parsed.compatibility,
+        metadata: entry.metadata || parsed.metadata, allowedTools: entry.allowedTools || parsed.allowedTools,
+        argumentHint: entry.argumentHint || parsed.argumentHint }
     } catch {
       return undefined
     }
@@ -1204,18 +1263,26 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         if (entry.patchOnly) continue
         if (disabledConfigEntryNames.has(entry.name) || disabledSkills.has(entry.name)
           || (enabledProjectSkillSet && !enabledProjectSkillSet.has(entry.name)) || disabledProjectSkillSet.has(entry.name)) continue
-        let description = entry.description
-        if (entry.from && !description) {
-          const loaded = await readInlineFrom(entry, signal)
+        let loaded
+        if (entry.from) {
+          loaded = await readInlineFrom(entry, signal)
           if (!loaded) continue
-          description = loaded.description
         }
+        const description = loaded?.description ?? entry.description
+        const metadata = loaded?.metadata ?? entry.metadata
+        const allowedTools = loaded?.allowedTools ?? entry.allowedTools
+        const license = loaded?.license ?? entry.license
+        const compatibility = loaded?.compatibility ?? entry.compatibility
+        const argumentHint = loaded?.argumentHint ?? entry.argumentHint
         candidates.push({
           name: entry.name,
           description: formatCompatibility ? compatibleSkillDescription(description, 'config') : description,
           invocation: { modelInvocable: !disabledSkills.has(entry.name), userInvocable: !disabledSkills.has(entry.name) },
           source: 'config', provider: PROJECT_SKILL_PROVIDER, rank: PROJECT_SKILL_RANK - 1,
           locator: { inlineEntry: entry },
+          ...(metadata !== undefined ? { metadata } : {}),
+          ...(formatCompatibility ? { license, compatibility, allowedTools, argumentHint } : {}),
+          ...(loaded ? { resourceBase: { kind: 'directory', path: loaded.resourceBase } } : {}),
         })
       }
       const startingWatchRevision = watchRevision
@@ -1624,11 +1691,11 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         }
       }
       throwIfAborted(signal)
-      for (const entry of configSkillEntries.filter(entry => entry.patchOnly && entry.description)) {
+      for (const entry of configSkillEntries.filter(entry => entry.patchOnly)) {
         const existing = candidates.find(candidate => candidate.name === entry.name && !candidate.locator?.inlineEntry)
         if (existing) {
           const scope = formatCompatibility ? existing.description.match(/^\(([^)]+) - Skill\) /u)?.[1] : undefined
-          existing.description = formatCompatibility && scope ? compatibleSkillDescription(entry.description, scope) : entry.description
+          Object.assign(existing, applyConfigPatch(existing, entry, formatCompatibility, scope))
         }
       }
       const stable = startingWatchRevision === watchRevision && startingObservationRevision === observationRevision
@@ -1644,17 +1711,35 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         let template = entry.template
         let description = entry.description
         let resourceBase = configSkillBase?.configDir ?? process.cwd()
+        let license = entry.license
+        let compatibility = entry.compatibility
+        let metadata = entry.metadata
+        let allowedTools = entry.allowedTools
+        let argumentHint = entry.argumentHint
         if (entry.from) {
           const loaded = await readInlineFrom(entry, lookup.signal)
           if (!loaded) return undefined
           template = loaded.template
           description = loaded.description
           resourceBase = loaded.resourceBase
+          license = loaded.license
+          compatibility = loaded.compatibility
+          metadata = loaded.metadata
+          allowedTools = loaded.allowedTools
+          argumentHint = loaded.argumentHint
         }
         if (entry.patchOnly) return undefined
-        if (candidate.description !== (formatCompatibility ? compatibleSkillDescription(description, 'config') : description)
-          && !configSkillEntries.some(patch => patch.patchOnly && patch.name === entry.name
-            && candidate.description === (formatCompatibility ? compatibleSkillDescription(patch.description, 'config') : patch.description))) return undefined
+        const expected = {
+          name: entry.name,
+          description: formatCompatibility ? compatibleSkillDescription(description, 'config') : description,
+          invocation: {
+            modelInvocable: !disabledSkills.has(entry.name),
+            userInvocable: !disabledSkills.has(entry.name),
+          },
+          metadata,
+          ...(formatCompatibility ? { license, compatibility, allowedTools, argumentHint } : {}),
+        }
+        if (!matchesCandidate(expected, candidate, disabledSkills)) return undefined
         return {
           name: entry.name,
           description: candidate.description,
@@ -1664,6 +1749,10 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           },
           source: 'config', provider: PROJECT_SKILL_PROVIDER,
           ...(entry.from ? { resourceBase: { kind: 'directory', path: resourceBase } } : {}),
+          metadata,
+          ...(formatCompatibility ? {
+            license, compatibility, allowedTools, argumentHint,
+          } : {}),
           content: formatCompatibility
             ? `<skill-instruction>\nBase directory for this skill: ${resourceBase}/\nFile references (@path) in this skill are relative to this directory.\n\n${resolveCompatibleSkillReferences(template.trim(), resourceBase)}\n</skill-instruction>\n\n<user-request>\n$ARGUMENTS\n</user-request>`
             : template,
@@ -1741,11 +1830,14 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         }
         throwIfAborted(signal)
         if (locator.observationRevision !== observationRevision) return undefined
-        const patch = configSkillEntries.find(entry => entry.patchOnly && entry.name === candidate.name && entry.description)
-        const expectedDescription = patch
-          ? formatCompatibility ? compatibleSkillDescription(patch.description, skillDescriptionScope(locator.rootPath, externalRoot)) : patch.description
-          : formatCompatibility ? compatibleSkillDescription(skill.description, skillDescriptionScope(locator.rootPath, externalRoot)) : skill.description
-        const candidateMatches = matchesCandidate({ ...skill, description: expectedDescription }, candidate, disabledSkills)
+        const patch = configSkillEntries.find(entry => entry.patchOnly && entry.name === candidate.name)
+        const scope = skillDescriptionScope(locator.rootPath, externalRoot)
+        const baseSkill = formatCompatibility
+          ? { ...skill, description: compatibleSkillDescription(skill.description, scope) }
+          : skill
+        const expectedSkill = applyConfigPatch(baseSkill, patch, formatCompatibility, scope)
+        const expectedDescription = expectedSkill.description
+        const candidateMatches = matchesCandidate(expectedSkill, candidate, disabledSkills)
         if (!candidateMatches) {
           invalidateObservation()
           return undefined
@@ -1774,10 +1866,10 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           content: formatCompatibility
             ? resolveCompatibleSkillReferences(skill.content, locator.skillDirectoryTarget.displayPath)
             : skill.content,
-          ...(skill.metadata !== undefined ? { metadata: skill.metadata } : {}),
+          ...(expectedSkill.metadata !== undefined ? { metadata: expectedSkill.metadata } : {}),
           ...(formatCompatibility ? {
-            agent: skill.agent, subtask: skill.subtask, argumentHint: skill.argumentHint,
-            license: skill.license, compatibility: skill.compatibility, allowedTools: skill.allowedTools,
+            agent: skill.agent, subtask: skill.subtask, argumentHint: expectedSkill.argumentHint,
+            license: expectedSkill.license, compatibility: expectedSkill.compatibility, allowedTools: expectedSkill.allowedTools,
             mcpConfig: skill.mcpConfig,
           } : {}),
         }
