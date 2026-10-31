@@ -4,7 +4,7 @@ import { isSkillName } from '@deepseek-ai/dsh-skill'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { buildWorkerPrompt, normalizeRolePromptAppend, ROLE_NAMES } from './roles.js'
 import { SKILLS } from './skills.js'
-import { DEFAULT_PROJECT_SKILL_DIRS, normalizeDisabledSkills, normalizeDisabledProjectSkills, normalizeEnabledProjectSkills, normalizeProjectSkillDirs, registerProjectSkillProvider } from './project-skills.js'
+import { DEFAULT_PROJECT_SKILL_DIRS, normalizeConfigSkillPaths, normalizeDisabledSkills, normalizeDisabledProjectSkills, normalizeEnabledProjectSkills, normalizeProjectSkillDirs, registerProjectSkillProvider } from './project-skills.js'
 import { createGoalCommand, createStopContinuationCommand } from './goals.js'
 import { registerGoalTools } from './goal-tools.js'
 import { registerTeamTools } from './teams.js'
@@ -246,6 +246,7 @@ export const Config = z.object({
   userOpenCodeSkillRoots: z.array(z.string()).default([]),
   userClaudeSkillRoots: z.array(z.string()).default([]),
   userAgentsSkillRoots: z.array(z.string()).default([]),
+  configSkillPaths: z.array(z.string()).default([]),
   enabledProjectSkills: z.union([z.array(z.string()), z.const(null)]),
   disabledProjectSkills: z.array(z.string()).default([]),
   disabledOmoBundledSkills: z.array(z.string()).default([]),
@@ -4226,12 +4227,14 @@ export function apply(ctx, rawConfig) {
   const disabledOmoBundledSkills = normalizeDisabledOmoBundledSkills(config.disabledOmoBundledSkills)
   const activeBundledSkills = SKILLS.filter(skill => !disabledOmoBundledSkills.has(skill.name))
   const disabledSkillSet = normalizeDisabledSkills(config.disabledSkills)
+  const configSkillPaths = normalizeConfigSkillPaths(config.configSkillPaths)
   const projectSkills = registerProjectSkillProvider(ctx, {
     projectSkillDirs, disabledSkills: [...disabledSkillSet], enabledProjectSkills, disabledProjectSkills,
     formatCompatibility: config.enableProjectSkillFormatCompatibility,
     userOpenCodeSkillRoots: config.userOpenCodeSkillRoots,
     userClaudeSkillRoots: config.userClaudeSkillRoots,
     userAgentsSkillRoots: config.userAgentsSkillRoots,
+    configSkillPaths,
   })
   const activeChildren = new Set()
   const activeRuns = new Map()

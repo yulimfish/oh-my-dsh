@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { SkillRegistry } from '@deepseek-ai/dsh-skill'
-import { createProjectSkillProvider, normalizeProjectSkillDirs, normalizeUserSkillRoots, registerProjectSkillProvider, resolveCompatibleSkillReferences } from '../src/project-skills.js'
+import { createProjectSkillProvider, normalizeConfigSkillPaths, normalizeProjectSkillDirs, normalizeUserSkillRoots, registerProjectSkillProvider, resolveCompatibleSkillReferences } from '../src/project-skills.js'
 
 function isWithin(parent, child) {
   const relative = path.relative(parent, child)
@@ -909,6 +909,82 @@ test('loads skills using a cwd-relative resolver path rather than UI displayPath
   const loaded = await registry.get('display-safe-skill', { cwd })
   assert.equal(loaded.content, 'Load from the opaque filesystem target.')
   provider.dispose()
+})
+
+test('format compatibility loads an explicit config-source Markdown file before project skills', async t => {
+  const cwd = await makeWorkspace(t)
+  const file = path.join(cwd, 'custom.md')
+  await writeFile(file, '---\nname: shared\ndescription: Config source\n---\nCONFIG_BODY')
+  await writeCompatibilityDocument(cwd, 'project/SKILL.md', '---\nname: shared\ndescription: Project source\n---\nPROJECT_BODY')
+  const { fs } = makeFileSystem()
+  const { ctx, registry } = makeRegistry(fs)
+  const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: ['.opencode/skills'], configSkillPaths: [file], formatCompatibility: true })
+  t.after(() => registration.dispose())
+  const snapshot = await registry.snapshot({ cwd })
+  assert.equal(snapshot.skills[0]?.source, 'config')
+  assert.equal(snapshot.skills[0]?.description, '(config - Skill) Config source')
+  const loaded = await registry.get('shared', { cwd })
+  assert.equal(loaded.content, 'CONFIG_BODY')
+  assert.equal(loaded.resourceBase.path, await realpath(cwd))
+  assert.deepEqual(normalizeConfigSkillPaths(undefined), [])
+  assert.deepEqual(normalizeConfigSkillPaths([file]), [file])
+  assert.throws(() => normalizeConfigSkillPaths([file, file]), /duplicates/u)
+  for (const invalid of ['relative.md', `${cwd}/upper.MD`, `${cwd}/missing.txt`, `${cwd}/../outside.md`]) {
+    assert.throws(() => normalizeConfigSkillPaths([invalid]), /absolute Markdown|normalized/u)
+  }
+  const strict = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strict.ctx, { projectSkillDirs: [], configSkillPaths: [file] })
+  assert.equal((await strict.registry.get('shared', { cwd })).description, 'Config source')
+  const hiddenFile = path.join(cwd, '.hidden.md')
+  await writeFile(hiddenFile, '---\nname: hidden-config\ndescription: Hidden config\n---\nHIDDEN_BODY')
+  const externalRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(externalRegistry.ctx, { projectSkillDirs: [], configSkillPaths: [hiddenFile], enabledProjectSkills: [], disabledProjectSkills: ['hidden-config'], formatCompatibility: true })
+  assert.equal((await externalRegistry.registry.get('hidden-config')).content, 'HIDDEN_BODY')
+  const defaultRoots = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(defaultRoots.ctx, { configSkillPaths: [hiddenFile], formatCompatibility: true })
+  assert.equal((await defaultRoots.registry.get('hidden-config', {})).content, 'HIDDEN_BODY')
+  const strictExternal = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(strictExternal.ctx, { projectSkillDirs: [], configSkillPaths: [hiddenFile], enabledProjectSkills: [], disabledProjectSkills: ['hidden-config'] })
+  assert.equal((await strictExternal.registry.get('hidden-config')).content, 'HIDDEN_BODY')
+  const forgedFs = makeFileSystem().fs
+  const forgedReads = []
+  const readBytes = forgedFs.readBytes
+  forgedFs.readBytes = async (target, signal, limit) => {
+    forgedReads.push(target.targetKey)
+    return readBytes(target, signal, limit)
+  }
+  const { ctx: forgedCtx } = makeRegistry(forgedFs)
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const provider = createProjectSkillProvider(forgedCtx, { signal: lifetime.signal, invalidate() {} }, { projectSkillDirs: [], configSkillPaths: [file], formatCompatibility: true })
+  const candidate = (await provider.list({ cwd })).candidates.find(item => item.name === 'shared')
+  const sibling = path.join(cwd, 'sibling.md')
+  await writeFile(sibling, '---\nname: shared\ndescription: Config source\n---\nSIBLING_BODY')
+  const siblingTarget = await forgedFs.resolve(sibling, { cwd })
+  const siblingReadsBeforeForge = forgedReads.filter(target => target === siblingTarget.targetKey).length
+  const forgedCandidate = {
+    ...candidate,
+    locator: { ...candidate.locator, resolverPath: sibling, fileTarget: siblingTarget },
+  }
+  assert.equal(await provider.get(forgedCandidate, { cwd }), undefined)
+  assert.equal(forgedReads.filter(target => target === siblingTarget.targetKey).length, siblingReadsBeforeForge)
+  const manyFiles = []
+  for (let index = 0; index < 16; index += 1) {
+    const configFile = path.join(cwd, `config-${index}.md`)
+    await writeFile(configFile, `---\nname: shared\ndescription: Config ${index}\n---\nCONFIG_${index}`)
+    manyFiles.push(configFile)
+  }
+  const many = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(many.ctx, { projectSkillDirs: ['.opencode/skills'], configSkillPaths: manyFiles, formatCompatibility: true })
+  const last = (await many.registry.snapshot({ cwd })).skills.find(skill => skill.source === 'config')
+  assert.equal(last.description, '(config - Skill) Config 0')
+  assert.equal((await many.registry.get('shared', { cwd })).content, 'CONFIG_0')
+  const strictMany = makeRegistry(makeFileSystem().fs)
+  const strictProvider = createProjectSkillProvider(strictMany.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: ['.opencode/skills'], configSkillPaths: manyFiles })
+  const strictListed = await strictProvider.list({ cwd })
+  const strictCandidate = strictListed.candidates.find(skill => skill.source === 'project-opencode')
+  assert.equal(strictCandidate.rank, 230)
+  assert.equal(strictListed.candidates.filter(skill => skill.source === 'config').every(skill => skill.rank === 229), true)
 })
 
 test('project candidates override same-named runtime skills in DSH rank order', async t => {

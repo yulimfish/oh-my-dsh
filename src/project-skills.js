@@ -166,6 +166,24 @@ export function normalizeUserSkillRoots(value, field) {
   return Object.freeze(roots)
 }
 
+export function normalizeConfigSkillPaths(value) {
+  if (value === undefined) return Object.freeze([])
+  if (!Array.isArray(value) || value.length > 16) throw new TypeError('configSkillPaths must contain at most 16 absolute Markdown files')
+  const paths = []
+  const seen = new Set()
+  for (const entry of value) {
+    if (typeof entry !== 'string' || !entry || entry.trim() !== entry || entry.length > 4_096
+      || !isAbsolute(entry) || normalize(entry) !== entry || !entry.endsWith('.md')
+      || /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u2066-\u2069]/u.test(entry)) {
+      throw new TypeError('configSkillPaths entries must be normalized absolute Markdown file paths')
+    }
+    if (seen.has(entry)) throw new TypeError('configSkillPaths must not contain duplicates')
+    seen.add(entry)
+    paths.push(entry)
+  }
+  return Object.freeze(paths)
+}
+
 export function normalizeDisabledSkills(value = []) {
   if (!Array.isArray(value) || value.length > MAX_SKILLS) throw new TypeError(`disabledSkills must contain at most ${MAX_SKILLS} skill names`)
   const result = new Set()
@@ -602,6 +620,7 @@ function compatibleSkillDescription(description, scope) {
 }
 
 function skillDescriptionScope(rootPath, userRoot) {
+  if (userRoot?.source === 'config') return 'config'
   if (userRoot?.source === 'user-opencode') return 'opencode'
   if (userRoot) return 'user'
   return rootPath === '.opencode/skills' || rootPath === '.opencode/skill' ? 'opencode-project' : 'project'
@@ -727,15 +746,26 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     if (typeof source !== 'string' || typeof rootPath !== 'string' || candidate.source !== source) return undefined
     return userRoots.find(root => root.rootPath === rootPath && root.source === source)
   }
+  const configSkillPaths = normalizeConfigSkillPaths(options.configSkillPaths)
+  const configRoots = configSkillPaths.map((filePath, index) => ({
+    rootPath: dirname(filePath), filePath, source: 'config', rank: PROJECT_SKILL_RANK - 1,
+  }))
+  const configuredConfigRoot = candidate => {
+    const locator = candidate?.locator
+    return candidate?.source === 'config' && locator?.userRoot === 'config' && locator?.configFile === locator.resolverPath
+      ? configRoots.find(root => root.filePath === locator.configFile && root.rootPath === locator.rootPath)
+      : undefined
+  }
   const directories = normalizeProjectSkillDirs(options.projectSkillDirs)
   const discoveryRoots = formatCompatibility ? [
+    ...configRoots,
     ...directories.filter(rootPath => rootPath === '.opencode/skills' || rootPath === '.opencode/skill').map((rootPath, index) => ({ rootPath, rank: PROJECT_SKILL_RANK + index })),
     ...userRoots.filter(root => root.source === 'user-opencode').map((root, index) => ({ ...root, rank: USER_SKILL_RANK - 1 + index * 0.25 })),
     ...directories.filter(rootPath => rootPath === '.claude/skills').map((rootPath, index) => ({ rootPath, rank: USER_SKILL_RANK + index * 0.25 })),
     ...directories.filter(rootPath => rootPath === '.agents/skills').map((rootPath, index) => ({ rootPath, rank: USER_SKILL_RANK + userClaudeRoots.length * 0.25 + index * 0.25 })),
     ...userRoots.filter(root => root.source === 'user-claude').map((root, index) => ({ ...root, rank: USER_SKILL_RANK + 1 + index * 0.25 })),
     ...userRoots.filter(root => root.source === 'user-agents').map((root, index) => ({ ...root, rank: USER_SKILL_RANK + 1 + userClaudeRoots.length * 0.25 + index * 0.25 })),
-  ] : [...directories.map((rootPath, index) => ({ rootPath, rank: PROJECT_SKILL_RANK + index })), ...userRoots]
+  ] : [...configRoots, ...directories.map((rootPath, index) => ({ rootPath, rank: PROJECT_SKILL_RANK + index })), ...userRoots]
   const disabledSkills = normalizeDisabledSkills(options.disabledSkills)
   const enabledProjectSkills = normalizeEnabledProjectSkills(options.enabledProjectSkills)
   const enabledProjectSkillSet = enabledProjectSkills === undefined ? undefined : new Set(enabledProjectSkills)
@@ -1042,7 +1072,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       source: userRoot?.source ?? sourceForDirectory(rootPath),
       resourceBase: { kind: 'directory', path: skillDirectoryTarget.displayPath },
       invocation,
-      rank: formatCompatibility ? discoveryRoots[rootIndex].rank : userRoot ? userRoot.rank : PROJECT_SKILL_RANK + rootIndex,
+      rank: discoveryRoots[rootIndex].rank,
       userRoot: userRoot?.source,
       locator: { rootTarget, skillDirectoryTarget, fileTarget, rootPath, resolverPath, userRoot: userRoot?.source, observationRevision: revision, allowSymlink },
       ...(skill.metadata !== undefined ? { metadata: skill.metadata } : {}),
@@ -1076,7 +1106,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     refresh,
     async list(lookup = {}) {
       const cwd = typeof lookup.cwd === 'string' ? lookup.cwd : ''
-      if (!cwd && userRoots.length === 0) return { candidates: [], complete: true, priorityComplete: true }
+      if (!cwd && userRoots.length === 0 && configRoots.length === 0) return { candidates: [], complete: true, priorityComplete: true }
       const signal = lifecycleSignal(lookup.signal, control.signal)
       const candidates = []
       const startingWatchRevision = watchRevision
@@ -1108,7 +1138,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         } catch (error) {
           if (signal?.aborted) throw error
           warn(ctx, 'dsh-omo could not resolve the skill lookup cwd', error)
-          if (userRoots.length === 0) return { candidates, complete: false, priorityComplete: false }
+          if (userRoots.length === 0 && configRoots.length === 0) return { candidates, complete: false, priorityComplete: false }
         }
       }
 
@@ -1116,11 +1146,16 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         if (scanExhausted) break
         throwIfAborted(signal)
         const discoveryRoot = discoveryRoots[rootIndex]
-        const userRoot = 'source' in discoveryRoot ? discoveryRoot : undefined
+        const configRoot = discoveryRoot.source === 'config' ? discoveryRoot : undefined
+        const userRoot = !configRoot && 'source' in discoveryRoot ? discoveryRoot : undefined
         const rootPath = discoveryRoot.rootPath
-        if (!userRoot && !cwdTarget) { markIncomplete(); continue }
-        if (!userRoot && !await watchSymlinkParents(rootPath, cwd, cwdTarget, signal, startingWatchRevision)) markIncomplete()
+        if (!(configRoot ?? userRoot) && !cwdTarget) {
+          if (cwd) markIncomplete()
+          continue
+        }
+        if (!(configRoot ?? userRoot) && !await watchSymlinkParents(rootPath, cwd, cwdTarget, signal, startingWatchRevision)) markIncomplete()
         if (userRoot && !await watchAbsoluteSkillRoot(rootPath, cwd, signal, startingWatchRevision, false)) markIncomplete()
+        if (configRoot && !await watchAbsoluteSkillRoot(rootPath, rootPath, signal, startingWatchRevision, false)) markIncomplete()
         let rootTarget
         try {
           rootTarget = await fs.resolve(rootPath, { cwd, signal })
@@ -1128,8 +1163,8 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           if (signal?.aborted) throw error
           warn(ctx, 'dsh-omo could not resolve a project skill root', error)
           if (error?.code === 'FS_NOT_FOUND') {
-            if (userRoot) {
-              if (!await watchAbsoluteSkillRoot(rootPath, cwd, signal, startingWatchRevision, true)) markIncomplete()
+            if (userRoot || configRoot) {
+              if (!await watchAbsoluteSkillRoot(rootPath, configRoot ? rootPath : cwd, signal, startingWatchRevision, true)) markIncomplete()
             } else if (!await watchNearestExistingAncestor(rootPath, cwd, cwdTarget, signal, startingWatchRevision)) markIncomplete()
           } else {
             markIncomplete()
@@ -1137,12 +1172,12 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           continue
         }
         try {
-          if (!userRoot && !fs.contains(cwdTarget, rootTarget)) {
+          if (!(configRoot ?? userRoot) && !fs.contains(cwdTarget, rootTarget)) {
             markIncomplete()
             warn(ctx, 'dsh-omo skipped a project skill root outside its lookup cwd', new Error('Path containment rejected'))
             continue
           }
-          if (userRoot) {
+          if (userRoot || configRoot) {
             const rootInfo = await fs.lstat(rootPath, { cwd, signal })
             if (!rootInfo || rootInfo.type !== 'directory') {
               markIncomplete()
@@ -1157,10 +1192,19 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
             continue
           }
           let rootEntries
-          try {
-            rootEntries = await fs.listDir(rootTarget, signal)
-          } catch (error) {
-            if (signal?.aborted || !formatCompatibility || error?.code !== 'ELOOP') throw error
+          if (configRoot) {
+            const fileTarget = await fs.resolve(configRoot.filePath, { cwd: rootPath, signal })
+            const fileInfo = await fs.stat(fileTarget, signal)
+            if (!fs.contains(rootTarget, fileTarget) || !fileInfo || fileInfo.type !== 'file') {
+              markIncomplete()
+              continue
+            }
+            rootEntries = [{ name: basename(configRoot.filePath), type: 'file', target: fileTarget }]
+          } else {
+            try {
+              rootEntries = await fs.listDir(rootTarget, signal)
+            } catch (error) {
+              if (signal?.aborted || !formatCompatibility || error?.code !== 'ELOOP') throw error
             rootEntries = []
             const recovered = await readdir(fs.processPath(rootTarget), { withFileTypes: true })
             recovered.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
@@ -1176,6 +1220,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 if (entry.isSymbolicLink()) complete = false
                 else markIncomplete()
               }
+            }
             }
           }
           const entries = limitEntries(rootEntries)
@@ -1196,7 +1241,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
               let info
               try {
                 if (!isSafeEntryName(entry?.name)) { markIncomplete(); continue }
-                if (entry.name.startsWith('.') || !fs.contains(rootTarget, entry.target)) continue
+                if ((entry.name.startsWith('.') && !configRoot) || !fs.contains(rootTarget, entry.target)) continue
                 info = await fs.stat(entry.target, signal)
               } catch (error) {
                 if (signal?.aborted) throw error
@@ -1230,7 +1275,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 markIncomplete()
                 continue
               }
-              if (formatCompatibility && entry.name.startsWith('.')) continue
+              if (formatCompatibility && entry.name.startsWith('.') && !configRoot) continue
               if (!fs.contains(rootTarget, entry.target)) continue
               const entryInfo = await fs.stat(entry.target, signal)
               if (!entryInfo) {
@@ -1377,7 +1422,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
               } else if (entryInfo.type === 'file' && entry.name.endsWith('.md')) {
                 skillDirectoryTarget = orderedEntry.parentTarget ?? rootTarget
                 fileTarget = entry.target
-                resolverPath = `${rootPath}/${relativeDirectoryPath}`
+                resolverPath = configRoot ? configRoot.filePath : `${rootPath}/${relativeDirectoryPath}`
               } else {
                 continue
               }
@@ -1391,17 +1436,17 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
               }
               let skill
               try {
-                const formatPaths = formatCompatibility ? skillFormatPaths(rootPath, resolverPath) : undefined
-                if (formatCompatibility && !formatPaths) continue
-                if (formatCompatibility && !await formatPathsStillEligible(formatPaths, cwd, signal)) {
+                const formatPaths = formatCompatibility && !configRoot ? skillFormatPaths(rootPath, resolverPath) : undefined
+                if (formatCompatibility && !configRoot && !formatPaths) continue
+                if (formatCompatibility && !configRoot && !await formatPathsStillEligible(formatPaths, cwd, signal)) {
                   markIncomplete()
                   continue
                 }
-                if (!await isContainedSkillPath(ctx, { cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal, allowSymlink: !formatCompatibility || entryInfo.type !== 'file' })) {
+                if (!await isContainedSkillPath(ctx, { cwd, cwdTarget: (configRoot ?? userRoot) ? rootTarget : cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal, allowSymlink: !formatCompatibility || entryInfo.type !== 'file' })) {
                   markIncomplete()
                   continue
                 }
-                skill = await readSkillFile(ctx, fileTarget, signal, Math.min(MAX_SKILL_BYTES, remainingBytes), { formatCompatibility, defaultName: formatPaths?.defaultName, modelScope: userRoot?.source === 'user-opencode' || rootPath === '.opencode/skills' || rootPath === '.opencode/skill' ? 'opencode' : 'claude-code' })
+                skill = await readSkillFile(ctx, fileTarget, signal, Math.min(MAX_SKILL_BYTES, remainingBytes), { formatCompatibility, defaultName: configRoot ? basename(configRoot.filePath, '.md') : formatPaths?.defaultName, modelScope: userRoot?.source === 'user-opencode' || rootPath === '.opencode/skills' || rootPath === '.opencode/skill' ? 'opencode' : 'claude-code' })
                 scannedBytes += skill.byteLength
                 if (formatCompatibility) {
                   const mcp = await readMcpJsonConfig(ctx, { rootTarget, resolverPath, cwd: userRoot ? rootPath : cwd, signal, byteLimit: Math.min(MAX_SKILL_BYTES, MAX_SCAN_BYTES - scannedBytes) })
@@ -1413,11 +1458,11 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                     break
                   }
                 }
-                if (formatCompatibility && !await formatPathsStillEligible(formatPaths, cwd, signal)) {
+                if (formatCompatibility && !configRoot && !await formatPathsStillEligible(formatPaths, cwd, signal)) {
                   markIncomplete()
                   continue
                 }
-                if (!await isContainedSkillPath(ctx, { cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal, allowSymlink: !formatCompatibility || entryInfo.type !== 'file' })) {
+                if (!await isContainedSkillPath(ctx, { cwd, cwdTarget: (configRoot ?? userRoot) ? rootTarget : cwdTarget, rootPath, rootTarget, fileTarget, resolverPath, signal, allowSymlink: !formatCompatibility || entryInfo.type !== 'file' })) {
                   markIncomplete()
                   continue
                 }
@@ -1437,12 +1482,13 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 }
                 continue
               }
-              if (!userRoot && disabledProjectSkillSet.has(skill.name)) continue
-              if (!userRoot && enabledProjectSkillSet && !enabledProjectSkillSet.has(skill.name)) continue
+              if (!(configRoot ?? userRoot) && disabledProjectSkillSet.has(skill.name)) continue
+              if (!(configRoot ?? userRoot) && enabledProjectSkillSet && !enabledProjectSkillSet.has(skill.name)) continue
               if (formatCompatibility && entryInfo.type !== 'directory' && orderedEntry.parentTarget
                 && candidates.some(existing => existing.name === skill.name && existing.locator.rootTarget.targetKey === rootTarget.targetKey
                   && existing.locator.skillDirectoryTarget.targetKey !== skillDirectoryTarget.targetKey)) continue
-              const candidate = makeCandidate(skill, rootPath, rootTarget, skillDirectoryTarget, fileTarget, rootIndex, resolverPath, userRoot, startingObservationRevision, !formatCompatibility || entryInfo.type !== 'file')
+              const candidate = makeCandidate(skill, rootPath, rootTarget, skillDirectoryTarget, fileTarget, rootIndex, resolverPath, configRoot ?? userRoot, startingObservationRevision, !formatCompatibility || entryInfo.type !== 'file')
+              if (configRoot) candidate.locator.configFile = configRoot.filePath
               candidates.push(candidate)
             } catch (error) {
               if (signal?.aborted || !formatCompatibility) throw error
@@ -1466,51 +1512,53 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     },
     async get(candidate, lookup = {}) {
       const locator = candidate?.locator
-      const userRoot = configuredUserRoot(candidate)
-      if (!userRoot && disabledProjectSkillSet.has(candidate?.name)) return undefined
-      if (!userRoot && enabledProjectSkillSet && !enabledProjectSkillSet.has(candidate?.name)) return undefined
+      const configRoot = configuredConfigRoot(candidate)
+      if (candidate?.source === 'config' && !configRoot) return undefined
+      const externalRoot = configRoot ?? configuredUserRoot(candidate)
+      if (!externalRoot && disabledProjectSkillSet.has(candidate?.name)) return undefined
+      if (!externalRoot && enabledProjectSkillSet && !enabledProjectSkillSet.has(candidate?.name)) return undefined
       if (!locator?.rootTarget || !locator?.fileTarget || !locator?.skillDirectoryTarget || typeof locator.resolverPath !== 'string'
-        || (typeof lookup.cwd === 'string' && lookup.cwd.length === 0 && !userRoot)) return undefined
+        || (typeof lookup.cwd === 'string' && lookup.cwd.length === 0 && !externalRoot)) return undefined
       const signal = lifecycleSignal(lookup.signal, control.signal)
       throwIfAborted(signal)
       // The registry may have selected this locator immediately before a
       // this provider invalidated the catalog. Never load it across that event.
       if (locator.observationRevision !== observationRevision) return undefined
       try {
-        const cwdTarget = !userRoot && lookup.cwd ? await fs.resolve('.', { cwd: lookup.cwd, signal }) : undefined
-        const rootTarget = await fs.resolve(locator.rootPath, { cwd: userRoot ? locator.rootPath : lookup.cwd, signal })
-        const fileTarget = await fs.resolve(locator.resolverPath, { cwd: userRoot ? locator.rootPath : lookup.cwd, signal })
-        const skillDirectoryTarget = await fs.resolve(dirname(locator.resolverPath), { cwd: userRoot ? locator.rootPath : lookup.cwd, signal })
-        if ((!userRoot && !fs.contains(cwdTarget, rootTarget)) || !fs.contains(rootTarget, fileTarget)
+        const cwdTarget = !externalRoot && lookup.cwd ? await fs.resolve('.', { cwd: lookup.cwd, signal }) : undefined
+        const rootTarget = await fs.resolve(locator.rootPath, { cwd: externalRoot ? locator.rootPath : lookup.cwd, signal })
+        const fileTarget = await fs.resolve(locator.resolverPath, { cwd: externalRoot ? locator.rootPath : lookup.cwd, signal })
+        const skillDirectoryTarget = await fs.resolve(dirname(locator.resolverPath), { cwd: externalRoot ? locator.rootPath : lookup.cwd, signal })
+        if ((!externalRoot && !fs.contains(cwdTarget, rootTarget)) || !fs.contains(rootTarget, fileTarget)
           || !fs.contains(rootTarget, skillDirectoryTarget)
           || (locator.rootTarget.targetKey !== rootTarget.targetKey) || (locator.fileTarget.targetKey !== fileTarget.targetKey)
           || (locator.skillDirectoryTarget.targetKey !== skillDirectoryTarget.targetKey)) {
           invalidateObservation()
           return undefined
         }
-        const formatPaths = formatCompatibility ? skillFormatPaths(locator.rootPath, locator.resolverPath) : undefined
-        if (formatCompatibility && !await formatPathsStillEligible(formatPaths, userRoot ? locator.rootPath : lookup.cwd, signal)) {
+        const formatPaths = formatCompatibility && !configRoot ? skillFormatPaths(locator.rootPath, locator.resolverPath) : undefined
+        if (formatCompatibility && !configRoot && !await formatPathsStillEligible(formatPaths, externalRoot ? locator.rootPath : lookup.cwd, signal)) {
           invalidateObservation()
           return undefined
         }
         if (!await isContainedSkillPath(ctx, {
-          cwd: userRoot ? locator.rootPath : lookup.cwd, cwdTarget: userRoot ? rootTarget : cwdTarget, rootPath: locator.rootPath, rootTarget, fileTarget, resolverPath: locator.resolverPath, signal, allowSymlink: locator.allowSymlink ?? true,
+          cwd: externalRoot ? locator.rootPath : lookup.cwd, cwdTarget: externalRoot ? rootTarget : cwdTarget, rootPath: locator.rootPath, rootTarget, fileTarget, resolverPath: locator.resolverPath, signal, allowSymlink: locator.allowSymlink ?? true,
         })) {
           invalidateObservation()
           return undefined
         }
-        let skill = await readSkillFile(ctx, fileTarget, signal, MAX_SKILL_BYTES, { formatCompatibility, defaultName: formatPaths?.defaultName, modelScope: userRoot?.source === 'user-opencode' || locator.rootPath === '.opencode/skills' || locator.rootPath === '.opencode/skill' ? 'opencode' : 'claude-code' })
+        let skill = await readSkillFile(ctx, fileTarget, signal, MAX_SKILL_BYTES, { formatCompatibility, defaultName: configRoot ? basename(configRoot.filePath, '.md') : formatPaths?.defaultName, modelScope: externalRoot?.source === 'user-opencode' || locator.rootPath === '.opencode/skills' || locator.rootPath === '.opencode/skill' ? 'opencode' : 'claude-code' })
         if (formatCompatibility) {
-          const mcp = await readMcpJsonConfig(ctx, { rootTarget, resolverPath: locator.resolverPath, cwd: userRoot ? locator.rootPath : lookup.cwd, signal })
+          const mcp = await readMcpJsonConfig(ctx, { rootTarget, resolverPath: locator.resolverPath, cwd: externalRoot ? locator.rootPath : lookup.cwd, signal })
           if (mcp.config) skill = { ...skill, mcpConfig: mcp.config }
         }
-        if (formatCompatibility && !await formatPathsStillEligible(formatPaths, userRoot ? locator.rootPath : lookup.cwd, signal)) {
+        if (formatCompatibility && !configRoot && !await formatPathsStillEligible(formatPaths, externalRoot ? locator.rootPath : lookup.cwd, signal)) {
           invalidateObservation()
           return undefined
         }
         if (!await isContainedSkillPath(ctx, {
-          cwd: userRoot ? locator.rootPath : lookup.cwd,
-          cwdTarget: userRoot ? rootTarget : cwdTarget,
+          cwd: externalRoot ? locator.rootPath : lookup.cwd,
+          cwdTarget: externalRoot ? rootTarget : cwdTarget,
           rootPath: locator.rootPath,
           rootTarget,
           fileTarget,
@@ -1521,7 +1569,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           invalidateObservation()
           return undefined
         }
-        const currentSkillDirectoryTarget = await fs.resolve(dirname(locator.resolverPath), { cwd: userRoot ? locator.rootPath : lookup.cwd, signal })
+        const currentSkillDirectoryTarget = await fs.resolve(dirname(locator.resolverPath), { cwd: externalRoot ? locator.rootPath : lookup.cwd, signal })
         if (!fs.contains(rootTarget, currentSkillDirectoryTarget)
           || currentSkillDirectoryTarget.targetKey !== locator.skillDirectoryTarget.targetKey) {
           invalidateObservation()
@@ -1530,7 +1578,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         throwIfAborted(signal)
         if (locator.observationRevision !== observationRevision) return undefined
         const candidateMatches = matchesCandidate(formatCompatibility
-          ? { ...skill, description: compatibleSkillDescription(skill.description, skillDescriptionScope(locator.rootPath, userRoot)) }
+          ? { ...skill, description: compatibleSkillDescription(skill.description, skillDescriptionScope(locator.rootPath, externalRoot)) }
           : skill, candidate, disabledSkills)
         if (!candidateMatches) {
           invalidateObservation()
