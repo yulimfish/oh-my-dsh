@@ -180,7 +180,7 @@ export function normalizeConfigSkillEntries(value, formatCompatibility = false) 
     if (entry === true) continue
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)
       || (Object.getPrototypeOf(entry) !== Object.prototype && Object.getPrototypeOf(entry) !== null)
-      || Object.keys(entry).some(key => !['description', 'template', 'disable', 'from', 'license', 'compatibility', 'metadata', 'allowedTools', 'allowed-tools', 'argument-hint'].includes(key))
+      || Object.keys(entry).some(key => !['description', 'template', 'disable', 'from', 'license', 'compatibility', 'metadata', 'allowedTools', 'allowed-tools', 'argument-hint', ...(formatCompatibility ? ['disable-model-invocation', 'user-invocable'] : [])].includes(key))
       || ['license', 'compatibility', 'argument-hint'].some(key => entry[key] !== undefined && typeof entry[key] !== 'string')
       || (entry.disable !== undefined && typeof entry.disable !== 'boolean')
       || typeof entry.description !== 'string' || (entry.from === undefined && entry.description.length === 0) || entry.description.length > 2_000
@@ -530,7 +530,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
   const reservedMetadata = formatCompatibility && Object.hasOwn(frontmatter, 'metadata')
   const metadata = reservedMetadata ? frontmatter.metadata : Object.create(null)
   for (const [key, value] of Object.entries(frontmatter)) {
-    if (FRONTMATTER_FIELDS.has(key) || (formatCompatibility && (key === 'metadata' || (key === 'allowed-tools' && !allowedTools)))) continue
+    if (FRONTMATTER_FIELDS.has(key) || (formatCompatibility && (key === 'metadata' || key === 'allowed-tools'))) continue
     if (formatCompatibility && ['agent', 'subtask', 'argument-hint', 'license', 'compatibility'].includes(key)) continue
     if (formatCompatibility && key === 'model') {
       if (!reservedMetadata || (metadata && !Array.isArray(metadata) && typeof metadata === 'object'
@@ -545,10 +545,12 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
     if (!reservedMetadata) metadata[key] = value
   }
   const hasMetadata = reservedMetadata || Object.keys(metadata).length > 0
-  const invocation = {
-    modelInvocable: !parseYamlBoolean(frontmatter['disable-model-invocation'], 'disable-model-invocation', false, formatCompatibility),
-    userInvocable: parseYamlBoolean(frontmatter['user-invocable'], 'user-invocable', true, formatCompatibility),
-  }
+  const invocation = formatCompatibility
+    ? { modelInvocable: true, userInvocable: true }
+    : {
+      modelInvocable: !parseYamlBoolean(frontmatter['disable-model-invocation'], 'disable-model-invocation', false, formatCompatibility),
+      userInvocable: parseYamlBoolean(frontmatter['user-invocable'], 'user-invocable', true, formatCompatibility),
+    }
 
   return {
     name,

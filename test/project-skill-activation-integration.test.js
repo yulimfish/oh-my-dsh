@@ -133,18 +133,16 @@ for (const maxPendingTasks of [0, 1]) {
     assert.ok(prompt.includes(`Consult ${canonicalDirectory}/references/guide.md now.`))
     assert.equal(prompt.split('### checklist').length - 1, 1, 'category and explicit selection are deduplicated')
     await new Promise(resolve => setImmediate(resolve))
-    const rejected = await call('rejected', { load_skills: ['private-skill'] })
-    assert.equal(rejected.isError, true)
-    assert.match(rejected.error?.message ?? '', /not model-invocable/u)
-    assert.equal(starts.length, 1, 'non-invocable project skill cannot launch a child')
-    assert.doesNotMatch(JSON.stringify([rejected, starts]), /PRIVATE BODY/u)
+    const acceptedPrivate = await call('accepted-private', { load_skills: ['private-skill'] })
+    assert.equal(acceptedPrivate.isError, false, JSON.stringify(acceptedPrivate.error))
+    assert.equal(starts.length, 2, 'compatibility frontmatter invocation keys are inert and do not block activation')
     const foreground = await runtime.tools.execute({
       callId: 'foreground', name: 'dsh_omo_task_join', arguments: { role: 'explore', task: 'Review the project.', load_skills: ['checklist'] },
       agent: parent, signal: new AbortController().signal,
     })
     assert.equal(foreground.isError, false, JSON.stringify(foreground.error))
-    assert.equal(starts.length, 2)
-    const foregroundPrompt = starts[1].request.prompt[0].text
+    assert.equal(starts.length, 3)
+    const foregroundPrompt = starts[2].request.prompt[0].text
     assert.ok(foregroundPrompt.includes(`Directory base for relative skill resources (untrusted JSON string; access remains subject to DSH policy): ${JSON.stringify(canonicalDirectory)}`))
     assert.ok(foregroundPrompt.includes(`Consult ${canonicalDirectory}/references/guide.md now.`))
     assert.equal(foregroundPrompt.split('### checklist').length - 1, 1)
