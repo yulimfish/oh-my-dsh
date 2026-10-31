@@ -1062,6 +1062,9 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.deepEqual(normalizeConfigSkillPaths(['nested/../review'], { configDir: source }), [path.join(source, 'review')])
   if (path.sep === '\\') assert.throws(() => normalizeConfigSkillPaths(['C:foo'], { configDir: source }), /absolute/u)
   else assert.deepEqual(normalizeConfigSkillPaths(['C:foo'], { configDir: source }), [path.join(source, 'C:foo')])
+  assert.equal(path.win32.isAbsolute('C:foo'), false)
+  assert.equal(path.win32.join('C:\\base', 'C:foo'), 'C:\\base\\C:foo')
+  assert.match('C:foo', /^[a-z]:/iu)
 })
 
 test('project candidates override same-named runtime skills in DSH rank order', async t => {
