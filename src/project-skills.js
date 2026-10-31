@@ -1267,12 +1267,14 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       if (!cwd && userRoots.length === 0 && configRoots.length === 0 && configSkillEntries.length === 0) return { candidates: [], complete: true, priorityComplete: true }
       const signal = lifecycleSignal(lookup.signal, control.signal)
       const candidates = []
+      let hasInlineFrom = false
       for (const entry of configSkillEntries) {
         if (entry.patchOnly) continue
         if (disabledConfigEntryNames.has(entry.name) || disabledSkills.has(entry.name)
           || (enabledProjectSkillSet && !enabledProjectSkillSet.has(entry.name)) || disabledProjectSkillSet.has(entry.name)) continue
         let loaded
         if (entry.from) {
+          hasInlineFrom = true
           loaded = await readInlineFrom(entry, signal)
           if (!loaded) continue
         }
@@ -1708,7 +1710,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         }
       }
       const stable = startingWatchRevision === watchRevision && startingObservationRevision === observationRevision
-      return { candidates, complete: complete && stable, priorityComplete: priorityComplete && stable }
+      return { candidates, complete: complete && stable && !hasInlineFrom, priorityComplete: priorityComplete && stable }
     },
     async get(candidate, lookup = {}) {
       const locator = candidate?.locator
