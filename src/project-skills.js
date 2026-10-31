@@ -167,7 +167,7 @@ export function normalizeUserSkillRoots(value, field) {
   return Object.freeze(roots)
 }
 
-function normalizeConfigSkillEntries(value, formatCompatibility = false) {
+export function normalizeConfigSkillEntries(value, formatCompatibility = false) {
   if (value === undefined) return Object.freeze([])
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
@@ -758,7 +758,7 @@ function mergeConfigAllowedTools(base, patch) {
   return [...new Set([...base, ...patch])]
 }
 
-function applyConfigPatch(skill, patch, formatCompatibility, scope) {
+export function applyConfigPatch(skill, patch, formatCompatibility, scope) {
   if (!patch) return skill
   return {
     ...skill,

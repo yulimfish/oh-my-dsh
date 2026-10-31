@@ -1310,6 +1310,46 @@ test('project-skill filters configure only the project provider and preserve bun
   assert.ok(fixture.skillProviders.has('dsh-omo-project-skills'))
 })
 
+test('config patch-only entries update matching bundled skills without creating unknown skills', () => {
+  const original = SKILLS.find(skill => skill.name === 'debugging')
+  const compat = makeContext()
+  apply(compat.ctx, {
+    ...baseConfig,
+    enableProjectSkillFormatCompatibility: true,
+    configSkillEntries: {
+      debugging: { description: 'Patched debug', metadata: { owner: 'entry' } },
+      'not-a-skill': { description: 'No winner' },
+      'git-master': true,
+    },
+  })
+  assert.equal(compat.skills.get('debugging').description, '(builtin - Skill) Patched debug')
+  assert.deepEqual(compat.skills.get('debugging').metadata, { owner: 'entry' })
+  assert.equal(compat.skills.get('debugging').content, original.content)
+  assert.equal(compat.skills.has('not-a-skill'), false)
+  assert.equal(compat.skills.get('git-master').description, SKILLS.find(skill => skill.name === 'git-master').description)
+  assert.equal(compat.skills.get('debugging').source, 'bundled')
+  const disabled = makeContext()
+  apply(disabled.ctx, {
+    ...baseConfig,
+    enableProjectSkillFormatCompatibility: true,
+    disabledSkills: ['debugging'],
+    configSkillEntries: {
+      debugging: { description: 'Patched debug', metadata: { owner: 'entry' } },
+      frontend: { description: 'Disabled', disable: true },
+      'git-master': false,
+    },
+  })
+  assert.deepEqual(disabled.skills.get('debugging').invocation, { modelInvocable: false, userInvocable: false })
+  assert.equal(disabled.skills.get('debugging').source, 'bundled')
+  assert.equal(disabled.skills.has('frontend'), false)
+  assert.equal(disabled.skills.has('git-master'), false)
+  const strict = makeContext()
+  apply(strict.ctx, { ...baseConfig, configSkillEntries: { debugging: { description: 'Patched debug', metadata: { owner: 'entry' } } } })
+  assert.equal(strict.skills.get('debugging').description, 'Patched debug')
+  assert.deepEqual(strict.skills.get('debugging').metadata, { owner: 'entry' })
+  assert.equal(strict.skills.get('debugging').content, original.content)
+})
+
 test('disabledOmoBundledSkills hides only this plugin’s bundled skills and updates /omo help', () => {
   const fixture = makeContext()
   const externalSkill = {

@@ -4,7 +4,7 @@ import { isSkillName } from '@deepseek-ai/dsh-skill'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { buildWorkerPrompt, normalizeRolePromptAppend, ROLE_NAMES } from './roles.js'
 import { SKILLS } from './skills.js'
-import { DEFAULT_PROJECT_SKILL_DIRS, normalizeConfigSkillPaths, normalizeDisabledSkills, normalizeDisabledProjectSkills, normalizeEnabledProjectSkills, normalizeProjectSkillDirs, registerProjectSkillProvider } from './project-skills.js'
+import { applyConfigPatch, DEFAULT_PROJECT_SKILL_DIRS, normalizeConfigSkillEntries, normalizeConfigSkillPaths, normalizeDisabledSkills, normalizeDisabledProjectSkills, normalizeEnabledProjectSkills, normalizeProjectSkillDirs, registerProjectSkillProvider } from './project-skills.js'
 import { createGoalCommand, createStopContinuationCommand } from './goals.js'
 import { registerGoalTools } from './goal-tools.js'
 import { registerTeamTools } from './teams.js'
@@ -4228,7 +4228,11 @@ export function apply(ctx, rawConfig) {
   const disabledProjectSkills = normalizeDisabledProjectSkills(config.disabledProjectSkills)
   const disabledOmoBundledSkills = normalizeDisabledOmoBundledSkills(config.disabledOmoBundledSkills)
   const disabledInlineNames = new Set(Object.entries(config.configSkillEntries ?? {}).filter(([, entry]) => entry === false || (entry && typeof entry === 'object' && entry.disable === true)).map(([name]) => name))
-  const activeBundledSkills = SKILLS.filter(skill => !disabledOmoBundledSkills.has(skill.name) && !disabledInlineNames.has(skill.name))
+  const normalizedConfigSkillEntries = normalizeConfigSkillEntries(config.configSkillEntries, config.enableProjectSkillFormatCompatibility)
+  const activeBundledSkills = SKILLS.filter(skill => !disabledOmoBundledSkills.has(skill.name) && !disabledInlineNames.has(skill.name)).map(skill => {
+    const patch = normalizedConfigSkillEntries.find(entry => entry.patchOnly && entry.name === skill.name)
+    return patch ? applyConfigPatch(skill, patch, config.enableProjectSkillFormatCompatibility, 'builtin') : skill
+  })
   const disabledSkillSet = normalizeDisabledSkills(config.disabledSkills)
   const configSkillPaths = normalizeConfigSkillPaths(config.configSkillPaths, config.configSkillBase ?? undefined)
   const configSkillEntries = config.configSkillEntries
