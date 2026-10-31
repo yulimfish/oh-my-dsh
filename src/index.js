@@ -246,7 +246,7 @@ export const Config = z.object({
   userOpenCodeSkillRoots: z.array(z.string()).default([]),
   userClaudeSkillRoots: z.array(z.string()).default([]),
   userAgentsSkillRoots: z.array(z.string()).default([]),
-  configSkillPaths: z.array(z.string()).default([]),
+  configSkillPaths: z.array(z.union([z.string(), z.object({ path: z.string().required(), glob: z.string().required() })])).default([]),
   enabledProjectSkills: z.union([z.array(z.string()), z.const(null)]),
   disabledProjectSkills: z.array(z.string()).default([]),
   disabledOmoBundledSkills: z.array(z.string()).default([]),

@@ -1,4 +1,5 @@
 import { isSkillName } from '@deepseek-ai/dsh-skill'
+import picomatch from 'picomatch'
 import { parseDocument } from 'yaml'
 import { readdir } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, normalize, parse as parsePath, posix, relative, win32 } from 'node:path'
@@ -171,15 +172,23 @@ export function normalizeConfigSkillPaths(value) {
   if (!Array.isArray(value) || value.length > 16) throw new TypeError('configSkillPaths must contain at most 16 absolute file or directory paths')
   const paths = []
   const seen = new Set()
-  for (const entry of value) {
-    if (typeof entry !== 'string' || !entry || entry.trim() !== entry || entry.length > 4_096
+  for (const item of value) {
+    const record = typeof item === 'string' ? undefined : item
+    const entry = record ? record.path : item
+    const glob = record?.glob
+    const validRecord = record === undefined || (record && typeof record === 'object' && !Array.isArray(record)
+      && (Object.getPrototypeOf(record) === Object.prototype || Object.getPrototypeOf(record) === null)
+      && Object.hasOwn(record, 'path') && Object.hasOwn(record, 'glob'))
+    if (!validRecord || typeof entry !== 'string' || !entry || entry.trim() !== entry || entry.length > 4_096
       || !isAbsolute(entry) || normalize(entry) !== entry
+      || (item && typeof item === 'object' && (typeof glob !== 'string' || glob.length === 0 || glob.length > 512 || glob.includes('\0')))
+      || (item && typeof item === 'object' && Object.keys(item).some(key => key !== 'path' && key !== 'glob'))
       || /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u2066-\u2069]/u.test(entry)) {
-      throw new TypeError('configSkillPaths entries must be normalized absolute file or directory paths')
+      throw new TypeError('configSkillPaths entries must be normalized absolute file or directory paths with an optional bounded glob')
     }
     if (seen.has(entry)) throw new TypeError('configSkillPaths must not contain duplicates')
     seen.add(entry)
-    paths.push(entry)
+    paths.push(glob === undefined ? entry : { path: entry, glob })
   }
   return Object.freeze(paths)
 }
@@ -747,11 +756,20 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     return userRoots.find(root => root.rootPath === rootPath && root.source === source)
   }
   const configSkillPaths = normalizeConfigSkillPaths(options.configSkillPaths)
-  const configRoots = configSkillPaths.map(sourcePath => ({
-    rootPath: sourcePath.endsWith('.md') ? dirname(sourcePath) : sourcePath,
-    ...(sourcePath.endsWith('.md') ? { filePath: sourcePath } : {}),
-    sourcePath, source: 'config', rank: PROJECT_SKILL_RANK - 1,
-  }))
+  const configRoots = configSkillPaths.map(source => {
+    const sourcePath = typeof source === 'string' ? source : source.path
+    return {
+      rootPath: sourcePath.endsWith('.md') ? dirname(sourcePath) : sourcePath,
+      ...(sourcePath.endsWith('.md') ? { filePath: sourcePath } : {}),
+      sourcePath, source: 'config', rank: PROJECT_SKILL_RANK - 1,
+      ...(typeof source === 'string' ? {} : { glob: source.glob, matches: picomatch(source.glob, { dot: true, bash: true }) }),
+    }
+  })
+  const configRootMatches = (root, resolverPath) => {
+    if (!root?.matches) return true
+    const relativePath = relative(root.rootPath, resolverPath).replaceAll('\\', '/')
+    return relativePath !== '..' && !relativePath.startsWith('../') && !isAbsolute(relativePath) && root.matches(relativePath)
+  }
   const configuredConfigRoot = candidate => {
     const locator = candidate?.locator
     return candidate?.source === 'config' && locator?.userRoot === 'config' && locator?.configFile === locator.resolverPath
@@ -1491,6 +1509,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 && candidates.some(existing => existing.name === skill.name && existing.locator.rootTarget.targetKey === rootTarget.targetKey
                   && existing.locator.skillDirectoryTarget.targetKey !== skillDirectoryTarget.targetKey)) continue
               const candidate = makeCandidate(skill, rootPath, rootTarget, skillDirectoryTarget, fileTarget, rootIndex, resolverPath, configRoot ?? userRoot, startingObservationRevision, !formatCompatibility || entryInfo.type !== 'file')
+              if (configRoot && !configRootMatches(configRoot, resolverPath)) continue
               if (configRoot) {
                 candidate.locator.sourcePath = configRoot.sourcePath
                 if (configRoot.filePath) candidate.locator.configFile = configRoot.filePath
@@ -1521,6 +1540,8 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       const configRoot = configuredConfigRoot(candidate)
       if (candidate?.source === 'config' && !configRoot) return undefined
       const externalRoot = configRoot ?? configuredUserRoot(candidate)
+      if (configRoot && typeof locator?.resolverPath !== 'string') return undefined
+      if (configRoot && !configRootMatches(configRoot, locator.resolverPath)) return undefined
       if (!externalRoot && disabledProjectSkillSet.has(candidate?.name)) return undefined
       if (!externalRoot && enabledProjectSkillSet && !enabledProjectSkillSet.has(candidate?.name)) return undefined
       if (!locator?.rootTarget || !locator?.fileTarget || !locator?.skillDirectoryTarget || typeof locator.resolverPath !== 'string'
