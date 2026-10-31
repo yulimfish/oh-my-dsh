@@ -1210,11 +1210,18 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.equal(fromSkill.argumentHint, 'from-file')
   const fromHomeRegistry = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(fromHomeRegistry.ctx, {
-    projectSkillDirs: [], configSkillBase: { configDir: path.join(cwd, 'elsewhere'), homeDirectory: cwd },
-    configSkillEntries: { inline: { description: 'Home file', from: '~/nested/from.md' } },
+    projectSkillDirs: [], configSkillBase: { configDir: cwd, homeDirectory: path.dirname(cwd) },
+    configSkillEntries: { inline: { description: 'Home file', from: `{file:~/${path.basename(cwd)}/nested/from.md}` } },
     formatCompatibility: true,
   })
   assert.match((await fromHomeRegistry.registry.get('inline', {})).content, /FROM_BODY/u)
+  const outsideConfigHomeRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(outsideConfigHomeRegistry.ctx, {
+    projectSkillDirs: [], configSkillBase: { configDir: path.join(cwd, 'elsewhere'), homeDirectory: cwd },
+    configSkillEntries: { inline: { description: 'Outside config', from: '~/nested/from.md' } },
+    formatCompatibility: true,
+  })
+  assert.equal(await outsideConfigHomeRegistry.registry.get('inline', {}), undefined)
   const missingHomeRegistry = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(missingHomeRegistry.ctx, {
     projectSkillDirs: [], configSkillBase: { configDir: cwd },
@@ -1230,7 +1237,7 @@ test('format compatibility loads direct skills from an explicit config directory
   const escapingHomeRegistry = makeRegistry(escapingHomeFs)
   registerProjectSkillProvider(escapingHomeRegistry.ctx, {
     projectSkillDirs: [], configSkillBase: { configDir: cwd, homeDirectory: path.join(cwd, 'nested') },
-    configSkillEntries: { inline: { description: 'Escaping home', from: '~/../outside-secret.md' } },
+    configSkillEntries: { inline: { description: 'Escaping home', from: '~/../../outside-secret.md' } },
     formatCompatibility: true,
   })
   assert.equal(await escapingHomeRegistry.registry.get('inline', {}), undefined)
