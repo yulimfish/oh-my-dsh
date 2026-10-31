@@ -623,6 +623,9 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     if (entry.maxTokens !== undefined && (!Number.isSafeInteger(entry.maxTokens) || entry.maxTokens < 1)) {
       throw new Error(`dsh-omo: role route "${entry.role}" maxTokens must be a positive safe integer`)
     }
+    if (Object.hasOwn(entry, 'topP') || Object.hasOwn(entry, 'top_p')) {
+      throw new Error(`dsh-omo: role route "${entry.role}" topP is unsupported; use DSH-native request controls instead`)
+    }
     if (entry.temperature !== undefined && (typeof entry.temperature !== 'number' || !Number.isFinite(entry.temperature) || entry.temperature < 0 || entry.temperature > 2)) {
       throw new Error(`dsh-omo: role route "${entry.role}" temperature must be a finite number from 0 to 2`)
     }
