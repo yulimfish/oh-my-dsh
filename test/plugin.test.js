@@ -9572,6 +9572,10 @@ test('validates bounded role fallback chains with or without explicit primary pi
     assert.equal(roleDisable.starts.length, 0)
   }
 
+  const tempAlias = makeContext()
+  assert.throws(() => apply(tempAlias.ctx, Config({ ...baseConfig, roleRoutes: [{ role: 'explore', provider: 'p', model: 'm', temp: 0.4 }] })), /temp is unsupported; use temperature/u)
+  assert.equal(tempAlias.tools.size, 0)
+
   for (const maxTokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY]) {
     const invalidTokens = makeContext()
     assert.throws(() => apply(invalidTokens.ctx, {

@@ -663,6 +663,9 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     if (Object.hasOwn(entry, 'warn_unavailable') || Object.hasOwn(entry, 'warnUnavailable')) {
       throw new Error(`dsh-omo: role route "${entry.role}" unavailable warning suppression is unsupported; DSH route preflight does not provide a warning-policy channel`)
     }
+    if (Object.hasOwn(entry, 'temp')) {
+      throw new Error(`dsh-omo: role route "${entry.role}" temp is unsupported; use temperature`)
+    }
     if (entry.temperature !== undefined && (typeof entry.temperature !== 'number' || !Number.isFinite(entry.temperature) || entry.temperature < 0 || entry.temperature > 2)) {
       throw new Error(`dsh-omo: role route "${entry.role}" temperature must be a finite number from 0 to 2`)
     }
