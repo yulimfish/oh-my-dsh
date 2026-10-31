@@ -48,7 +48,7 @@ The pinned OMO hook evaluates pressure after each tool and can summarize within 
 
 ## Still Host-limited
 
-Malformed raw tool-argument repair is not supported by the freshly inspected public hooks: pre-execute receives parsed immutable arguments; tools/execute can replace only its signal. Pre-step user-message editing and postcommit session events are not decoders for generated tool-call JSON. Keep after-failure guidance separate from parser repair.
+Malformed raw tool-argument repair has no dedicated validated Host repair contract: pre-execute receives parsed arguments and tools/execute can replace only its signal. Malformed JSON may arrive as a frozen string, and exec is JavaScript-mutable before final notification, so assignment can technically alter dispatched arguments; that is not schema validation, a supported repair policy, or reconciliation with the durable original tool-call record. Pre-step user-message editing and postcommit session events are not decoders for generated tool-call JSON. Keep after-failure guidance separate from parser repair; the pinned OMO JSON hook is also guidance-only.
 
 ## Project-skill watcher capacity recovery
 
