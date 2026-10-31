@@ -129,6 +129,11 @@ test('Config loads an explicit shared skills root without cwd or vendored conten
   assert.throws(() => apply(invalid.ctx, Config({ sharedSkillsRootPath: 'relative/skills' })), /sharedSkillsRootPath/u)
 })
 
+test('Config accepts recursive-only config skill paths without a glob', () => {
+  const config = Config({ configSkillPaths: [{ path: '/tmp/custom-skills', recursive: true }] })
+  assert.deepEqual(config.configSkillPaths, [{ path: '/tmp/custom-skills', recursive: true }])
+})
+
 test('Config ignores remote skill sources without setup failure or file reads', async t => {
   const { ctx, skills } = makeContext(t)
   apply(ctx, Config({ projectSkillDirs: [], configSkillPaths: ['https://example.invalid/skill.md'], enableProjectSkillFormatCompatibility: true }))

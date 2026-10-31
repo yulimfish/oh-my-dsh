@@ -966,6 +966,7 @@ test('format compatibility loads config skills below project files and above run
   assert.equal(remoteReads, 0)
   assert.deepEqual(normalizeConfigSkillPaths([{ path: 'https://example.invalid/skill.md', glob: '**' }]), [])
   assert.throws(() => normalizeConfigSkillPaths([file, file]), /duplicates/u)
+  assert.throws(() => normalizeConfigSkillPaths([{ path: file, glob: 42 }]), /bounded glob/u)
   for (const invalid of ['relative.md', `${cwd}/../outside.md`]) {
     assert.throws(() => normalizeConfigSkillPaths([invalid]), /absolute file or directory|normalized/u)
   }
@@ -1093,7 +1094,11 @@ test('format compatibility loads direct skills from an explicit config directory
   await writeFile(file, '---\nname: custom\ndescription: File glob\n---\nFILE_GLOB_BODY')
   const { registry: fileGlobRegistry } = compatibilityRegistry(t, makeFileSystem().fs, { projectSkillDirs: [], configSkillPaths: [{ path: file, glob: 'custom.md' }] })
   assert.equal((await fileGlobRegistry.get('custom', {})).content, 'FILE_GLOB_BODY')
-  assert.throws(() => normalizeConfigSkillPaths([{ path: source }]), /glob/u)
+  const { registry: recursiveOnlyRegistry } = compatibilityRegistry(t, makeFileSystem().fs, { projectSkillDirs: [], configSkillPaths: [{ path: source, recursive: true }] })
+  assert.equal((await recursiveOnlyRegistry.get('review', {})).content, 'CONFIG_DIR_BODY')
+  assert.equal((await recursiveOnlyRegistry.get('nested', {})).content, 'EXCLUDED_BODY')
+  assert.equal((await recursiveOnlyRegistry.get('operations', {})).content, 'OPERATIONS_BODY')
+  assert.equal(await recursiveOnlyRegistry.get('excluded', {}), undefined)
   assert.throws(() => normalizeConfigSkillPaths([Object.create({ path: source, glob: 'review/**' })]), /glob|bounded/u)
   assert.throws(() => normalizeConfigSkillPaths([[source, 'review/**']]), /glob|bounded/u)
   const inherited = { path: source, glob: 'review/**' }

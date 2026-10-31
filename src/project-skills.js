@@ -248,7 +248,7 @@ export function normalizeConfigSkillPaths(value, base) {
     const glob = record?.glob
     const validRecord = record === undefined || (record && typeof record === 'object' && !Array.isArray(record)
       && (Object.getPrototypeOf(record) === Object.prototype || Object.getPrototypeOf(record) === null)
-      && Object.hasOwn(record, 'path') && Object.hasOwn(record, 'glob')
+      && Object.hasOwn(record, 'path')
       && (record.recursive === undefined || typeof record.recursive === 'boolean'))
     const sourcePath = typeof entry !== 'string' ? undefined : isAbsolute(entry) ? entry : entry === '~' ? skillBase?.homeDirectory : entry.startsWith('~/') ? skillBase?.homeDirectory ? join(skillBase.homeDirectory, entry.slice(2)) : undefined : skillBase?.configDir ? join(skillBase.configDir, entry) : undefined
     if (!validRecord || typeof entry !== 'string' || !entry || entry.trim() !== entry || entry.length > 4_096
@@ -259,14 +259,14 @@ export function normalizeConfigSkillPaths(value, base) {
         const rel = basePath ? relative(basePath, sourcePath) : '..'
         return rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)
       })())
-      || (item && typeof item === 'object' && (typeof glob !== 'string' || glob.length === 0 || glob.length > 512 || glob.includes('\0')))
+      || (item && typeof item === 'object' && glob !== undefined && (typeof glob !== 'string' || glob.length === 0 || glob.length > 512 || glob.includes('\0')))
       || (item && typeof item === 'object' && Object.keys(item).some(key => !['path', 'glob', 'recursive'].includes(key)))
       || /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u2066-\u2069]/u.test(entry)) {
       throw new TypeError('configSkillPaths entries must be normalized absolute file or directory paths with an optional bounded glob')
     }
     if (seen.has(sourcePath)) throw new TypeError('configSkillPaths must not contain duplicates')
     seen.add(sourcePath)
-    paths.push(glob === undefined ? sourcePath : { path: sourcePath, glob, ...(record.recursive === undefined ? {} : { recursive: record.recursive }) })
+    paths.push(glob === undefined && record?.recursive === undefined ? sourcePath : { path: sourcePath, ...(glob === undefined ? {} : { glob }), ...(record?.recursive === undefined ? {} : { recursive: record.recursive }) })
   }
   return Object.freeze(paths)
 }
@@ -942,7 +942,11 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       rootPath: sourcePath.endsWith('.md') ? dirname(sourcePath) : sourcePath,
       ...(sourcePath.endsWith('.md') ? { filePath: sourcePath } : {}),
       sourcePath, source: 'config', rank: formatCompatibility ? 249.9 : PROJECT_SKILL_RANK - 1,
-      ...(typeof source === 'string' ? {} : { glob: source.glob, matches: picomatch(source.glob, { dot: true, bash: true }), recursive: source.recursive === true }),
+      ...(typeof source === 'string' ? {} : {
+        glob: source.glob,
+        ...(source.glob === undefined ? {} : { matches: picomatch(source.glob, { dot: true, bash: true }) }),
+        recursive: source.recursive === true,
+      }),
     }
   })
   const configRootMatches = (root, resolverPath) => {
