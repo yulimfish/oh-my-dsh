@@ -9656,6 +9656,12 @@ test('validates bounded role fallback chains with or without explicit primary pi
   assert.throws(() => apply(tempAlias.ctx, Config({ ...baseConfig, roleRoutes: [{ role: 'explore', provider: 'p', model: 'm', temp: 0.4 }] })), /temp is unsupported; use temperature/u)
   assert.equal(tempAlias.tools.size, 0)
 
+  for (const [reasoningEffort, message] of [[' ', /reasoningEffort/u], [0, /expected string/u], [null, /reasoningEffort/u], ['x'.repeat(65), /reasoningEffort/u], ['high\0', /reasoningEffort/u], ['high\nlow', /reasoningEffort/u], ['high\u200e', /reasoningEffort/u], ['high\u061c', /reasoningEffort/u], ['high\u2028low', /reasoningEffort/u], ['high\u2029low', /reasoningEffort/u], [` ${'x'.repeat(64)} `, /reasoningEffort/u]]) {
+    const invalidReasoning = makeContext()
+    assert.throws(() => apply(invalidReasoning.ctx, Config({ ...baseConfig, roleRoutes: [{ role: 'explore', provider: 'p', model: 'm', reasoningEffort }] })), message)
+    assert.equal(invalidReasoning.tools.size, 0)
+  }
+
   for (const maxTokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY]) {
     const invalidTokens = makeContext()
     assert.throws(() => apply(invalidTokens.ctx, {

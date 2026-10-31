@@ -670,8 +670,8 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
       throw new Error(`dsh-omo: role route "${entry.role}" temperature must be a finite number from 0 to 2`)
     }
     const reasoningEffort = typeof entry.reasoningEffort === 'string' ? entry.reasoningEffort.trim() : ''
-    if (entry.reasoningEffort !== undefined && !reasoningEffort) {
-      throw new Error(`dsh-omo: role route "${entry.role}" reasoningEffort must not be blank`)
+    if (entry.reasoningEffort !== undefined && (typeof entry.reasoningEffort !== 'string' || entry.reasoningEffort.length > 64 || !reasoningEffort || /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u.test(reasoningEffort))) {
+      throw new Error(`dsh-omo: role route "${entry.role}" reasoningEffort must be a non-empty string of at most 64 characters without control characters`)
     }
     if (Object.hasOwn(entry, 'fallback_models')) {
       throw new Error(`dsh-omo: role route "${entry.role}" fallback_models is unsupported; use fallbackModels with explicit provider/model candidates`)

@@ -24,6 +24,7 @@ test('normalizes immutable category primary routes and rejects invalid entries',
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p' }]), /together/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build' }]), /requires both provider and model/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', reasoningEffort: ' ' }]), /reasoningEffort/u)
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', reasoningEffort: 0 }]), /reasoningEffort/u)
   assert.throws(() => normalizeCategoryRoutes([
     { name: 'build', provider: 'p', model: 'm' },
     { name: ' build ', provider: 'p2', model: 'm2' },
