@@ -5102,6 +5102,7 @@ test('disabledSkills accepts ASCII case through Config JSON apply without linkin
   for (const field of ['enabledProjectSkills', 'disabledProjectSkills', 'disabledOmoBundledSkills']) {
     assert.throws(() => apply(makeContext().ctx, { ...baseConfig, [field]: ['SECURITY-REVIEW'] }))
   }
+  assert.throws(() => apply(makeContext().ctx, { ...baseConfig, disabledOmoBundledSkills: ['debugging', 'debugging'] }), /disabledOmoBundledSkills must not contain duplicates/u)
 })
 
 test('disabledSkills turns off both model and user invocation for bundled skills', () => {
