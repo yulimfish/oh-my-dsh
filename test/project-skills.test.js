@@ -1090,7 +1090,7 @@ test('format compatibility loads direct skills from an explicit config directory
   registerProjectSkillProvider(inline.ctx, {
     projectSkillDirs: [],
     configSkillEntries: {
-      inline: { description: 'Inline config', template: 'INLINE_BODY' },
+      inline: { description: 'Inline config', template: '  INLINE_BODY\n' },
       disabled: { description: 'Disabled', template: 'DISABLED_BODY', disable: true },
       removed: false,
     },
@@ -1099,7 +1099,10 @@ test('format compatibility loads direct skills from an explicit config directory
   const inlineSnapshot = await inline.registry.snapshot({})
   assert.deepEqual(inlineSnapshot.skills.map(skill => skill.name), ['inline'])
   const inlineSkill = await inline.registry.get('inline', {})
-  assert.equal(inlineSkill.content, 'INLINE_BODY')
+  assert.match(inlineSkill.content, /<skill-instruction>[\s\S]*INLINE_BODY[\s\S]*\$ARGUMENTS/u)
+  const referenced = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(referenced.ctx, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'Use @docs/guide.md' } }, configSkillBase: { configDir: cwd }, formatCompatibility: true })
+  assert.match((await referenced.registry.get('inline', {})).content, new RegExp(`Use ${cwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/docs/guide.md`, 'u'))
   assert.equal(inlineSkill.description, '(config - Skill) Inline config')
   assert.equal(await inline.registry.get('disabled', {}), undefined)
   assert.equal(await inline.registry.get('removed', {}), undefined)
@@ -1109,10 +1112,21 @@ test('format compatibility loads direct skills from an explicit config directory
     configSkillEntries: { shared: { description: 'Inline wins', template: 'INLINE_SHARED' } },
     formatCompatibility: true,
   })
-  assert.equal((await collision.registry.get('shared', { cwd })).content, 'INLINE_SHARED')
+  assert.match((await collision.registry.get('shared', { cwd })).content, /INLINE_SHARED/u)
+  const { fs: disabledFs } = makeFileSystem()
+  const fallbackFile = path.join(cwd, 'fallback.md')
+  await writeFile(fallbackFile, '---\nname: shared\ndescription: File fallback\n---\nFILE_FALLBACK_BODY')
+  const disabledCollision = makeRegistry(disabledFs)
+  registerProjectSkillProvider(disabledCollision.ctx, {
+    projectSkillDirs: [], configSkillPaths: [fallbackFile],
+    configSkillEntries: { shared: { description: 'Disabled inline', template: 'DISABLED_INLINE', disable: true } },
+    formatCompatibility: true,
+  })
+  assert.equal(await disabledCollision.registry.get('shared', { cwd }), undefined)
   const strictInline = makeRegistry(makeFileSystem().fs)
-  registerProjectSkillProvider(strictInline.ctx, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY' } } })
+  registerProjectSkillProvider(strictInline.ctx, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: '  INLINE_BODY\n' } } })
   assert.equal((await strictInline.registry.get('inline', {})).description, 'Inline config')
+  assert.equal((await strictInline.registry.get('inline', {})).content, '  INLINE_BODY\n')
   const inlineProvider = createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY' } }, formatCompatibility: true })
   const inlineCandidate = (await inlineProvider.list({})).candidates[0]
   assert.equal(await inlineProvider.get({ ...inlineCandidate, description: 'Forged' }, {}), undefined)

@@ -4227,7 +4227,8 @@ export function apply(ctx, rawConfig) {
   const enabledProjectSkills = normalizeEnabledProjectSkills(config.enabledProjectSkills)
   const disabledProjectSkills = normalizeDisabledProjectSkills(config.disabledProjectSkills)
   const disabledOmoBundledSkills = normalizeDisabledOmoBundledSkills(config.disabledOmoBundledSkills)
-  const activeBundledSkills = SKILLS.filter(skill => !disabledOmoBundledSkills.has(skill.name))
+  const disabledInlineNames = new Set(Object.entries(config.configSkillEntries ?? {}).filter(([, entry]) => entry === false || (entry && typeof entry === 'object' && entry.disable === true)).map(([name]) => name))
+  const activeBundledSkills = SKILLS.filter(skill => !disabledOmoBundledSkills.has(skill.name) && !disabledInlineNames.has(skill.name))
   const disabledSkillSet = normalizeDisabledSkills(config.disabledSkills)
   const configSkillPaths = normalizeConfigSkillPaths(config.configSkillPaths, config.configSkillBase ?? undefined)
   const configSkillEntries = config.configSkillEntries
@@ -4238,6 +4239,7 @@ export function apply(ctx, rawConfig) {
     userClaudeSkillRoots: config.userClaudeSkillRoots,
     userAgentsSkillRoots: config.userAgentsSkillRoots,
     configSkillPaths,
+    configSkillBase: config.configSkillBase ?? undefined,
     configSkillEntries,
   })
   const activeChildren = new Set()

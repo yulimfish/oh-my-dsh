@@ -803,6 +803,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     return userRoots.find(root => root.rootPath === rootPath && root.source === source)
   }
   const configSkillEntries = normalizeConfigSkillEntries(options.configSkillEntries)
+  const disabledConfigEntryNames = new Set(Object.entries(options.configSkillEntries ?? {}).filter(([, entry]) => entry === false || (entry && typeof entry === 'object' && entry.disable === true)).map(([name]) => name))
   const configSkillPaths = normalizeConfigSkillPaths(options.configSkillPaths, options.configSkillBase)
   const configRoots = configSkillPaths.map(source => {
     const sourcePath = typeof source === 'string' ? source : source.path
@@ -1178,7 +1179,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       const cwd = typeof lookup.cwd === 'string' ? lookup.cwd : ''
       if (!cwd && userRoots.length === 0 && configRoots.length === 0 && configSkillEntries.length === 0) return { candidates: [], complete: true, priorityComplete: true }
       const signal = lifecycleSignal(lookup.signal, control.signal)
-      const candidates = configSkillEntries.filter(entry => !disabledSkills.has(entry.name)
+      const candidates = configSkillEntries.filter(entry => !disabledConfigEntryNames.has(entry.name) && !disabledSkills.has(entry.name)
         && (!enabledProjectSkillSet || enabledProjectSkillSet.has(entry.name))
         && !disabledProjectSkillSet.has(entry.name)).map(entry => ({
         name: entry.name,
@@ -1559,6 +1560,8 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                 }
                 continue
               }
+              if (disabledConfigEntryNames.has(skill.name)) continue
+              if (configRoot && disabledConfigEntryNames.has(skill.name)) continue
               if (configRoot && disabledSkills.has(skill.name)) continue
               if (configRoot && enabledProjectSkillSet && !enabledProjectSkillSet.has(skill.name)) continue
               if (configRoot && disabledProjectSkillSet.has(skill.name)) continue
@@ -1600,7 +1603,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         const entry = configSkillEntries.find(item => item === locator.inlineEntry)
         if (!entry || candidate.name !== entry.name || candidate.source !== 'config'
           || candidate.description !== (formatCompatibility ? compatibleSkillDescription(entry.description, 'config') : entry.description)
-          || disabledSkills.has(entry.name)
+          || disabledConfigEntryNames.has(entry.name) || disabledSkills.has(entry.name)
           || (enabledProjectSkillSet && !enabledProjectSkillSet.has(entry.name)) || disabledProjectSkillSet.has(entry.name)) return undefined
         return {
           name: entry.name,
@@ -1610,12 +1613,16 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
             userInvocable: !disabledSkills.has(entry.name),
           },
           source: 'config', provider: PROJECT_SKILL_PROVIDER,
-          content: entry.template,
+          content: formatCompatibility
+            ? `<skill-instruction>\nBase directory for this skill: ${options.configSkillBase?.configDir ?? process.cwd()}/\nFile references (@path) in this skill are relative to this directory.\n\n${resolveCompatibleSkillReferences(entry.template.trim(), options.configSkillBase?.configDir ?? process.cwd())}\n</skill-instruction>\n\n<user-request>\n$ARGUMENTS\n</user-request>`
+            : entry.template,
         }
       }
       const configRoot = configuredConfigRoot(candidate)
       if (candidate?.source === 'config' && !configRoot) return undefined
       const externalRoot = configRoot ?? configuredUserRoot(candidate)
+      if (disabledConfigEntryNames.has(candidate?.name)) return undefined
+      if (configRoot && disabledConfigEntryNames.has(candidate?.name)) return undefined
       if (configRoot && disabledSkills.has(candidate?.name)) return undefined
       if (configRoot && enabledProjectSkillSet && !enabledProjectSkillSet.has(candidate?.name)) return undefined
       if (configRoot && disabledProjectSkillSet.has(candidate?.name)) return undefined
