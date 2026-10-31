@@ -125,6 +125,7 @@ test('Config loads an explicit shared skills root without cwd or vendored conten
   assert.match((await configCollision.skills.get('ast-grep', {})).content, /CONFIG_INLINE/u)
   assert.equal(await provider.get({ ...sharedCandidate, locator: { ...sharedCandidate.locator, userRoot: 'user-claude' } }, {}), undefined)
   assert.equal(Config({}).sharedSkillsRootPath, '')
+  assert.equal(Config({}).enableProjectSkillFormatCompatibility, false)
   const invalid = makeContext(t)
   assert.throws(() => apply(invalid.ctx, Config({ sharedSkillsRootPath: 'relative/skills' })), /sharedSkillsRootPath/u)
 })
