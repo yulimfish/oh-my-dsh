@@ -2527,6 +2527,7 @@ test('accepts only relative project skill directories', () => {
   assert.throws(() => normalizeProjectSkillDirs(['C:\\skills']), /stay relative/)
   assert.throws(() => normalizeProjectSkillDirs(['https://example.test/skills']), /stay relative/)
   assert.throws(() => normalizeProjectSkillDirs(['~/.config/opencode/skills']), /stay relative/)
+  assert.deepEqual(normalizeProjectSkillDirs(['custom', './custom//', 'custom/']), ['custom'])
   assert.throws(() => normalizeProjectSkillDirs(Array.from({ length: 17 }, (_, index) => `root-${index}`)), /at most 16/)
 })
 
