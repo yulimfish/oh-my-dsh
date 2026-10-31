@@ -8231,7 +8231,7 @@ test('role/category route aliases map primary and fallback pairs before prefligh
   assert.deepEqual(calls.at(-1), { provider: 'current-category', model: 'primary-v2', reasoningEffort: 'high' })
 })
 
-test('fallback temperature follows role over candidate over category through preflight and spawn', async () => {
+test('fallback temperature follows candidate over role over category through preflight and spawn', async () => {
   const calls = []
   const attempts = new Map()
   const fixture = makeContext({ services: {
@@ -8253,8 +8253,8 @@ test('fallback temperature follows role over candidate over category through pre
   })
   const parent = { id: 'parent-agent', followup() {} }
   await fixture.tools.get('dsh_omo_task').execute({ role: 'explore', category: 'review', task: 'Use configured fallback temperature.' }, { agent: parent, signal: new AbortController().signal })
-  assert.equal(calls.at(-1).temperature, 0.2)
-  assert.equal(fixture.starts[0].request.agentOptions.temperature, 0.2)
+  assert.equal(calls.at(-1).temperature, 0.7)
+  assert.equal(fixture.starts[0].request.agentOptions.temperature, 0.7)
   const fallbackOnly = makeContext({ services: { llm: { resolveCallConfig: async config => { calls.push({ ...config }); if (config.provider === 'primary') throw new Error('use fallback'); return config } } } })
   apply(fallbackOnly.ctx, {
     ...baseConfig,
@@ -8264,6 +8264,27 @@ test('fallback temperature follows role over candidate over category through pre
   await fallbackOnly.tools.get('dsh_omo_task').execute({ role: 'quick', category: 'review', task: 'Use fallback candidate temperature.' }, { agent: parent, signal: new AbortController().signal })
   assert.equal(calls.at(-1).temperature, 0.7)
   assert.equal(fallbackOnly.starts[0].request.agentOptions.temperature, 0.7)
+
+  const inherited = makeContext({ services: { llm: { resolveCallConfig: async config => { calls.push({ ...config }); if (config.provider === 'primary') throw new Error('use fallback'); return config } } } })
+  apply(inherited.ctx, {
+    ...baseConfig,
+    enablePinnedRoutePreflight: true,
+    categoryRoutes: [{ name: 'review', provider: 'primary', model: 'primary-model', temperature: 0.1, fallbackModels: [{ provider: 'backup', model: 'backup-model' }] }],
+    roleRoutes: [{ role: 'explore', category: 'review', provider: 'primary', model: 'primary-model', temperature: 0.2, fallbackModels: [{ provider: 'backup', model: 'backup-model' }] }],
+  })
+  await inherited.tools.get('dsh_omo_task').execute({ role: 'explore', category: 'review', task: 'Inherit role temperature without candidate override.' }, { agent: parent, signal: new AbortController().signal })
+  assert.equal(calls.at(-1).temperature, 0.2)
+  assert.equal(inherited.starts[0].request.agentOptions.temperature, 0.2)
+
+  const categoryInherited = makeContext({ services: { llm: { resolveCallConfig: async config => { calls.push({ ...config }); if (config.provider === 'primary') throw new Error('use fallback'); return config } } } })
+  apply(categoryInherited.ctx, {
+    ...baseConfig,
+    enablePinnedRoutePreflight: true,
+    categoryRoutes: [{ name: 'review', provider: 'primary', model: 'primary-model', temperature: 0.1, fallbackModels: [{ provider: 'backup', model: 'backup-model' }] }],
+  })
+  await categoryInherited.tools.get('dsh_omo_task').execute({ role: 'quick', category: 'review', task: 'Inherit category temperature without candidate override.' }, { agent: parent, signal: new AbortController().signal })
+  assert.equal(calls.at(-1).temperature, 0.1)
+  assert.equal(categoryInherited.starts[0].request.agentOptions.temperature, 0.1)
 })
 
 test('alias reasoning defaults apply only after explicit category settings on unpreflighted launches', async () => {

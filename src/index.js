@@ -1769,7 +1769,7 @@ async function resolveSelectedFallbackRoute(ctx, route, roleRoute, signal, enabl
         ?? fallback.reasoningEffort
         ?? route.reasoningEffort
         ?? fallback.routeAlias?.reasoningEffort,
-      temperature: roleRoute?.temperature ?? fallback.temperature ?? route.temperature,
+      temperature: fallback.temperature ?? roleRoute?.temperature ?? route.temperature,
       maxTokens: fallback.maxTokens ?? route.maxTokens,
     })),
   ]
