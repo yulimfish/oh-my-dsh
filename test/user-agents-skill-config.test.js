@@ -129,6 +129,18 @@ test('Config loads an explicit shared skills root without cwd or vendored conten
   assert.throws(() => apply(invalid.ctx, Config({ sharedSkillsRootPath: 'relative/skills' })), /sharedSkillsRootPath/u)
 })
 
+test('Config keeps OpenCode precedence when the same root appears in multiple user fields', async t => {
+  const temp = await mkdtemp(path.join(tmpdir(), 'dsh-user-root-precedence-'))
+  t.after(() => rm(temp, { recursive: true, force: true }))
+  const root = path.join(temp, 'skills')
+  await skill(root, 'ast-grep', 'OPENCODE_BODY')
+  const { ctx, skills } = makeContext(t)
+  apply(ctx, Config({ projectSkillDirs: [], userOpenCodeSkillRoots: [root], userClaudeSkillRoots: [root], userAgentsSkillRoots: [root], enableProjectSkillFormatCompatibility: true }))
+  const loaded = await skills.get('ast-grep', {})
+  assert.equal(loaded.content.trim(), 'OPENCODE_BODY')
+  assert.equal(loaded.source, 'user-opencode')
+})
+
 test('Config accepts recursive-only config skill paths without a glob', () => {
   const config = Config({ configSkillPaths: [{ path: '/tmp/custom-skills', recursive: true }] })
   assert.deepEqual(config.configSkillPaths, [{ path: '/tmp/custom-skills', recursive: true }])
