@@ -651,6 +651,9 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     if (Object.hasOwn(entry, 'reasoning')) {
       throw new Error(`dsh-omo: role route "${entry.role}" reasoning is unsupported; use reasoningEffort with an exact DSH-supported effort instead`)
     }
+    if (Object.hasOwn(entry, 'disable') || Object.hasOwn(entry, 'disabled')) {
+      throw new Error(`dsh-omo: role route "${entry.role}" disable/disabled is unsupported; use disabledOmoRoles to disable the specialist role globally`)
+    }
     if (Object.hasOwn(entry, 'max_prompt_tokens') || Object.hasOwn(entry, 'maxPromptTokens')) {
       throw new Error(`dsh-omo: role route "${entry.role}" prompt token budgets are unsupported; maxTokens limits output, not input context`)
     }
