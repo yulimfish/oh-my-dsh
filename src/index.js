@@ -280,6 +280,7 @@ export const Config = z.object({
     })),
     disable: z.boolean(),
     promptAppend: z.string(),
+    prompt_append: z.string(),
     description: z.string(),
     tools: z.dict(z.boolean()),
     skills: z.array(z.string()),
@@ -307,6 +308,7 @@ export const Config = z.object({
       temperature: z.number(),
     })).default(undefined),
     promptAppend: z.string(),
+    prompt_append: z.string(),
     allowTools: z.array(z.string()).default(undefined),
     denyTools: z.array(z.string()).default(undefined),
   })).default([]),
@@ -677,10 +679,14 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     }
     const allowTools = normalizeToolNames(entry.allowTools, entry.role, 'allowTools')
     const denyTools = normalizeToolNames(entry.denyTools, entry.role, 'denyTools')
-    const promptAppend = normalizeRolePromptAppend(entry.promptAppend, entry.role)
+    if (entry.promptAppend !== undefined && entry.prompt_append !== undefined) {
+      throw new Error(`dsh-omo: role route "${entry.role}" must not set both promptAppend and prompt_append`)
+    }
+    const promptAppend = normalizeRolePromptAppend(entry.promptAppend ?? entry.prompt_append, entry.role)
     const routeEntry = { ...entry }
     delete routeEntry.agentPreset
     delete routeEntry.promptAppend
+    delete routeEntry.prompt_append
     delete routeEntry.fallbackModels
     delete routeEntry.routeAlias
     result.set(entry.role, Object.freeze({

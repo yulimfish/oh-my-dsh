@@ -45,6 +45,8 @@ test('normalizes immutable category primary routes and rejects invalid entries',
   }
   assert.equal(resolveCategoryRoute(routes(), 'build', { temperature: 0.7 }).temperature, 0.7)
   assert.equal(resolveCategoryRoute(routes(), 'build', {}).temperature, 0.2)
+  assert.equal(normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', prompt_append: 'bounded guidance' }]).get('build').promptAppend, 'bounded guidance')
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', promptAppend: 'one', prompt_append: 'two' }]), /must not set both/u)
 })
 
 test('normalizes bounded explicit category fallback model chains immutably', () => {

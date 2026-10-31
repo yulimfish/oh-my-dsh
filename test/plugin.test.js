@@ -7463,6 +7463,22 @@ test('applies per-role token and reasoning overrides without replacing the paren
   assert.deepEqual(fixture.starts[0].request.toolFilter, { deny: ['bash'] })
 })
 
+test('prompt_append aliases compose bounded category and role task guidance in order', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{ name: 'research', provider: 'p', model: 'm', prompt_append: 'CATEGORY_ALIAS' }],
+    roleRoutes: [{ role: 'explore', category: 'research', prompt_append: 'ROLE_ALIAS' }],
+  })
+  await fixture.tools.get('dsh_omo_task').execute({ role: 'explore', category: 'research', task: 'Review alias guidance.' }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal })
+  const prompt = fixture.starts[0].request.prompt[0].text
+  const category = prompt.indexOf('CATEGORY_ALIAS')
+  const role = prompt.indexOf('ROLE_ALIAS')
+  assert.ok(category >= 0 && role > category)
+  assert.ok(prompt.indexOf('## Additional category guidance') < category)
+  assert.ok(prompt.indexOf('## Additional role guidance') > category)
+})
+
 test('forwards bounded role promptAppend to one-shot and continuable task prompts only for that role', async () => {
   const fixture = makeContext()
   const promptAppend = 'Use concise headings.\nVerify each claim.'
@@ -7471,7 +7487,7 @@ test('forwards bounded role promptAppend to one-shot and continuable task prompt
     enableContinuableTasks: true,
     categoryRoutes: [{ name: 'review', provider: 'review-provider', model: 'review-model' }],
     roleRoutes: [
-      { role: 'reviewer', category: 'review', promptAppend },
+      { role: 'reviewer', category: 'review', prompt_append: promptAppend },
       { role: 'explore', promptAppend: '  \t\n ' },
     ],
   })
@@ -9541,6 +9557,10 @@ test('validates bounded role fallback chains with or without explicit primary pi
     assert.throws(() => apply(unsupportedLifecycle.ctx, { ...baseConfig, roleRoutes: [{ role: 'explore', provider: 'p', model: 'm', [field]: true }] }), message)
     assert.equal(unsupportedLifecycle.tools.size, 0)
   }
+
+  const promptAlias = makeContext()
+  assert.throws(() => apply(promptAlias.ctx, { ...baseConfig, roleRoutes: [{ role: 'explore', promptAppend: 'one', prompt_append: 'two' }] }), /must not set both/u)
+  assert.equal(promptAlias.tools.size, 0)
 
   for (const maxTokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY]) {
     const invalidTokens = makeContext()

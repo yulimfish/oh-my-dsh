@@ -13,7 +13,7 @@ const MAX_PROVIDER_CHARS = 128
 const MAX_MODEL_CHARS = 256
 const MAX_REASONING_EFFORT_CHARS = 64
 const MAX_EXPLICIT_FALLBACK_MODELS = 3
-const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'temperature', 'fallbackModels', 'disable', 'promptAppend', 'description', 'tools', 'skills'])
+const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'temperature', 'fallbackModels', 'disable', 'promptAppend', 'prompt_append', 'description', 'tools', 'skills'])
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
 const CATEGORY_TOOL_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
 const DESCRIPTION_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
@@ -262,7 +262,10 @@ export function normalizeCategoryRoutes(entries, roleCategoryRouteAliases, model
     if (typeof disable !== 'boolean') {
       throw new TypeError(`category route "${name}" disable must be a boolean`)
     }
-    const promptAppend = normalizeCategoryPromptAppend(entry.promptAppend, name)
+    if (entry.promptAppend !== undefined && entry.prompt_append !== undefined) {
+      throw new TypeError(`category route "${name}" must not set both promptAppend and prompt_append`)
+    }
+    const promptAppend = normalizeCategoryPromptAppend(entry.promptAppend ?? entry.prompt_append, name)
     const description = normalizeCategoryDescription(entry.description, name)
     const skills = normalizeCategorySkills(entry.skills, name)
     const categoryToolFilters = normalizeCategoryTools(entry.tools, name)
