@@ -7689,6 +7689,28 @@ test('rejects invalid skill selectors and cancellation before child activation',
     assert.equal(fixture.starts.length, 0)
   })
 
+  await t.test('malformed skill name is rejected before skill lookup', async () => {
+    let reads = 0
+    const fixture = makeContext({ skillGet: async () => { reads += 1 } })
+    apply(fixture.ctx, baseConfig)
+    await assert.rejects(fixture.tools.get('dsh_omo_task').execute({
+      role: 'explore', task: 'Task', load_skills: ['Bad_Name'],
+    }, { agent: { id: 'parent-agent' }, signal: new AbortController().signal }), /kebab-case/u)
+    assert.equal(reads, 0)
+    assert.equal(fixture.starts.length, 0)
+  })
+
+  await t.test('five duplicate selectors are rejected before skill lookup', async () => {
+    let reads = 0
+    const fixture = makeContext({ skillGet: async () => { reads += 1 } })
+    apply(fixture.ctx, baseConfig)
+    await assert.rejects(fixture.tools.get('dsh_omo_task').execute({
+      role: 'explore', task: 'Task', load_skills: Array(5).fill('debugging'),
+    }, { agent: { id: 'parent-agent' }, signal: new AbortController().signal }), /at most 4/u)
+    assert.equal(reads, 0)
+    assert.equal(fixture.starts.length, 0)
+  })
+
   await t.test('caller cancellation during skill lookup prevents activation', async () => {
     const controller = new AbortController()
     const cancellation = new Error('caller cancelled skill lookup')
