@@ -108,6 +108,27 @@ test('real Config rejects snake-case fallbacks on a pinned primary role', () => 
   assert.equal(fixture.starts.length, 0)
 })
 
+test('fallback keeps category description scoped to the chooser', async () => {
+  const fixture = makeContext(async config => {
+    if (config.provider === 'primary') throw new Error('use fallback')
+    return config
+  })
+  const tool = mount(fixture, {
+    enablePinnedRoutePreflight: true,
+    categoryRoutes: [{
+      name: 'review', provider: 'primary', model: 'm', description: 'PRIMARY_DESCRIPTION',
+      fallbackModels: [{ provider: 'backup', model: 'b' }],
+    }],
+    roleRoutes: [{ role: 'explore', category: 'review' }],
+  })
+
+  await execute(tool, { category: 'review', task: 'Check description scope.' })
+
+  assert.doesNotMatch(fixture.starts[0].request.prompt[0].text, /PRIMARY_DESCRIPTION/u)
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { provider: 'backup', model: 'b' })
+  assert.match(tool.description, /review: PRIMARY_DESCRIPTION/u)
+})
+
 test('real Config rejects reasoning on a pinned primary role', () => {
   const fixture = makeContext(async config => config)
   assert.throws(() => mount(fixture, {
