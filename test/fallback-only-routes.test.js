@@ -108,6 +108,19 @@ test('real Config rejects snake-case fallbacks on a pinned primary role', () => 
   assert.equal(fixture.starts.length, 0)
 })
 
+test('disabled category rejects before any fallback preflight or activation', async () => {
+  const calls = []
+  const fixture = makeContext(async config => { calls.push(config); return config })
+  const tool = mount(fixture, {
+    enablePinnedRoutePreflight: true,
+    categoryRoutes: [{ name: 'paused', provider: 'category-primary', model: 'category-model', disable: true, fallbackModels: [{ provider: 'category-backup', model: 'category-backup-model' }] }],
+    roleRoutes: [{ role: 'explore', provider: 'role-primary', model: 'role-model', fallbackModels: [{ provider: 'role-backup', model: 'role-backup-model' }] }],
+  })
+  await assert.rejects(execute(tool, { category: 'paused' }), /disabled explicit category "paused"/u)
+  assert.equal(calls.length, 0)
+  assert.equal(fixture.starts.length, 0)
+})
+
 test('fallback keeps category description scoped to the chooser', async () => {
   const fixture = makeContext(async config => {
     if (config.provider === 'primary') throw new Error('use fallback')
