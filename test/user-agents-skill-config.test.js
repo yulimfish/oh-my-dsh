@@ -126,6 +126,14 @@ test('Config loads an explicit shared skills root without cwd or vendored conten
   assert.throws(() => apply(invalid.ctx, Config({ sharedSkillsRootPath: 'relative/skills' })), /sharedSkillsRootPath/u)
 })
 
+test('Config ignores remote skill sources without setup failure or file reads', async t => {
+  const { ctx, skills } = makeContext(t)
+  apply(ctx, Config({ projectSkillDirs: [], configSkillPaths: ['https://example.invalid/skill.md'], enableProjectSkillFormatCompatibility: true }))
+  const snapshot = await skills.snapshot({})
+  assert.equal(snapshot.skills.some(skill => skill.source === 'config'), false)
+  assert.equal(snapshot.complete, true)
+})
+
 test('Config preserves kebab inline tools and from-file metadata fallback', async t => {
   const temp = await mkdtemp(path.join(tmpdir(), 'dsh-inline-skill-config-'))
   t.after(() => rm(temp, { recursive: true, force: true }))

@@ -952,6 +952,19 @@ test('format compatibility loads config skills below project files and above run
   assert.equal((await runtimeControl.registry.get('shared', { cwd })).content, 'CONFIG_BODY')
   assert.deepEqual(normalizeConfigSkillPaths(undefined), [])
   assert.deepEqual(normalizeConfigSkillPaths([file]), [file])
+  assert.deepEqual(normalizeConfigSkillPaths(['https://example.invalid/skill.md']), [])
+  assert.deepEqual(normalizeConfigSkillPaths([{ path: 'https://example.invalid/skill.md', glob: '**', recursive: true }], { configDir: cwd }), [])
+  const { fs: remoteFs } = makeFileSystem()
+  let remoteReads = 0
+  const originalRemoteRead = remoteFs.readBytes
+  remoteFs.readBytes = async (...args) => { remoteReads += 1; return originalRemoteRead(...args) }
+  const remoteRegistry = makeRegistry(remoteFs)
+  registerProjectSkillProvider(remoteRegistry.ctx, { projectSkillDirs: [], configSkillPaths: ['https://example.invalid/skill.md', 'http://example.invalid/other.md'], formatCompatibility: true })
+  const remoteSnapshot = await remoteRegistry.registry.snapshot({})
+  assert.deepEqual(remoteSnapshot.skills, [])
+  assert.equal(remoteSnapshot.complete, true)
+  assert.equal(remoteReads, 0)
+  assert.deepEqual(normalizeConfigSkillPaths([{ path: 'https://example.invalid/skill.md', glob: '**' }]), [])
   assert.throws(() => normalizeConfigSkillPaths([file, file]), /duplicates/u)
   for (const invalid of ['relative.md', `${cwd}/../outside.md`]) {
     assert.throws(() => normalizeConfigSkillPaths([invalid]), /absolute file or directory|normalized/u)

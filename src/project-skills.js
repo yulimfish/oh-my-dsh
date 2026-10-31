@@ -239,6 +239,7 @@ export function normalizeConfigSkillPaths(value, base) {
   for (const item of value) {
     const record = typeof item === 'string' ? undefined : item
     const entry = record ? record.path : item
+    if (typeof entry === 'string' && (entry.startsWith('http://') || entry.startsWith('https://'))) continue
     const glob = record?.glob
     const validRecord = record === undefined || (record && typeof record === 'object' && !Array.isArray(record)
       && (Object.getPrototypeOf(record) === Object.prototype || Object.getPrototypeOf(record) === null)
