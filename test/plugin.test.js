@@ -8024,6 +8024,24 @@ test('continuable task mode rejects configured category skill defaults instead o
   assert.equal(fixture.continuableStarts.length, 0)
 })
 
+test('fallback selection preserves category and role prompt guidance once', async () => {
+  const calls = []
+  const fixture = makeContext({ services: { llm: { resolveCallConfig: async config => { calls.push(config); if (config.provider === 'primary') throw new Error('use fallback'); return config } } } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enablePinnedRoutePreflight: true,
+    categoryRoutes: [{ name: 'review', provider: 'primary', model: 'm', promptAppend: 'CATEGORY_GUIDANCE', fallbackModels: [{ provider: 'backup', model: 'b' }] }],
+    roleRoutes: [{ role: 'reviewer', category: 'review', promptAppend: 'ROLE_GUIDANCE' }],
+  })
+  await fixture.tools.get('dsh_omo_task').execute({ role: 'reviewer', category: 'review', task: 'Review fallback prompt guidance.' }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal })
+  const prompt = fixture.starts[0].request.prompt[0].text
+  assert.equal((prompt.match(/CATEGORY_GUIDANCE/g) ?? []).length, 1)
+  assert.equal((prompt.match(/ROLE_GUIDANCE/g) ?? []).length, 1)
+  assert.ok(prompt.indexOf('## Additional category guidance') < prompt.indexOf('## Additional role guidance'))
+  assert.equal(calls.length, 2)
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { provider: 'backup', model: 'b' })
+})
+
 test('composes the selected category promptAppend with additive role guidance in both task modes', async () => {
   const fixture = makeContext()
   const categoryA = 'Category A says focus on implementation structure.'
