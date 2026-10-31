@@ -241,7 +241,7 @@ These are design requirements only; no Host implementation or live-profile behav
 
 ## Request-transform follow-up (2026-10-31)
 
-- Host exposes no `llm/request` event. `llm/stream` receives full `GenerateOptions`, but LOOP-built requests are deep-frozen and listeners are explicitly read-only; hand-built calls must keep their inputs unchanged until settlement. `prepareCall(configure)` is a narrower control-selection hook for `reasoningEffort`, `temperature`, `maxTokens`, and `stop`, not arbitrary OpenCode provider-option or payload transformation. Existing route/fallback logic uses those supported controls only; no generic OpenCode request-transform parity is claimed.
+- Host exposes no `llm/request` event. `llm/stream` receives full `GenerateOptions`, but LOOP-built requests are deep-frozen and listeners are explicitly read-only; hand-built calls must keep their inputs unchanged until settlement. `prepareCall(configure)` is a narrower control-selection hook for `reasoningEffort`, `temperature`, `maxTokens`, and `stop`, not arbitrary OpenCode provider-option or payload transformation. Existing route/fallback logic uses those supported controls only. Pinned `chat.params` additionally mutates `topP`, `thinking`, and arbitrary `options`; those fields have no equivalent route schema or safe spawn-level mapping here, so only a bounded route-control subset is implemented, not generic OpenCode request-transform parity.
 
 ## Tool-repair and monitor follow-up (2026-10-31)
 
