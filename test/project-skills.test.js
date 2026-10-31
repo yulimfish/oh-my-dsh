@@ -686,6 +686,13 @@ test('project skill enable/disable filters are provider-scoped with exact list s
   assert.equal(empty.complete, true)
   assert.deepEqual(empty.candidates, [])
   assert.equal(await allowNone.get(all.candidates[0], { cwd }), undefined)
+  const compatibilityEmpty = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(compatibilityEmpty.ctx, { projectSkillDirs: ['.opencode/skills'], enabledProjectSkills: [], formatCompatibility: true })
+  assert.ok((await compatibilityEmpty.registry.snapshot({ cwd })).skills.length > 0)
+  assert.equal((await compatibilityEmpty.registry.get('allowed-project-skill', { cwd })).content, 'Allowed project skill.')
+  const compatibilityOther = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(compatibilityOther.ctx, { projectSkillDirs: ['.opencode/skills'], enabledProjectSkills: ['other'], formatCompatibility: true })
+  assert.deepEqual((await compatibilityOther.registry.snapshot({ cwd })).skills, [])
 
   lifetime.abort()
   assert.ok(watchers.length > 0)

@@ -921,7 +921,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
   ] : [...configRoots, ...directories.map((rootPath, index) => ({ rootPath, rank: PROJECT_SKILL_RANK + index })), ...userRoots]
   const disabledSkills = normalizeDisabledSkills(options.disabledSkills)
   const enabledProjectSkills = normalizeEnabledProjectSkills(options.enabledProjectSkills)
-  const enabledProjectSkillSet = enabledProjectSkills === undefined ? undefined : new Set(enabledProjectSkills)
+  const enabledProjectSkillSet = enabledProjectSkills === undefined || (formatCompatibility && enabledProjectSkills.length === 0) ? undefined : new Set(enabledProjectSkills)
   const disabledProjectSkillSet = new Set(normalizeDisabledProjectSkills(options.disabledProjectSkills))
   const watcherLimit = options.watcherLimit === undefined ? MAX_WATCHERS : options.watcherLimit
   if (!Number.isSafeInteger(watcherLimit) || watcherLimit < 1 || watcherLimit > MAX_WATCHERS) {
