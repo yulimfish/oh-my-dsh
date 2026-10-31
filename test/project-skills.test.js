@@ -1264,6 +1264,14 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.equal((await recoveryRegistry.registry.snapshot({})).complete, false)
   await writeFile(path.join(cwd, 'nested/missing.md'), '---\ndescription: Repaired\n---\nREPAIRED_BODY')
   assert.match((await recoveryRegistry.registry.get('inline', {})).content, /REPAIRED_BODY/u)
+  await writeCompatibilityDocument(cwd, 'mixed/SKILL.md', '---\nname: shared\ndescription: Project source\n---\nPROJECT_BODY')
+  const mixedRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(mixedRegistry.ctx, { projectSkillDirs: ['.opencode/skills'], configSkillBase: { configDir: cwd }, configSkillEntries: { shared: { description: 'From shared', from: 'nested/missing-shared.md' } }, formatCompatibility: true })
+  const mixedObservation = await createProjectSkillProvider(mixedRegistry.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: ['.opencode/skills'], configSkillBase: { configDir: cwd }, configSkillEntries: { shared: { description: 'From shared', from: 'nested/missing-shared.md' } }, formatCompatibility: true }).list({ cwd })
+  assert.equal(mixedObservation.complete, false)
+  assert.equal((await mixedRegistry.registry.get('shared', { cwd })).content, 'PROJECT_BODY')
+  await writeFile(path.join(cwd, 'nested/missing-shared.md'), '---\ndescription: Created shared\n---\nCREATED_SHARED')
+  assert.equal((await mixedRegistry.registry.get('shared', { cwd })).content, 'PROJECT_BODY')
   const fromHomeRegistry = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(fromHomeRegistry.ctx, {
     projectSkillDirs: [], configSkillBase: { configDir: cwd, homeDirectory: path.dirname(cwd) },
