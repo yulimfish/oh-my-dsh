@@ -176,7 +176,7 @@ export function normalizeConfigSkillEntries(value, formatCompatibility = false) 
   const entries = []
   for (const [name, entry] of Object.entries(value)) {
     if (!isSkillName(name)) throw new TypeError(`configSkillEntries contains an invalid skill name: ${name}`)
-    if (entry === false || (entry && typeof entry === 'object' && entry.disable === true)) continue
+    if (entry === false) continue
     if (entry === true) continue
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)
       || (Object.getPrototypeOf(entry) !== Object.prototype && Object.getPrototypeOf(entry) !== null)
@@ -205,6 +205,7 @@ export function normalizeConfigSkillEntries(value, formatCompatibility = false) 
         throw new TypeError(`configSkillEntries.${name}.metadata must contain JSON-compatible values`)
       }
     }
+    if (entry.disable === true) continue
     entries.push(Object.freeze({ name, description: entry.description,
       ...(entry.template === undefined ? {} : { template: entry.template }), ...(entry.from === undefined ? {} : { from: entry.from }),
       ...(entry.license === undefined ? {} : { license: entry.license }),

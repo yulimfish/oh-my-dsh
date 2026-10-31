@@ -1446,6 +1446,9 @@ test('format compatibility loads direct skills from an explicit config directory
   const otherInline = createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Other description', template: 'INLINE_BODY' } }, formatCompatibility: true })
   assert.equal(await otherInline.get(inlineCandidate, {}), undefined)
   assert.throws(() => createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY', disable: 'yes' } } }), /disable|boolean/u)
+  for (const entry of [{ disable: true, template: 42 }, { disable: true, unexpected: true }]) {
+    assert.throws(() => createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: entry } }), /configSkillEntries/u)
+  }
   for (const template of [null, 42, {}]) assert.throws(() => createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template } } }), /template/u)
   for (const allowedTools of [42, ['read', 42], {}]) assert.throws(() => createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY', allowedTools } } }), /allowedTools/u)
   for (const metadata of [null, [], { bad: undefined }, Object.create({ inherited: true })]) assert.throws(() => createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY', metadata } } }), /metadata/u)
