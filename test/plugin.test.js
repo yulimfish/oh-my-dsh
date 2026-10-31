@@ -1317,13 +1317,13 @@ test('config patch-only entries update matching bundled skills without creating 
     ...baseConfig,
     enableProjectSkillFormatCompatibility: true,
     configSkillEntries: {
-      debugging: { description: 'Patched debug', metadata: { owner: 'entry' }, agent: 'entry-agent', subtask: false },
+      debugging: { description: 'Patched debug', metadata: { owner: 'entry' }, agent: 'entry-agent', subtask: false, model: '  entry/model  ' },
       'not-a-skill': { description: 'No winner' },
       'git-master': true,
     },
   })
   assert.equal(compat.skills.get('debugging').description, '(builtin - Skill) Patched debug')
-  assert.deepEqual(compat.skills.get('debugging').metadata, { owner: 'entry' })
+  assert.deepEqual(compat.skills.get('debugging').metadata, { owner: 'entry', model: 'entry/model' })
   assert.equal(compat.skills.get('debugging').content, original.content)
   assert.equal(compat.skills.get('debugging').agent, 'entry-agent')
   assert.equal(compat.skills.get('debugging').subtask, false)

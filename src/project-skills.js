@@ -180,8 +180,8 @@ export function normalizeConfigSkillEntries(value, formatCompatibility = false) 
     if (entry === true) continue
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)
       || (Object.getPrototypeOf(entry) !== Object.prototype && Object.getPrototypeOf(entry) !== null)
-      || Object.keys(entry).some(key => !['description', 'template', 'disable', 'from', 'license', 'compatibility', 'metadata', 'allowedTools', 'allowed-tools', 'argument-hint', 'agent', 'subtask', ...(formatCompatibility ? ['disable-model-invocation', 'user-invocable'] : [])].includes(key))
-      || ['license', 'compatibility', 'argument-hint'].some(key => entry[key] !== undefined && typeof entry[key] !== 'string')
+      || Object.keys(entry).some(key => !['description', 'template', 'disable', 'from', 'license', 'compatibility', 'metadata', 'allowedTools', 'allowed-tools', 'argument-hint', 'agent', 'subtask', 'model', ...(formatCompatibility ? ['disable-model-invocation', 'user-invocable'] : [])].includes(key))
+      || ['license', 'compatibility', 'argument-hint', 'model'].some(key => entry[key] !== undefined && typeof entry[key] !== 'string')
       || (entry.subtask !== undefined && typeof entry.subtask !== 'boolean')
       || (entry.disable !== undefined && typeof entry.disable !== 'boolean')
       || typeof entry.description !== 'string' || (entry.from === undefined && entry.description.length === 0) || entry.description.length > 2_000
@@ -214,6 +214,7 @@ export function normalizeConfigSkillEntries(value, formatCompatibility = false) 
       ...(entry['argument-hint'] === undefined ? {} : { argumentHint: entry['argument-hint'] }),
       ...(entry.agent === undefined ? {} : { agent: entry.agent }),
       ...(entry.subtask === undefined ? {} : { subtask: entry.subtask }),
+      ...(entry.model === undefined ? {} : { model: entry.model }),
       ...(entry.from === undefined && (entry.template === undefined || (formatCompatibility && entry.template === '')) ? { patchOnly: true } : {}) }))
   }
   return Object.freeze(entries)
@@ -568,6 +569,7 @@ function parseSkillDocument(source, { formatCompatibility = false, defaultName, 
       compatibility: frontmatter.compatibility,
       allowedTools: parsedAllowedTools,
       mcpConfig: frontmatter.mcp || undefined,
+      model: frontmatter.model,
     } : {}),
     invocation,
     content: formatCompatibility
@@ -767,10 +769,14 @@ function mergeConfigAllowedTools(base, patch) {
 
 export function applyConfigPatch(skill, patch, formatCompatibility, scope) {
   if (!patch) return skill
+  const mergedMetadata = mergeConfigMetadata(skill.metadata, patch.metadata)
+  const metadata = patch.model?.trim()
+    ? { ...(mergedMetadata && typeof mergedMetadata === 'object' && !Array.isArray(mergedMetadata) ? mergedMetadata : {}), model: patch.model.trim() }
+    : mergedMetadata
   return {
     ...skill,
     description: formatCompatibility ? compatibleSkillDescription(patch.description, scope) : patch.description,
-    metadata: mergeConfigMetadata(skill.metadata, patch.metadata),
+    metadata,
     ...(formatCompatibility ? {
       allowedTools: mergeConfigAllowedTools(skill.allowedTools, patch.allowedTools),
       license: patch.license || skill.license,
@@ -890,9 +896,17 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       const afterConfigDir = await ctx.fs.resolve(configSkillBase.configDir, { cwd: configSkillBase.configDir, signal })
       const afterTarget = await ctx.fs.resolve(fromPath, { cwd: configSkillBase.configDir, signal })
       if (!ctx.fs.contains(afterConfigDir, afterTarget) || afterTarget.targetKey !== fileTarget.targetKey) return undefined
+      const metadataBase = entry.metadata || parsed.metadata
+      const selectedModel = entry.model || parsed.model
+      const sanitizedModel = typeof selectedModel === 'string' ? selectedModel.trim() : ''
+      const metadata = sanitizedModel
+        ? { ...(metadataBase && typeof metadataBase === 'object' && !Array.isArray(metadataBase) ? metadataBase : {}), model: sanitizedModel }
+        : metadataBase && typeof metadataBase === 'object' && !Array.isArray(metadataBase)
+          ? Object.fromEntries(Object.entries(metadataBase).filter(([key]) => key !== 'model'))
+          : metadataBase
       return { template: parsed.content, description: entry.description || parsed.description, resourceBase: dirname(fileTarget.displayPath),
         license: entry.license || parsed.license, compatibility: entry.compatibility || parsed.compatibility,
-        metadata: entry.metadata || parsed.metadata, allowedTools: entry.allowedTools || parsed.allowedTools,
+        metadata, allowedTools: entry.allowedTools || parsed.allowedTools,
         argumentHint: entry.argumentHint || parsed.argumentHint, agent: entry.agent || parsed.agent, subtask: entry.subtask ?? parsed.subtask }
     } catch {
       return undefined
@@ -1286,7 +1300,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
           if (!loaded) continue
         }
         const description = loaded?.description ?? entry.description
-        const metadata = loaded?.metadata ?? entry.metadata
+        const metadata = loaded?.metadata ?? (entry.model?.trim() ? { ...(entry.metadata && typeof entry.metadata === 'object' && !Array.isArray(entry.metadata) ? entry.metadata : {}), model: entry.model.trim() } : entry.metadata)
         const allowedTools = loaded?.allowedTools ?? entry.allowedTools
         const license = loaded?.license ?? entry.license
         const compatibility = loaded?.compatibility ?? entry.compatibility
@@ -1733,7 +1747,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         let resourceBase = configSkillBase?.configDir ?? process.cwd()
         let license = entry.license
         let compatibility = entry.compatibility
-        let metadata = entry.metadata
+        let metadata = entry.model?.trim() ? { ...(entry.metadata && typeof entry.metadata === 'object' && !Array.isArray(entry.metadata) ? entry.metadata : {}), model: entry.model.trim() } : entry.metadata
         let allowedTools = entry.allowedTools
         let argumentHint = entry.argumentHint
         let agent = entry.agent

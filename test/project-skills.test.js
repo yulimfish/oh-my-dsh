@@ -1175,7 +1175,7 @@ test('format compatibility loads direct skills from an explicit config directory
     projectSkillDirs: [], configSkillPaths: [metadataPatchFile],
     configSkillEntries: { shared: {
       description: 'Patched description', license: 'MIT', compatibility: 'entry',
-      metadata: { owner: 'entry', nested: { replace: 'entry' } },
+      metadata: { owner: 'entry', nested: { replace: 'entry' } }, model: '  entry/model  ',
       'allowed-tools': [' Grep ', '', 'Write', 'Read'], 'argument-hint': 'entry-hint', agent: 'entry-agent', subtask: false,
     } },
     formatCompatibility: true,
@@ -1183,7 +1183,7 @@ test('format compatibility loads direct skills from an explicit config directory
   const metadataPatched = await metadataPatchRegistry.registry.get('shared', { cwd })
   assert.equal(metadataPatched.license, 'MIT')
   assert.equal(metadataPatched.compatibility, 'entry')
-  assert.deepEqual(metadataPatched.metadata, { owner: 'entry', nested: { keep: 'retained', replace: 'entry' } })
+  assert.deepEqual(metadataPatched.metadata, { owner: 'entry', nested: { keep: 'retained', replace: 'entry' }, model: 'entry/model' })
   assert.deepEqual(metadataPatched.allowedTools, ['Read', 'Grep', 'Write'])
   assert.equal(metadataPatched.argumentHint, 'entry-hint')
   assert.equal(metadataPatched.agent, 'entry-agent')
@@ -1200,7 +1200,7 @@ test('format compatibility loads direct skills from an explicit config directory
   registerProjectSkillProvider(inline.ctx, {
     projectSkillDirs: [],
     configSkillEntries: {
-      inline: { description: 'Inline config', template: '  INLINE_BODY\n', license: 'MIT', compatibility: 'opencode', metadata: { owner: 'atlas' }, 'allowed-tools': 'read bash_*', 'argument-hint': 'files' },
+      inline: { description: 'Inline config', template: '  INLINE_BODY\n', license: 'MIT', compatibility: 'opencode', metadata: { owner: 'atlas' }, 'allowed-tools': 'read bash_*', 'argument-hint': 'files', model: '  demo/model  ' },
       disabled: { description: 'Disabled', template: 'DISABLED_BODY', disable: true },
       removed: false,
     },
@@ -1212,7 +1212,7 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.match(inlineSkill.content, /<skill-instruction>[\s\S]*INLINE_BODY[\s\S]*\$ARGUMENTS/u)
   assert.equal(inlineSkill.license, 'MIT')
   assert.equal(inlineSkill.compatibility, 'opencode')
-  assert.deepEqual(inlineSkill.metadata, { owner: 'atlas' })
+  assert.deepEqual(inlineSkill.metadata, { owner: 'atlas', model: 'demo/model' })
   assert.deepEqual(inlineSkill.allowedTools, ['read', 'bash_*'])
   assert.deepEqual(inlineSkill.invocation, { modelInvocable: true, userInvocable: true })
   const invocationKeysRegistry = makeRegistry(makeFileSystem().fs)
@@ -1225,12 +1225,12 @@ test('format compatibility loads direct skills from an explicit config directory
   registerProjectSkillProvider(referenced.ctx, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'Use @docs/guide.md' } }, configSkillBase: { configDir: cwd }, formatCompatibility: true })
   assert.match((await referenced.registry.get('inline', {})).content, new RegExp(`Use ${cwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/docs/guide.md`, 'u'))
   await mkdir(path.join(cwd, 'nested'), { recursive: true })
-  await writeFile(path.join(cwd, 'nested/from.md'), '---\ndescription: File description\nlicense: Apache-2.0\ncompatibility: claude\nmetadata: { owner: file }\nallowed-tools: write\nargument-hint: from-file\ndisable-model-invocation: true\nuser-invocable: false\nagent: file-agent\nsubtask: true\n---\nUse @nested/reference.md\nFROM_BODY')
+  await writeFile(path.join(cwd, 'nested/from.md'), '---\ndescription: File description\nlicense: Apache-2.0\ncompatibility: claude\nmetadata: { owner: file }\nallowed-tools: write\nargument-hint: from-file\ndisable-model-invocation: true\nuser-invocable: false\nagent: file-agent\nsubtask: true\nmodel: file/model\n---\nUse @nested/reference.md\nFROM_BODY')
   await writeFile(path.join(cwd, 'nested/reference.md'), 'REFERENCE')
   const fromRegistry = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(fromRegistry.ctx, {
     projectSkillDirs: [], configSkillBase: { configDir: cwd },
-    configSkillEntries: { inline: { description: 'Entry description', template: 'INLINE_IGNORED', from: 'nested/from.md', license: 'MIT', metadata: { owner: 'entry' }, 'allowed-tools': 'read', agent: 'entry-agent', subtask: false } },
+    configSkillEntries: { inline: { description: 'Entry description', template: 'INLINE_IGNORED', from: 'nested/from.md', license: 'MIT', metadata: { owner: 'entry' }, 'allowed-tools': 'read', agent: 'entry-agent', subtask: false, model: '  entry/model  ' } },
     formatCompatibility: true,
   })
   const fromSkill = await fromRegistry.registry.get('inline', {})
@@ -1267,7 +1267,21 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.equal(fromSkill.resourceBase.path, path.join(canonicalCwd, 'nested'))
   assert.equal(fromSkill.license, 'MIT')
   assert.equal(fromSkill.compatibility, 'claude')
-  assert.deepEqual(fromSkill.metadata, { owner: 'entry' })
+  assert.deepEqual(fromSkill.metadata, { owner: 'entry', model: 'entry/model' })
+  await writeFile(path.join(cwd, 'nested/model-fallback.md'), '---\ndescription: File description\nmetadata: { owner: file }\nmodel: file/model\n---\nFROM_BODY')
+  const modelFallbackRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(modelFallbackRegistry.ctx, { projectSkillDirs: [], configSkillBase: { configDir: cwd }, configSkillEntries: { inline: { description: 'Model fallback', from: 'nested/model-fallback.md', metadata: { owner: 'entry' } } }, formatCompatibility: true })
+  assert.deepEqual((await modelFallbackRegistry.registry.get('inline', {})).metadata, { owner: 'entry', model: 'file/model' })
+  const blankModelRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(blankModelRegistry.ctx, { projectSkillDirs: [], configSkillBase: { configDir: cwd }, configSkillEntries: { inline: { description: 'Blank model', from: 'nested/model-fallback.md', model: '   ' } }, formatCompatibility: true })
+  assert.equal((await blankModelRegistry.registry.get('inline', {})).metadata?.model, undefined)
+  for (const [index, model] of ['42', 'false', '[bad]', '{ bad: value }'].entries()) {
+    await writeFile(path.join(cwd, 'nested/model-fallback.md'), `---\ndescription: File description\nmetadata: { owner: file }\nmodel: ${model}\n---\nFROM_BODY`)
+    const invalidModelRegistry = makeRegistry(makeFileSystem().fs)
+    registerProjectSkillProvider(invalidModelRegistry.ctx, { projectSkillDirs: [], configSkillBase: { configDir: cwd }, configSkillEntries: { inline: { description: 'Invalid model', from: 'nested/model-fallback.md', metadata: { owner: 'entry' } } }, formatCompatibility: true })
+    const invalidModel = await invalidModelRegistry.registry.get('inline', {})
+    assert.deepEqual(invalidModel.metadata, { owner: 'entry' }, String(index))
+  }
   assert.deepEqual(fromSkill.allowedTools, ['read'])
   assert.equal(fromSkill.argumentHint, 'from-file')
   await writeFile(path.join(cwd, 'nested/from.md'), '---\ndescription: After\nlicense: Apache-2.0\ncompatibility: claude\nmetadata: { owner: file }\nallowed-tools: write\nargument-hint: from-file\n---\nAFTER_BODY')
