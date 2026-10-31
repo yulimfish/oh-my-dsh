@@ -7453,7 +7453,7 @@ test('applies per-role token and reasoning overrides without replacing the paren
   const fixture = makeContext()
   apply(fixture.ctx, {
     ...baseConfig,
-    roleRoutes: [{ role: 'quick', maxTokens: 384, reasoningEffort: 'medium', temperature: 0.4, denyTools: [' bash '] }],
+    roleRoutes: [{ role: 'quick', max_tokens: 384, reasoningEffort: 'medium', temperature: 0.4, denyTools: [' bash '] }],
   })
   await fixture.tools.get('dsh_omo_task').execute(
     { role: 'quick', task: 'Summarize the changed files' },
@@ -9561,6 +9561,9 @@ test('validates bounded role fallback chains with or without explicit primary pi
   const promptAlias = makeContext()
   assert.throws(() => apply(promptAlias.ctx, { ...baseConfig, roleRoutes: [{ role: 'explore', promptAppend: 'one', prompt_append: 'two' }] }), /must not set both/u)
   assert.equal(promptAlias.tools.size, 0)
+  const tokenAlias = makeContext()
+  assert.throws(() => apply(tokenAlias.ctx, { ...baseConfig, roleRoutes: [{ role: 'explore', maxTokens: 1, max_tokens: 2 }] }), /must not set both/u)
+  assert.equal(tokenAlias.tools.size, 0)
 
   for (const maxTokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY]) {
     const invalidTokens = makeContext()

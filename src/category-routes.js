@@ -13,7 +13,7 @@ const MAX_PROVIDER_CHARS = 128
 const MAX_MODEL_CHARS = 256
 const MAX_REASONING_EFFORT_CHARS = 64
 const MAX_EXPLICIT_FALLBACK_MODELS = 3
-const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'temperature', 'fallbackModels', 'disable', 'promptAppend', 'prompt_append', 'description', 'tools', 'skills'])
+const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'max_tokens', 'temperature', 'fallbackModels', 'disable', 'promptAppend', 'prompt_append', 'description', 'tools', 'skills'])
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
 const CATEGORY_TOOL_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
 const DESCRIPTION_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
@@ -128,7 +128,7 @@ export function normalizeExplicitFallbackModels(value, label, primary, roleCateg
     const rawEntry = value[index]
     if (!isRecord(rawEntry)) throw new TypeError(`${label}[${index}] must be an object`)
     for (const key of Reflect.ownKeys(rawEntry)) {
-      if (typeof key !== 'string' || !['provider', 'model', 'reasoningEffort', 'maxTokens', 'temperature'].includes(key)) {
+      if (typeof key !== 'string' || !['provider', 'model', 'reasoningEffort', 'maxTokens', 'max_tokens', 'temperature'].includes(key)) {
         throw new TypeError(`${label}[${index}] contains unsupported field "${String(key)}"`)
       }
     }
@@ -147,7 +147,8 @@ export function normalizeExplicitFallbackModels(value, label, primary, roleCateg
     const reasoningEffort = rawReasoningEffort === undefined
       ? undefined
       : normalizeString(rawReasoningEffort, `${label}[${index}] reasoningEffort`, MAX_REASONING_EFFORT_CHARS)
-    const rawMaxTokens = Object.hasOwn(entry, 'maxTokens') ? entry.maxTokens : undefined
+    if (Object.hasOwn(entry, 'maxTokens') && Object.hasOwn(entry, 'max_tokens')) throw new TypeError(`${label}[${index}] must not set both maxTokens and max_tokens`)
+    const rawMaxTokens = Object.hasOwn(entry, 'maxTokens') ? entry.maxTokens : entry.max_tokens
     const maxTokens = rawMaxTokens === undefined
       ? undefined
       : normalizeMaxTokens(rawMaxTokens, `${label}[${index}] maxTokens`)
@@ -256,7 +257,8 @@ export function normalizeCategoryRoutes(entries, roleCategoryRouteAliases, model
     const reasoningEffort = rawReasoningEffort === undefined
       ? undefined
       : normalizeString(rawReasoningEffort, `category route "${name}" reasoningEffort`, MAX_REASONING_EFFORT_CHARS)
-    const maxTokens = normalizeMaxTokens(entry.maxTokens, `category route "${name}" maxTokens`)
+    if (Object.hasOwn(entry, 'maxTokens') && Object.hasOwn(entry, 'max_tokens')) throw new TypeError(`category route "${name}" must not set both maxTokens and max_tokens`)
+    const maxTokens = normalizeMaxTokens(entry.maxTokens ?? entry.max_tokens, `category route "${name}" maxTokens`)
     const temperature = normalizeTemperature(entry.temperature, `category route "${name}" temperature`)
     const disable = entry.disable === undefined ? false : entry.disable
     if (typeof disable !== 'boolean') {

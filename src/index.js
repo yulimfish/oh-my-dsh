@@ -270,12 +270,14 @@ export const Config = z.object({
     model: z.string().required(),
     reasoningEffort: z.string(),
     maxTokens: z.number(),
+    max_tokens: z.number(),
     temperature: z.number(),
     fallbackModels: z.array(z.object({
       provider: z.string(),
       model: z.string().required(),
       reasoningEffort: z.string(),
       maxTokens: z.number(),
+    max_tokens: z.number(),
       temperature: z.number(),
     })),
     disable: z.boolean(),
@@ -299,12 +301,14 @@ export const Config = z.object({
     model: z.string(),
     reasoningEffort: z.string(),
     maxTokens: z.number(),
+    max_tokens: z.number(),
     temperature: z.number(),
     fallbackModels: z.array(z.object({
       provider: z.string(),
       model: z.string().required(),
       reasoningEffort: z.string(),
       maxTokens: z.number(),
+    max_tokens: z.number(),
       temperature: z.number(),
     })).default(undefined),
     promptAppend: z.string(),
@@ -622,7 +626,11 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     if (Boolean(provider) !== Boolean(model)) {
       throw new Error(`dsh-omo: role route "${entry.role}" must set provider and model together`)
     }
-    if (entry.maxTokens !== undefined && (!Number.isSafeInteger(entry.maxTokens) || entry.maxTokens < 1)) {
+    if (Object.hasOwn(entry, 'maxTokens') && Object.hasOwn(entry, 'max_tokens')) {
+      throw new Error(`dsh-omo: role route "${entry.role}" must not set both maxTokens and max_tokens`)
+    }
+    const maxTokens = entry.maxTokens ?? entry.max_tokens
+    if (maxTokens !== undefined && (!Number.isSafeInteger(maxTokens) || maxTokens < 1)) {
       throw new Error(`dsh-omo: role route "${entry.role}" maxTokens must be a positive safe integer`)
     }
     if (Object.hasOwn(entry, 'topP') || Object.hasOwn(entry, 'top_p')) {
@@ -688,6 +696,7 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     delete routeEntry.promptAppend
     delete routeEntry.prompt_append
     delete routeEntry.fallbackModels
+    delete routeEntry.max_tokens
     delete routeEntry.routeAlias
     result.set(entry.role, Object.freeze({
       ...routeEntry,
@@ -697,6 +706,7 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
       ...(routeAlias !== undefined ? { routeAlias } : {}),
       ...(fallbackModels !== undefined ? { fallbackModels } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
       ...(allowTools !== undefined ? { allowTools } : {}),
       ...(denyTools !== undefined ? { denyTools } : {}),
       ...(promptAppend !== undefined ? { promptAppend } : {}),
