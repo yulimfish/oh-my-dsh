@@ -1208,6 +1208,33 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.deepEqual(fromSkill.metadata, { owner: 'entry' })
   assert.deepEqual(fromSkill.allowedTools, ['read'])
   assert.equal(fromSkill.argumentHint, 'from-file')
+  const fromHomeRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(fromHomeRegistry.ctx, {
+    projectSkillDirs: [], configSkillBase: { configDir: path.join(cwd, 'elsewhere'), homeDirectory: cwd },
+    configSkillEntries: { inline: { description: 'Home file', from: '~/nested/from.md' } },
+    formatCompatibility: true,
+  })
+  assert.match((await fromHomeRegistry.registry.get('inline', {})).content, /FROM_BODY/u)
+  const missingHomeRegistry = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(missingHomeRegistry.ctx, {
+    projectSkillDirs: [], configSkillBase: { configDir: cwd },
+    configSkillEntries: { inline: { description: 'Missing home', from: '~/nested/from.md' } },
+    formatCompatibility: true,
+  })
+  assert.equal(await missingHomeRegistry.registry.get('inline', {}), undefined)
+  await writeFile(path.join(cwd, 'outside-secret.md'), '---\ndescription: Outside secret\n---\nOUTSIDE_SECRET')
+  const { fs: escapingHomeFs } = makeFileSystem()
+  let escapingHomeReads = 0
+  const originalEscapingHomeRead = escapingHomeFs.readBytes
+  escapingHomeFs.readBytes = async (...args) => { escapingHomeReads += 1; return originalEscapingHomeRead(...args) }
+  const escapingHomeRegistry = makeRegistry(escapingHomeFs)
+  registerProjectSkillProvider(escapingHomeRegistry.ctx, {
+    projectSkillDirs: [], configSkillBase: { configDir: cwd, homeDirectory: path.join(cwd, 'nested') },
+    configSkillEntries: { inline: { description: 'Escaping home', from: '~/../outside-secret.md' } },
+    formatCompatibility: true,
+  })
+  assert.equal(await escapingHomeRegistry.registry.get('inline', {}), undefined)
+  assert.equal(escapingHomeReads, 0)
   const outsideRegistry = makeRegistry(makeFileSystem().fs)
   registerProjectSkillProvider(outsideRegistry.ctx, {
     projectSkillDirs: [], configSkillBase: { configDir: path.join(cwd, 'nested') },

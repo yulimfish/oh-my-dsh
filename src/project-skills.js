@@ -868,13 +868,17 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     if (!entry.from || !configSkillBase?.configDir) return undefined
     const from = entry.from.startsWith('{file:') && entry.from.endsWith('}') ? entry.from.slice(6, -1) : entry.from
     if (from.includes('\0')) return undefined
+    const homeRelative = from.startsWith('~/')
+    const basePath = homeRelative ? configSkillBase.homeDirectory : configSkillBase.configDir
+    const fromPath = homeRelative ? from.slice(2) : from
+    if (!basePath) return undefined
     try {
-      const configDirTarget = await ctx.fs.resolve(configSkillBase.configDir, { cwd: configSkillBase.configDir, signal })
-      const fileTarget = await ctx.fs.resolve(from, { cwd: configSkillBase.configDir, signal })
+      const configDirTarget = await ctx.fs.resolve(basePath, { cwd: basePath, signal })
+      const fileTarget = await ctx.fs.resolve(fromPath, { cwd: basePath, signal })
       if (!ctx.fs.contains(configDirTarget, fileTarget)) return undefined
       const parsed = await readSkillFile(ctx, fileTarget, signal, MAX_SKILL_BYTES, { formatCompatibility: true, defaultName: entry.name, modelScope: 'opencode' })
-      const afterConfigDir = await ctx.fs.resolve(configSkillBase.configDir, { cwd: configSkillBase.configDir, signal })
-      const afterTarget = await ctx.fs.resolve(from, { cwd: configSkillBase.configDir, signal })
+      const afterConfigDir = await ctx.fs.resolve(basePath, { cwd: basePath, signal })
+      const afterTarget = await ctx.fs.resolve(fromPath, { cwd: basePath, signal })
       if (!ctx.fs.contains(afterConfigDir, afterTarget) || afterTarget.targetKey !== fileTarget.targetKey) return undefined
       return { template: parsed.content, description: entry.description || parsed.description, resourceBase: dirname(fileTarget.displayPath),
         license: entry.license || parsed.license, compatibility: entry.compatibility || parsed.compatibility,
