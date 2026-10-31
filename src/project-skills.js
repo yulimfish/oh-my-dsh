@@ -178,17 +178,18 @@ export function normalizeConfigSkillPaths(value) {
     const glob = record?.glob
     const validRecord = record === undefined || (record && typeof record === 'object' && !Array.isArray(record)
       && (Object.getPrototypeOf(record) === Object.prototype || Object.getPrototypeOf(record) === null)
-      && Object.hasOwn(record, 'path') && Object.hasOwn(record, 'glob'))
+      && Object.hasOwn(record, 'path') && Object.hasOwn(record, 'glob')
+      && (record.recursive === undefined || typeof record.recursive === 'boolean'))
     if (!validRecord || typeof entry !== 'string' || !entry || entry.trim() !== entry || entry.length > 4_096
       || !isAbsolute(entry) || normalize(entry) !== entry
       || (item && typeof item === 'object' && (typeof glob !== 'string' || glob.length === 0 || glob.length > 512 || glob.includes('\0')))
-      || (item && typeof item === 'object' && Object.keys(item).some(key => key !== 'path' && key !== 'glob'))
+      || (item && typeof item === 'object' && Object.keys(item).some(key => !['path', 'glob', 'recursive'].includes(key)))
       || /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u2066-\u2069]/u.test(entry)) {
       throw new TypeError('configSkillPaths entries must be normalized absolute file or directory paths with an optional bounded glob')
     }
     if (seen.has(entry)) throw new TypeError('configSkillPaths must not contain duplicates')
     seen.add(entry)
-    paths.push(glob === undefined ? entry : { path: entry, glob })
+    paths.push(glob === undefined ? entry : { path: entry, glob, ...(record.recursive === undefined ? {} : { recursive: record.recursive }) })
   }
   return Object.freeze(paths)
 }
@@ -762,7 +763,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       rootPath: sourcePath.endsWith('.md') ? dirname(sourcePath) : sourcePath,
       ...(sourcePath.endsWith('.md') ? { filePath: sourcePath } : {}),
       sourcePath, source: 'config', rank: PROJECT_SKILL_RANK - 1,
-      ...(typeof source === 'string' ? {} : { glob: source.glob, matches: picomatch(source.glob, { dot: true, bash: true }) }),
+      ...(typeof source === 'string' ? {} : { glob: source.glob, matches: picomatch(source.glob, { dot: true, bash: true }), recursive: source.recursive === true }),
     }
   })
   const configRootMatches = (root, resolverPath) => {
@@ -1388,7 +1389,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
                   if (!skillFileInfo) skillFile = undefined
                 }
                 if (!skillFile) {
-                  if (formatCompatibility && !configRoot && canonicalConfirmedAbsent && directoryDepth < MAX_COMPAT_DIRECTORY_DEPTH) {
+                  if (formatCompatibility && (!configRoot || configRoot.recursive) && canonicalConfirmedAbsent && directoryDepth < MAX_COMPAT_DIRECTORY_DEPTH) {
                     const nestedDirectories = []
                     const nestedFiles = []
                     for (const child of children) {
