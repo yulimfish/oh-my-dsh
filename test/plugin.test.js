@@ -7870,6 +7870,33 @@ test('cancelled pending skill lookups retain a separate instance-wide 64 in-flig
   }
 })
 
+test('fallback one-shot preserves category skill defaults and continuable rejection', async () => {
+  const parent = { id: 'parent-agent', followup() {} }
+  const signal = new AbortController().signal
+  const lookups = []
+  const fixture = makeContext({
+    services: {
+      sessions: { get: id => id === parent.id ? { id, header: { cwd: '/workspace/project' } } : undefined },
+      llm: { resolveCallConfig: async config => { if (config.provider === 'primary') throw new Error('use fallback'); return config } },
+    },
+    skillGet: async (name, options) => {
+      lookups.push({ name, cwd: options.cwd })
+      return { name, invocation: { modelInvocable: true }, content: `Category skill body: ${name}` }
+    },
+  })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    categoryRoutes: [{ name: 'review', provider: 'primary', model: 'm', skills: ['debugging', 'git-master'], fallbackModels: [{ provider: 'backup', model: 'b' }] }],
+    roleRoutes: [{ role: 'explore', category: 'review' }],
+  })
+  await fixture.tools.get('dsh_omo_task').execute({ role: 'explore', category: 'review', task: 'Use fallback category skills.' }, { agent: parent, signal })
+  assert.deepEqual(lookups.map(({ name }) => name), ['debugging', 'git-master'])
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { provider: 'backup', model: 'b' })
+  await assert.rejects(fixture.tools.get('dsh_omo_task_continuable').execute({ role: 'explore', category: 'review', task: 'Reject fallback category skills.' }, { agent: parent, signal }), /only by dsh_omo_task one-shot launches/u)
+  assert.equal(fixture.continuableStarts.length, 0)
+})
+
 test('one-shot category skill defaults precede and deduplicate explicit skill selectors', async () => {
   const parent = { id: 'parent-agent' }
   const signal = new AbortController().signal
