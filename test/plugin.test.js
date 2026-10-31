@@ -7400,6 +7400,17 @@ test('rejects reserved run_code in category and role filters before registering 
   }
 })
 
+test('disjoint category and role allowlists preserve an explicit empty allowlist', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [{ name: 'disjoint', provider: 'p', model: 'm', tools: { terminal: true } }],
+    roleRoutes: [{ role: 'explore', category: 'disjoint', allowTools: ['read'] }],
+  })
+  await fixture.tools.get('dsh_omo_task').execute({ role: 'explore', category: 'disjoint', task: 'Keep empty allowlist.' }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal })
+  assert.deepEqual(fixture.starts[0].request.toolFilter, { allow: [] })
+})
+
 test('fallback selection preserves category and role tool filters', async () => {
   const calls = []
   const fixture = makeContext({ services: { llm: { resolveCallConfig: async config => { calls.push(config); if (config.provider === 'primary') throw new Error('use fallback'); return config } } } })
