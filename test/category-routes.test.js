@@ -53,9 +53,13 @@ test('normalizes immutable category primary routes and rejects invalid entries',
   assert.equal(normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', prompt_append: 'bounded guidance' }]).get('build').promptAppend, 'bounded guidance')
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', promptAppend: 'one', prompt_append: 'two' }]), /must not set both/u)
   assert.equal(normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', max_tokens: 256 }]).get('build').maxTokens, 256)
+  for (const max_tokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY, '100']) {
+    assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', max_tokens }]), /maxTokens/u)
+  }
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', maxTokens: 1, max_tokens: 2 }]), /must not set both/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', maxTokens: undefined, max_tokens: 2 }]), /must not set both/u)
   assert.equal(normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', fallbackModels: [{ provider: 'b', model: 'b', max_tokens: 128 }] }]).get('build').fallbackModels[0].maxTokens, 128)
+  assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', fallbackModels: [{ provider: 'b', model: 'b', max_tokens: 0 }] }]), /maxTokens/u)
   for (const temperature of [0, 2]) {
     assert.equal(normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', fallbackModels: [{ provider: 'b', model: 'b', temperature }] }]).get('build').fallbackModels[0].temperature, temperature)
   }
