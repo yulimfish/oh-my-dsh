@@ -654,6 +654,9 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     if (entry.reasoningEffort !== undefined && !reasoningEffort) {
       throw new Error(`dsh-omo: role route "${entry.role}" reasoningEffort must not be blank`)
     }
+    if (Object.hasOwn(entry, 'fallback_models')) {
+      throw new Error(`dsh-omo: role route "${entry.role}" fallback_models is unsupported; use fallbackModels with explicit provider/model candidates`)
+    }
     const fallbackModels = normalizeExplicitFallbackModels(
       entry.fallbackModels,
       `role route "${entry.role}" fallbackModels`,

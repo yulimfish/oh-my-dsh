@@ -100,6 +100,14 @@ test('fallback-only role rejects empty chains, partial primary pins, malformed a
   }
 })
 
+test('real Config rejects snake-case fallbacks on a pinned primary role', () => {
+  const fixture = makeContext(async config => config)
+  assert.throws(() => mount(fixture, {
+    roleRoutes: [{ role: 'explore', ...chain[0], fallback_models: chain.slice(1) }],
+  }), /fallback_models is unsupported; use fallbackModels/u)
+  assert.equal(fixture.starts.length, 0)
+})
+
 test('fallback-only alias targets cannot collapse distinct candidates into a duplicate pair', () => {
   const fixture = makeContext(async config => config)
   assert.throws(() => mount(fixture, {
