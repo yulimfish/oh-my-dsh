@@ -7,6 +7,7 @@ import { apply, Config, inject, name } from '../src/index.js'
 import { buildWorkerPrompt, getRole, ROLE_NAMES } from '../src/roles.js'
 import { SKILLS } from '../src/skills.js'
 import { TEAM_MODE_LEAD_CONTEXT } from '../src/team-mode-context.js'
+import { createThinkModeReasoningController } from '../src/think-mode-reasoning.js'
 
 function makeContext(options = {}) {
   const tools = new Map()
@@ -627,6 +628,28 @@ test('think-mode reasoning adaptation is default-off and requires bounded call-c
   registration.dispose()
 })
 
+test('think-mode preflight and final request retain the configured temperature', async () => {
+  const calls = []
+  const agent = { id: 'think-child', options: { temperature: 0.4 }, followup() {} }
+  const fixture = makeContext({ services: {
+    agents: { get: id => id === agent.id ? agent : undefined },
+    llm: { resolveCallConfig: async config => { calls.push({ ...config }); return config } },
+  } })
+  apply(fixture.ctx, { ...baseConfig, enableThinkModeReasoning: true, roleRoutes: [{ role: 'quick', temperature: 0.4 }] })
+  const listeners = fixture.eventListeners.get('agent/request')
+  const [temperature, thinkListener] = listeners
+  assert.match(thinkListener.toString(), /onRequest/u)
+  const think = createThinkModeReasoningController({ resolveCallConfig: async config => { calls.push({ ...config }); return config } }, { agents: { get: id => id === agent.id ? agent : undefined } })
+  const signal = new AbortController().signal
+  await think.onPreStep({ agent, turn: 1, step: 1, signal }, async () => ({ kind: 'enter', messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Think carefully.' }] }] }))
+  const base = { provider: 'p', model: 'm' }
+  const final = await think.onRequest({ agent, turn: 1, step: 1, signal }, () => temperature({ agent, turn: 1, step: 1, signal }, async () => base))
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].temperature, 0.4)
+  assert.equal(final.temperature, 0.4)
+  assert.equal(final.reasoningEffort, 'high')
+})
+
 test('image-query Tool is default-off and requires an explicit route plus an optional LLM service', async () => {
   let prepareCalls = 0
   const llm = { prepareCall() { prepareCalls += 1; throw new Error('must not run during setup') } }
@@ -1123,7 +1146,7 @@ test('/omo status route checks one selected primary with normalized controls and
     ...baseConfig,
     categoryRoutes: [{
       name: 'review', provider: 'category-provider', model: 'category-model',
-      reasoningEffort: 'low', maxTokens: 1_024,
+      reasoningEffort: 'low', maxTokens: 1_024, temperature: 0.4,
       fallbackModels: [{ provider: 'backup-provider', model: 'backup-model' }],
     }],
     roleRoutes: [{ role: 'explore', category: 'review', provider: 'role-provider', model: 'role-model' }],
@@ -1135,7 +1158,7 @@ test('/omo status route checks one selected primary with normalized controls and
   assert.equal(category.kind, 'success')
   assert.match(category.text, /accepted as a DSH-compatible call configuration/u)
   assert.deepEqual(calls[0].config, {
-    provider: 'category-provider', model: 'category-model', reasoningEffort: 'low', maxTokens: 1_024,
+    provider: 'category-provider', model: 'category-model', reasoningEffort: 'low', maxTokens: 1_024, temperature: 0.4,
   })
   assert.ok(calls[0].signal instanceof AbortSignal)
   assert.notStrictEqual(calls[0].signal, callerSignal)
@@ -1144,7 +1167,7 @@ test('/omo status route checks one selected primary with normalized controls and
   assert.equal(role.kind, 'success')
   assert.match(role.text, /accepted as a DSH-compatible call configuration/u)
   assert.deepEqual(calls[1].config, {
-    provider: 'role-provider', model: 'role-model', reasoningEffort: 'low', maxTokens: 1_024,
+    provider: 'role-provider', model: 'role-model', reasoningEffort: 'low', maxTokens: 1_024, temperature: 0.4,
   }, 'role pin keeps its provider/model while inheriting selected category controls')
   assert.equal(calls.length, 2, 'one resolver call per selected primary; no fallback route is probed')
   assert.ok(calls.every(({ signal }) => signal instanceof AbortSignal && !signal.aborted))
@@ -7413,17 +7436,30 @@ test('composes category tool allow/deny entries as monotonic inherited-tool filt
   assert.deepEqual(fixture.starts[4].request.toolFilter, { allow: [], deny: ['bash'] })
 })
 
+test('agent request bridge fills only an omitted child temperature', async () => {
+  const fixture = makeContext()
+  apply(fixture.ctx, { ...baseConfig, roleRoutes: [{ role: 'quick', temperature: 0 }] })
+  const listener = fixture.events.get('agent/request')
+  const base = { provider: 'test-provider', model: 'test-model' }
+  const filled = await listener({ agent: { id: 'child', options: { temperature: 0 } }, signal: new AbortController().signal }, async () => base)
+  assert.deepEqual(filled, { ...base, temperature: 0 })
+  const existing = await listener({ agent: { id: 'child', options: { temperature: 0 } }, signal: new AbortController().signal }, async () => ({ ...base, temperature: 0.9 }))
+  assert.deepEqual(existing, { ...base, temperature: 0.9 })
+  const other = await listener({ agent: { id: 'other', options: {} }, signal: new AbortController().signal }, async () => base)
+  assert.deepEqual(other, base)
+})
+
 test('applies per-role token and reasoning overrides without replacing the parent model route', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
     ...baseConfig,
-    roleRoutes: [{ role: 'quick', maxTokens: 384, reasoningEffort: 'medium', denyTools: [' bash '] }],
+    roleRoutes: [{ role: 'quick', maxTokens: 384, reasoningEffort: 'medium', temperature: 0.4, denyTools: [' bash '] }],
   })
   await fixture.tools.get('dsh_omo_task').execute(
     { role: 'quick', task: 'Summarize the changed files' },
     { agent: { id: 'parent-agent', followup: message => fixture.followups.push(message) }, signal: new AbortController().signal },
   )
-  assert.deepEqual(fixture.starts[0].request.agentOptions, { reasoningEffort: 'medium', maxTokens: 384 })
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { reasoningEffort: 'medium', maxTokens: 384, temperature: 0.4 })
   assert.deepEqual(fixture.starts[0].request.toolFilter, { deny: ['bash'] })
 })
 
@@ -8177,6 +8213,41 @@ test('role/category route aliases map primary and fallback pairs before prefligh
   assert.equal(categoryStatus.kind, 'success')
   assert.match(categoryStatus.text, /default reasoningEffort "high"/u)
   assert.deepEqual(calls.at(-1), { provider: 'current-category', model: 'primary-v2', reasoningEffort: 'high' })
+})
+
+test('fallback temperature follows role over candidate over category through preflight and spawn', async () => {
+  const calls = []
+  const attempts = new Map()
+  const fixture = makeContext({ services: {
+    llm: {
+      resolveCallConfig: async config => {
+        calls.push({ ...config })
+        const count = (attempts.get(config.provider) ?? 0) + 1
+        attempts.set(config.provider, count)
+        if (count === 1 && config.provider === 'primary') throw new Error('use fallback')
+        return { ...config, temperature: 0.4 }
+      },
+    },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enablePinnedRoutePreflight: true,
+    categoryRoutes: [{ name: 'review', provider: 'primary', model: 'primary-model', temperature: 0.1 }],
+    roleRoutes: [{ role: 'explore', category: 'review', provider: 'primary', model: 'primary-model', temperature: 0.2, fallbackModels: [{ provider: 'backup', model: 'backup-model', temperature: 0.7 }] }],
+  })
+  const parent = { id: 'parent-agent', followup() {} }
+  await fixture.tools.get('dsh_omo_task').execute({ role: 'explore', category: 'review', task: 'Use configured fallback temperature.' }, { agent: parent, signal: new AbortController().signal })
+  assert.equal(calls.at(-1).temperature, 0.2)
+  assert.equal(fixture.starts[0].request.agentOptions.temperature, 0.2)
+  const fallbackOnly = makeContext({ services: { llm: { resolveCallConfig: async config => { calls.push({ ...config }); if (config.provider === 'primary') throw new Error('use fallback'); return config } } } })
+  apply(fallbackOnly.ctx, {
+    ...baseConfig,
+    enablePinnedRoutePreflight: true,
+    categoryRoutes: [{ name: 'review', provider: 'primary', model: 'primary-model', temperature: 0.1, fallbackModels: [{ provider: 'backup', model: 'backup-model', temperature: 0.7 }] }],
+  })
+  await fallbackOnly.tools.get('dsh_omo_task').execute({ role: 'quick', category: 'review', task: 'Use fallback candidate temperature.' }, { agent: parent, signal: new AbortController().signal })
+  assert.equal(calls.at(-1).temperature, 0.7)
+  assert.equal(fallbackOnly.starts[0].request.agentOptions.temperature, 0.7)
 })
 
 test('alias reasoning defaults apply only after explicit category settings on unpreflighted launches', async () => {
@@ -9193,6 +9264,26 @@ test('continuable category maxTokens rejects before fallback capability resoluti
   assert.equal(fixture.continuableStarts.length, 0)
 })
 
+test('continuable category temperature rejects before fallback capability resolution', async () => {
+  let calls = 0
+  const fixture = makeContext({ services: {
+    llm: { resolveCallConfig: async () => { calls += 1; return {} } },
+  } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enableContinuableTasks: true,
+    categoryRoutes: [{
+      name: 'bounded', provider: 'primary-provider', model: 'primary-model', temperature: 0.4,
+      fallbackModels: [{ provider: 'fallback-provider', model: 'fallback-model' }],
+    }],
+  })
+  await assert.rejects(fixture.tools.get('dsh_omo_task_continuable').execute({
+    role: 'quick', category: 'bounded', task: 'Reject temperature before any capability query.',
+  }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal }), /temperature/u)
+  assert.equal(calls, 0)
+  assert.equal(fixture.continuableStarts.length, 0)
+})
+
 test('applies category maxTokens to one-shot routes and rejects unpersisted continuation ceilings', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
@@ -9407,9 +9498,9 @@ test('validates bounded role fallback chains with or without explicit primary pi
     ...baseConfig,
     roleRoutes: [{
       role: 'explore', provider: 'primary', model: 'primary-model',
-      fallbackModels: [{ provider: 'backup', model: 'backup-model', temperature: 0.2 }],
+      fallbackModels: [{ provider: 'backup', model: 'backup-model', topP: 0.2 }],
     }],
-  }), /contains unsupported field "temperature"/u)
+  }), /contains unsupported field "topP"/u)
   assert.equal(unsupportedTuning.tools.size, 0)
 
   for (const maxTokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY]) {

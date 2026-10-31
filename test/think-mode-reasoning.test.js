@@ -65,6 +65,12 @@ test('applies high reasoning effort only after same-route resolution accepts it'
   assert.equal(calls[0].config.provider, route.provider)
   assert.equal(calls[0].config.model, route.model)
   assert.equal(calls[0].config.reasoningEffort, 'high')
+  const temperatureAgent = { id: 'think-temperature', options: { temperature: 0.4 } }
+  fixture.liveAgents.set(temperatureAgent.id, temperatureAgent)
+  await captureThink(fixture.controller, temperatureAgent, 2, 3, 'Think through the alternatives.', signal)
+  const withTemperature = await fixture.controller.onRequest(requestPayload(temperatureAgent, 2, 3, signal), async () => route)
+  assert.equal(calls.at(-1).config.temperature, 0.4)
+  assert.equal(withTemperature.temperature, 0.4)
   assert.notEqual(calls[0].signal, signal, 'the resolver receives a bounded child signal')
   fixture.controller.dispose()
 })

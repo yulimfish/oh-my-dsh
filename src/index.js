@@ -270,11 +270,13 @@ export const Config = z.object({
     model: z.string().required(),
     reasoningEffort: z.string(),
     maxTokens: z.number(),
+    temperature: z.number(),
     fallbackModels: z.array(z.object({
       provider: z.string(),
       model: z.string().required(),
       reasoningEffort: z.string(),
       maxTokens: z.number(),
+      temperature: z.number(),
     })),
     disable: z.boolean(),
     promptAppend: z.string(),
@@ -296,11 +298,13 @@ export const Config = z.object({
     model: z.string(),
     reasoningEffort: z.string(),
     maxTokens: z.number(),
+    temperature: z.number(),
     fallbackModels: z.array(z.object({
       provider: z.string(),
       model: z.string().required(),
       reasoningEffort: z.string(),
       maxTokens: z.number(),
+      temperature: z.number(),
     })).default(undefined),
     promptAppend: z.string(),
     allowTools: z.array(z.string()).default(undefined),
@@ -618,6 +622,9 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     }
     if (entry.maxTokens !== undefined && (!Number.isSafeInteger(entry.maxTokens) || entry.maxTokens < 1)) {
       throw new Error(`dsh-omo: role route "${entry.role}" maxTokens must be a positive safe integer`)
+    }
+    if (entry.temperature !== undefined && (typeof entry.temperature !== 'number' || !Number.isFinite(entry.temperature) || entry.temperature < 0 || entry.temperature > 2)) {
+      throw new Error(`dsh-omo: role route "${entry.role}" temperature must be a finite number from 0 to 2`)
     }
     const reasoningEffort = typeof entry.reasoningEffort === 'string' ? entry.reasoningEffort.trim() : ''
     if (entry.reasoningEffort !== undefined && !reasoningEffort) {
@@ -1464,6 +1471,7 @@ function agentOptionsForRoute(route, { includeMaxTokens = true } = {}) {
   const options = {
     ...(route.provider && route.model ? { provider: route.provider, model: route.model } : {}),
     ...(route.reasoningEffort ? { reasoningEffort: route.reasoningEffort } : {}),
+    ...(route.temperature !== undefined ? { temperature: route.temperature } : {}),
     ...(includeMaxTokens && route.maxTokens !== undefined ? { maxTokens: route.maxTokens } : {}),
   }
   return Object.keys(options).length > 0 ? options : undefined
@@ -1654,6 +1662,7 @@ async function preflightPinnedPrimaryRoute(ctx, route, roleRoute, signal, routeP
     provider: route.provider,
     model: route.model,
     ...(route.reasoningEffort !== undefined ? { reasoningEffort: route.reasoningEffort } : {}),
+    ...(route.temperature !== undefined ? { temperature: route.temperature } : {}),
     ...(route.maxTokens !== undefined ? { maxTokens: route.maxTokens } : {}),
   }
   try {
@@ -1698,6 +1707,7 @@ async function resolveSelectedFallbackRoute(ctx, route, roleRoute, signal, enabl
       provider: route.provider,
       model: route.model,
       reasoningEffort: route.reasoningEffort ?? route.routeAlias?.reasoningEffort,
+      temperature: route.temperature,
       maxTokens: route.maxTokens,
     }]),
     ...fallbackModels.map(fallback => ({
@@ -1707,6 +1717,7 @@ async function resolveSelectedFallbackRoute(ctx, route, roleRoute, signal, enabl
         ?? fallback.reasoningEffort
         ?? route.reasoningEffort
         ?? fallback.routeAlias?.reasoningEffort,
+      temperature: roleRoute?.temperature ?? fallback.temperature ?? route.temperature,
       maxTokens: fallback.maxTokens ?? route.maxTokens,
     })),
   ]
@@ -1718,6 +1729,7 @@ async function resolveSelectedFallbackRoute(ctx, route, roleRoute, signal, enabl
         provider: candidate.provider,
         model: candidate.model,
         ...(candidate.reasoningEffort !== undefined ? { reasoningEffort: candidate.reasoningEffort } : {}),
+        ...(candidate.temperature !== undefined ? { temperature: candidate.temperature } : {}),
         ...(candidate.maxTokens !== undefined ? { maxTokens: candidate.maxTokens } : {}),
       }
       try {
@@ -1739,6 +1751,7 @@ async function resolveSelectedFallbackRoute(ctx, route, roleRoute, signal, enabl
           provider: candidate.provider,
           model: candidate.model,
           ...(materializedReasoningEffort !== undefined ? { reasoningEffort: materializedReasoningEffort } : {}),
+          ...(candidate.temperature !== undefined ? { temperature: candidate.temperature } : {}),
           ...(candidate.maxTokens !== undefined ? { maxTokens: candidate.maxTokens } : {}),
         })
       } catch (error) {
@@ -2683,6 +2696,10 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, user
       if (route?.maxTokens !== undefined || exec.agent.options?.maxTokens !== undefined || fallbackTokenOverride) {
         throw new Error('Continuable tasks cannot set or inherit role/category/parent maxTokens or fallback maxTokens: DSH RC2 does not preserve these ceilings across cold resume.')
       }
+      const fallbackTemperatureOverride = fallbackModelsForRoute(route, roleRoute)?.some(candidate => candidate.temperature !== undefined) ?? false
+      if (route?.temperature !== undefined || fallbackTemperatureOverride) {
+        throw new Error('Continuable tasks cannot set role/category or fallback temperature: DSH RC2 does not preserve these controls across cold resume.')
+      }
       const provider = typeof ctx.subagents.getProvider === 'function'
         ? ctx.subagents.getProvider(providerName)
         : undefined
@@ -2988,6 +3005,7 @@ async function renderRouteCapabilityStatus(llmService, roleRoutes, categoryRoute
     provider: route.provider,
     model: route.model,
     ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+    ...(route.temperature !== undefined ? { temperature: route.temperature } : {}),
     ...(route.maxTokens !== undefined ? { maxTokens: route.maxTokens } : {}),
   }
   try {
@@ -4322,6 +4340,17 @@ export function apply(ctx, rawConfig) {
     })
     : undefined
 
+  const hasTemperatureRoutes = [...roleRoutes.values(), ...categoryRoutes.values()].some(route => route.temperature !== undefined
+    || route.fallbackModels?.some(candidate => candidate.temperature !== undefined))
+  if (hasTemperatureRoutes) ctx.on('agent/request', async (_payload, next) => {
+    const base = await next()
+    if (base.temperature !== undefined) return base
+    const agent = _payload?.agent
+    const temperature = agent?.options?.temperature
+    return typeof temperature === 'number' && Number.isFinite(temperature) && temperature >= 0 && temperature <= 2
+      ? { ...base, temperature }
+      : base
+  })
   if (config.enableThinkModeReasoning) {
     registerThinkModeReasoning(ctx, llmService, { agents: agentsService })
   }

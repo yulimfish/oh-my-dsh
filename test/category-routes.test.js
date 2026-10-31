@@ -4,7 +4,7 @@ import { normalizeCategoryRoutes, normalizeExplicitFallbackModels, resolveCatego
 import { normalizeRoleCategoryRouteAliases } from '../src/role-category-route-aliases.js'
 
 const routes = () => normalizeCategoryRoutes([
-  { name: 'build', provider: 'provider-build', model: 'model-build', reasoningEffort: 'medium', maxTokens: 2048 },
+  { name: 'build', provider: 'provider-build', model: 'model-build', reasoningEffort: 'medium', maxTokens: 2048, temperature: 0.2 },
   { name: 'review', provider: 'provider-review', model: 'model-review', reasoningEffort: 'low', maxTokens: 1024 },
 ])
 
@@ -40,6 +40,11 @@ test('normalizes immutable category primary routes and rejects invalid entries',
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', disable: 'true' }]), /disable must be a boolean/u)
   assert.throws(() => normalizeCategoryRoutes([{ name: 'build', disable: true }]), /requires both provider and model/u)
   assert.throws(() => resolveCategoryRoute(routes(), 'build', { maxTokens: 1.5 }), /role route maxTokens must be a positive safe integer/u)
+  for (const temperature of [-0.1, 2.1, Number.NaN, Number.POSITIVE_INFINITY, '0.4']) {
+    assert.throws(() => normalizeCategoryRoutes([{ name: 'build', provider: 'p', model: 'm', temperature }]), /temperature/u)
+  }
+  assert.equal(resolveCategoryRoute(routes(), 'build', { temperature: 0.7 }).temperature, 0.7)
+  assert.equal(resolveCategoryRoute(routes(), 'build', {}).temperature, 0.2)
 })
 
 test('normalizes bounded explicit category fallback model chains immutably', () => {
@@ -74,7 +79,8 @@ test('normalizes bounded explicit category fallback model chains immutably', () 
     ['blank reasoning', [{ provider: 'backup-provider', model: 'backup-model', reasoningEffort: ' ' }]],
     ['zero fallback maxTokens', [{ provider: 'backup-provider', model: 'backup-model', maxTokens: 0 }]],
     ['fractional fallback maxTokens', [{ provider: 'backup-provider', model: 'backup-model', maxTokens: 1.5 }]],
-    ['unsupported field', [{ provider: 'backup-provider', model: 'backup-model', temperature: 0 }]],
+    ['unsupported field', [{ provider: 'backup-provider', model: 'backup-model', topP: 0 }]],
+    ['invalid temperature', [{ provider: 'backup-provider', model: 'backup-model', temperature: Number.NaN }]],
     ['duplicate primary', [{ provider: 'primary-provider', model: 'primary-model' }]],
     ['duplicate candidate', [
       { provider: 'backup-provider', model: 'backup-model' },

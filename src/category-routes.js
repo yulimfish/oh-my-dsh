@@ -13,7 +13,7 @@ const MAX_PROVIDER_CHARS = 128
 const MAX_MODEL_CHARS = 256
 const MAX_REASONING_EFFORT_CHARS = 64
 const MAX_EXPLICIT_FALLBACK_MODELS = 3
-const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'fallbackModels', 'disable', 'promptAppend', 'description', 'tools', 'skills'])
+const ALLOWED_CATEGORY_FIELDS = new Set(['name', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'temperature', 'fallbackModels', 'disable', 'promptAppend', 'description', 'tools', 'skills'])
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
 const CATEGORY_TOOL_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
 const DESCRIPTION_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
@@ -128,7 +128,7 @@ export function normalizeExplicitFallbackModels(value, label, primary, roleCateg
     const rawEntry = value[index]
     if (!isRecord(rawEntry)) throw new TypeError(`${label}[${index}] must be an object`)
     for (const key of Reflect.ownKeys(rawEntry)) {
-      if (typeof key !== 'string' || !['provider', 'model', 'reasoningEffort', 'maxTokens'].includes(key)) {
+      if (typeof key !== 'string' || !['provider', 'model', 'reasoningEffort', 'maxTokens', 'temperature'].includes(key)) {
         throw new TypeError(`${label}[${index}] contains unsupported field "${String(key)}"`)
       }
     }
@@ -151,6 +151,7 @@ export function normalizeExplicitFallbackModels(value, label, primary, roleCateg
     const maxTokens = rawMaxTokens === undefined
       ? undefined
       : normalizeMaxTokens(rawMaxTokens, `${label}[${index}] maxTokens`)
+    const temperature = normalizeTemperature(entry.temperature, `${label}[${index}] temperature`)
     const key = JSON.stringify([provider, model])
     if (seen.has(key)) throw new TypeError(`${label} must not contain duplicate provider/model candidates`)
     seen.add(key)
@@ -160,11 +161,18 @@ export function normalizeExplicitFallbackModels(value, label, primary, roleCateg
       ...(routeAlias !== undefined ? { routeAlias } : {}),
       ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
+      ...(temperature !== undefined ? { temperature } : {}),
     }))
   }
   const normalized = Object.freeze(candidates)
   NORMALIZED_FALLBACK_MODELS.add(normalized)
   return normalized
+}
+
+function normalizeTemperature(value, label) {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 2) throw new TypeError(`${label} must be a finite number from 0 to 2`)
+  return value
 }
 
 function normalizeMaxTokens(value, label) {
@@ -249,6 +257,7 @@ export function normalizeCategoryRoutes(entries, roleCategoryRouteAliases, model
       ? undefined
       : normalizeString(rawReasoningEffort, `category route "${name}" reasoningEffort`, MAX_REASONING_EFFORT_CHARS)
     const maxTokens = normalizeMaxTokens(entry.maxTokens, `category route "${name}" maxTokens`)
+    const temperature = normalizeTemperature(entry.temperature, `category route "${name}" temperature`)
     const disable = entry.disable === undefined ? false : entry.disable
     if (typeof disable !== 'boolean') {
       throw new TypeError(`category route "${name}" disable must be a boolean`)
@@ -272,6 +281,7 @@ export function normalizeCategoryRoutes(entries, roleCategoryRouteAliases, model
       ...(routeAlias !== undefined ? { routeAlias } : {}),
       ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
+      ...(temperature !== undefined ? { temperature } : {}),
       disable,
       ...(skills !== undefined ? { skills } : {}),
       ...(fallbackModels !== undefined ? { fallbackModels } : {}),
@@ -362,6 +372,9 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
   const roleMaxTokens = roleRoute === undefined
     ? undefined
     : normalizeMaxTokens(roleRoute.maxTokens, 'role route maxTokens')
+  const roleTemperature = roleRoute === undefined
+    ? undefined
+    : normalizeTemperature(roleRoute.temperature, 'role route temperature')
 
   const resolved = {
     ...(roleRoute ?? {}),
@@ -378,6 +391,9 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
   const maxTokens = roleMaxTokens ?? categoryRoute.maxTokens
   if (maxTokens === undefined) delete resolved.maxTokens
   else resolved.maxTokens = maxTokens
+  const temperature = roleTemperature ?? categoryRoute.temperature
+  if (temperature === undefined) delete resolved.temperature
+  else resolved.temperature = temperature
   const fallbackModels = rolePin !== undefined
     ? roleRoute?.fallbackModels
     : categoryRoute.fallbackModels

@@ -264,7 +264,10 @@ function createController(llm, options = {}) {
     }
 
     state.inFlight = true
-    const candidate = Object.freeze({ ...base, reasoningEffort: 'high' })
+    const candidate = Object.freeze({ ...base,
+      ...(base.temperature === undefined && typeof agent.options?.temperature === 'number' ? { temperature: agent.options.temperature } : {}),
+      reasoningEffort: 'high',
+    })
     let resolved
     try {
       resolved = await awaitWithSignalAndTimeout(
