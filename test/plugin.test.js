@@ -7400,6 +7400,20 @@ test('rejects reserved run_code in category and role filters before registering 
   }
 })
 
+test('fallback selection preserves category and role tool filters', async () => {
+  const calls = []
+  const fixture = makeContext({ services: { llm: { resolveCallConfig: async config => { calls.push(config); if (config.provider === 'primary') throw new Error('use fallback'); return config } } } })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    enablePinnedRoutePreflight: true,
+    categoryRoutes: [{ name: 'restricted', provider: 'primary', model: 'm', tools: { read: false, bash: false, grep: true }, fallbackModels: [{ provider: 'backup', model: 'b' }] }],
+    roleRoutes: [{ role: 'explore', category: 'restricted', allowTools: ['read', 'grep', 'web_search'], denyTools: ['bash'] }],
+  })
+  await fixture.tools.get('dsh_omo_task').execute({ role: 'explore', category: 'restricted', task: 'Apply filters after fallback.' }, { agent: { id: 'parent-agent', followup() {} }, signal: new AbortController().signal })
+  assert.deepEqual(fixture.starts[0].request.toolFilter, { allow: ['grep'], deny: ['bash', 'read'] })
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { provider: 'backup', model: 'b' })
+})
+
 test('composes category tool allow/deny entries as monotonic inherited-tool filters', async () => {
   const fixture = makeContext()
   apply(fixture.ctx, {
