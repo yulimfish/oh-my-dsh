@@ -3407,6 +3407,28 @@ test('format compatibility discovers nested skill directories to depth three wit
   const strictRegistration = registerProjectSkillProvider(strictFixture.ctx, { projectSkillDirs: ['.opencode/skills'] })
   t.after(() => strictRegistration.dispose())
   assert.deepEqual((await strictFixture.registry.snapshot({ cwd })).skills, [], 'strict discovery remains non-recursive')
+  const collisionFs = makeFileSystem().fs
+  const collisionListDir = collisionFs.listDir
+  const collisionRoot = await realpath(path.join(cwd, '.opencode/skills'))
+  collisionFs.listDir = async (target, signal) => {
+    const entries = await collisionListDir(target, signal)
+    if (target.targetKey === collisionRoot) {
+      const order = ['alpha', 'beta', 'team']
+      return entries.sort((left, right) => order.indexOf(left.name) - order.indexOf(right.name))
+    }
+    return entries
+  }
+  const collisionRegistry = compatibilityRegistry(t, collisionFs)
+  await writeCompatibilityDocument(cwd, 'alpha/review/SKILL.md', 'Alpha review body.')
+  await writeCompatibilityDocument(cwd, 'beta/review/SKILL.md', 'Beta review body.')
+  const collisionSnapshot = await collisionRegistry.registry.snapshot({ cwd })
+  const collisionReview = await collisionRegistry.registry.get('review', { cwd })
+  assert.equal(collisionReview.content, 'Alpha review body.')
+  assert.equal(collisionReview.resourceBase.path, await realpath(path.join(cwd, '.opencode/skills/alpha/review')))
+  assert.equal(await collisionRegistry.registry.get('alpha/review', { cwd }), undefined)
+  assert.equal(await collisionRegistry.registry.get('beta/review', { cwd }), undefined)
+  assert.equal(collisionSnapshot.complete, true)
+  assert.equal(collisionSnapshot.skills.filter(skill => skill.name === 'review').length, 1)
 })
 
 test('format compatibility ignores mixed-case Markdown extensions without shadowing valid skills', async t => {
