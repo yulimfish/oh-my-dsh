@@ -246,6 +246,27 @@ test('caller cancellation during fallback preflight cannot cause a late spawn', 
   assert.equal(fixture.starts.length, 0)
 })
 
+test('caller cancellation after primary failure blocks fallback launch', async () => {
+  let releaseBackup
+  let enteredBackup
+  const calledBackup = new Promise(resolve => { enteredBackup = resolve })
+  const controller = new AbortController()
+  const fixture = makeContext(config => {
+    if (config.provider === chain[0].provider) return Promise.reject(new Error('primary unavailable'))
+    enteredBackup()
+    return new Promise(resolve => { releaseBackup = () => resolve(config) })
+  })
+  const tool = mount(fixture, { roleRoutes: [{ role: 'explore', ...chain[0], fallbackModels: [chain[1]] }] })
+  const pending = execute(tool, {}, controller.signal)
+  const rejected = assert.rejects(pending, /cancel|abort/iu)
+  await calledBackup
+  controller.abort()
+  await rejected
+  releaseBackup()
+  await tick()
+  assert.equal(fixture.starts.length, 0)
+})
+
 test('new fallback-only chain has one aggregate five-second deadline and no late spawn', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const calls = []
