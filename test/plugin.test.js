@@ -9531,6 +9531,17 @@ test('validates bounded role fallback chains with or without explicit primary pi
     assert.equal(primaryPromptBudget.tools.size, 0)
   }
 
+  for (const [field, message] of [
+    ['is_unstable_agent', /unstable-agent monitoring is unsupported/u],
+    ['isUnstableAgent', /unstable-agent monitoring is unsupported/u],
+    ['warn_unavailable', /unavailable warning suppression is unsupported/u],
+    ['warnUnavailable', /unavailable warning suppression is unsupported/u],
+  ]) {
+    const unsupportedLifecycle = makeContext()
+    assert.throws(() => apply(unsupportedLifecycle.ctx, { ...baseConfig, roleRoutes: [{ role: 'explore', provider: 'p', model: 'm', [field]: true }] }), message)
+    assert.equal(unsupportedLifecycle.tools.size, 0)
+  }
+
   for (const maxTokens of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY]) {
     const invalidTokens = makeContext()
     assert.throws(() => apply(invalidTokens.ctx, {

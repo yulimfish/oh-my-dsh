@@ -641,6 +641,12 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     if (Object.hasOwn(entry, 'max_prompt_tokens') || Object.hasOwn(entry, 'maxPromptTokens')) {
       throw new Error(`dsh-omo: role route "${entry.role}" prompt token budgets are unsupported; maxTokens limits output, not input context`)
     }
+    if (Object.hasOwn(entry, 'is_unstable_agent') || Object.hasOwn(entry, 'isUnstableAgent')) {
+      throw new Error(`dsh-omo: role route "${entry.role}" unstable-agent monitoring is unsupported; the DSH job mirror does not provide unstable-agent supervision`)
+    }
+    if (Object.hasOwn(entry, 'warn_unavailable') || Object.hasOwn(entry, 'warnUnavailable')) {
+      throw new Error(`dsh-omo: role route "${entry.role}" unavailable warning suppression is unsupported; DSH route preflight does not provide a warning-policy channel`)
+    }
     if (entry.temperature !== undefined && (typeof entry.temperature !== 'number' || !Number.isFinite(entry.temperature) || entry.temperature < 0 || entry.temperature > 2)) {
       throw new Error(`dsh-omo: role route "${entry.role}" temperature must be a finite number from 0 to 2`)
     }
