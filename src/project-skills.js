@@ -220,10 +220,11 @@ export function normalizeConfigSkillEntries(value, formatCompatibility = false) 
       || ['license', 'compatibility', 'argument-hint', 'model'].some(key => entry[key] !== undefined && typeof entry[key] !== 'string')
       || (entry.subtask !== undefined && typeof entry.subtask !== 'boolean')
       || (entry.disable !== undefined && typeof entry.disable !== 'boolean')
-      || typeof entry.description !== 'string' || (entry.from === undefined && entry.description.length === 0) || entry.description.length > 2_000
+      || (entry.description !== undefined && (typeof entry.description !== 'string' || entry.description.length > 2_000))
       || (entry.from !== undefined && (typeof entry.from !== 'string' || entry.from.length === 0 || entry.from.length > 4_096 || entry.from.includes('\0')))
       || (entry.template !== undefined && typeof entry.template !== 'string')
-      || (entry.from === undefined && entry.template === undefined && entry.description === undefined)) {
+      || (entry.from === undefined && entry.template !== undefined && !entry.description)
+      || (entry.from === undefined && entry.template === undefined && !entry.description && Object.keys(entry).length === 0)) {
       throw new TypeError(`configSkillEntries.${name} must contain only description and template, with boolean disable when provided`)
     }
     const allowedTools = entry.allowedTools ?? entry['allowed-tools']
@@ -838,9 +839,12 @@ export function applyConfigPatch(skill, patch, formatCompatibility, scope) {
   const metadata = patch.model?.trim()
     ? { ...(mergedMetadata && typeof mergedMetadata === 'object' && !Array.isArray(mergedMetadata) ? mergedMetadata : {}), model: patch.model.trim() }
     : mergedMetadata
+  const baseDescription = scope && skill.description?.startsWith(`(${scope} - Skill) `)
+    ? skill.description.slice(`(${scope} - Skill) `.length)
+    : skill.description
   return {
     ...skill,
-    description: formatCompatibility ? compatibleSkillDescription(patch.description, scope) : patch.description,
+    description: formatCompatibility ? compatibleSkillDescription(patch.description || baseDescription, scope) : patch.description || skill.description,
     metadata,
     ...(formatCompatibility ? {
       allowedTools: mergeConfigAllowedTools(skill.allowedTools, patch.allowedTools),

@@ -1216,6 +1216,16 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.equal(metadataPatched.argumentHint, 'entry-hint')
   assert.equal(metadataPatched.agent, 'entry-agent')
   assert.equal(metadataPatched.subtask, false)
+  for (const entry of [{ metadata: { nested: { replace: 'entry' } } }, { description: '', metadata: { nested: { replace: 'entry' } } }]) {
+    const fallbackDescriptionRegistry = makeRegistry(makeFileSystem().fs)
+    registerProjectSkillProvider(fallbackDescriptionRegistry.ctx, {
+      projectSkillDirs: [], configSkillPaths: [metadataPatchFile], configSkillEntries: { shared: entry }, formatCompatibility: true,
+    })
+    const fallbackDescription = await fallbackDescriptionRegistry.registry.get('shared', { cwd })
+    assert.equal(fallbackDescription.description, '(config - Skill) Original description')
+    assert.equal(fallbackDescription.content, 'PATCH_BODY')
+    assert.deepEqual(fallbackDescription.metadata, { owner: 'file', nested: { keep: 'retained', replace: 'entry' } })
+  }
   const { fs: forgedPatchFs } = makeFileSystem()
   const { ctx: forgedPatchCtx } = makeRegistry(forgedPatchFs)
   const forgedProvider = createProjectSkillProvider(forgedPatchCtx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillPaths: [patchFile], formatCompatibility: true })
@@ -1262,6 +1272,11 @@ test('format compatibility loads direct skills from an explicit config directory
     formatCompatibility: true,
   })
   const fromSkill = await fromRegistry.registry.get('inline', {})
+  const fromWithoutDescription = makeRegistry(makeFileSystem().fs)
+  registerProjectSkillProvider(fromWithoutDescription.ctx, {
+    projectSkillDirs: [], configSkillBase: { configDir: cwd }, configSkillEntries: { inline: { from: 'nested/from.md' } }, formatCompatibility: true,
+  })
+  assert.equal((await fromWithoutDescription.registry.get('inline', {})).description, '(config - Skill) File description')
   assert.equal((await fromRegistry.registry.snapshot({})).complete, false)
   await writeFile(path.join(cwd, 'nested/from.md'), '---\ndescription: File description\nlicense: Apache-2.0\ncompatibility: claude\nmetadata: { owner: file }\nallowed-tools: write\nargument-hint: from-file\n---\nUse @nested/reference.md\nFROM_BODY')
   assert.equal(fromSkill.description, '(config - Skill) Entry description')
@@ -1458,6 +1473,15 @@ test('format compatibility loads direct skills from an explicit config directory
   registerProjectSkillProvider(strictInline.ctx, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: '  INLINE_BODY\n' } } })
   assert.equal((await strictInline.registry.get('inline', {})).description, 'Inline config')
   assert.equal((await strictInline.registry.get('inline', {})).content, '  INLINE_BODY\n')
+  for (const formatCompatibility of [false, true]) {
+    for (const entry of [{ template: '' }, { description: '', template: '' }, { description: '', template: 'BODY' }]) {
+      const invalidInline = makeRegistry(makeFileSystem().fs)
+      assert.throws(() => registerProjectSkillProvider(invalidInline.ctx, { projectSkillDirs: [], configSkillEntries: { inline: entry }, formatCompatibility }), /configSkillEntries/u)
+    }
+    const validInline = makeRegistry(makeFileSystem().fs)
+    registerProjectSkillProvider(validInline.ctx, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Required description', template: 'BODY' } }, formatCompatibility })
+    assert.ok(await validInline.registry.get('inline', {}))
+  }
   const inlineProvider = createProjectSkillProvider(inline.ctx, { signal: new AbortController().signal, invalidate() {} }, { projectSkillDirs: [], configSkillEntries: { inline: { description: 'Inline config', template: 'INLINE_BODY' } }, formatCompatibility: true })
   const inlineCandidate = (await inlineProvider.list({})).candidates[0]
   assert.equal(await inlineProvider.get({ ...inlineCandidate, description: 'Forged' }, {}), undefined)
