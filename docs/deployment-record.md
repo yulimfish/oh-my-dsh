@@ -2,6 +2,10 @@
 
 This is a **time-bound record for the audited desktop Profile**, not a reusable installation guarantee or a statement about the reader's current runtime. Events below were carried forward from the release lead's recorded evidence. The documentation worker performed no Profile installation or modification. Check live Plugin Manager inventory, Config and actual behavior before identifying any installed version. See the [reusable release guide](<release-readiness.md>) for that procedure.
 
+## Current runtime recheck: 2026-11-01
+
+- The live Plugin Manager inventory reports the linked `dsh-omo@0.1.14` bundle **installed but disabled** (`enabled: false`). Host Config inspection returns no `dsh-omo` entry, and Tool inspection exposes no `dsh_omo_task`; there is no current activation evidence. This recheck does not install, enable, or modify the Profile, and supersedes any implication that the historical active records below describe the current runtime.
+
 ## Snapshot at documentation handoff, before the 0.1.13 upgrade
 
 - Source candidate: **0.1.13**, including model-catalog aliases for primary and fallback routes.
