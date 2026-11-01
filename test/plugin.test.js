@@ -6727,9 +6727,16 @@ test('rejects current-API persona and continuable configurations before registra
 
   assert.throws(
     () => apply(current.ctx, { ...baseConfig, enableContinuableTasks: true }),
-    /requires DSH subagents\.startContinuable.*use dsh_omo_task one-shot launches instead/u,
+    /requires DSH subagents\.startContinuable.*exposes startActivation but not the legacy creation API.*use dsh_omo_task one-shot launches instead/u,
   )
   assert.equal(current.tools.size, 0)
+  const legacyOnly = makeContext()
+  delete legacyOnly.ctx.subagents.startContinuable
+  assert.throws(
+    () => apply(legacyOnly.ctx, { ...baseConfig, enableContinuableTasks: true }),
+    /legacy Host does not expose startContinuable.*use dsh_omo_task one-shot launches instead/u,
+  )
+  assert.equal(legacyOnly.tools.size, 0)
 })
 
 test('attributes infrastructure failure notices to the DSH settlement source', async () => {
