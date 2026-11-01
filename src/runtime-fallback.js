@@ -276,7 +276,9 @@ function createController(policy, options = {}) {
     let state = states.get(agentId)
     const currentRoute = state?.fallbackIndex > 0 ? state.chain.fallbacks[state.fallbackIndex - 1] : state?.chain.primary
     if (state && (state.turn !== payload.turn || state.step !== payload.step
-      || (state.primaryKey !== primaryKey && routeKey(currentRoute?.provider, currentRoute?.model) !== primaryKey))) {
+      || (state.primaryKey !== primaryKey
+        && routeKey(currentRoute?.provider, currentRoute?.model) !== primaryKey
+        && routeKey(state.lastAttemptedRoute?.provider, state.lastAttemptedRoute?.model) !== primaryKey))) {
       states.delete(agentId)
       state = undefined
     }
@@ -344,6 +346,7 @@ function createController(policy, options = {}) {
     markRouteFailed(agent, currentRoute, time)
     state.fallbackIndex = candidate.index + 1
     state.sameRouteRetries = 0
+    state.lastAttemptedRoute = currentRoute
     try {
       onFallback?.({
         turn: payload.turn,

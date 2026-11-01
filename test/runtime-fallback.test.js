@@ -143,11 +143,11 @@ test('switches only after delegated same-route retries are exhausted, then advan
 
   const exhaustedRetry = { mode: 'normal', maxRetries: 0, retryableCodes: ['HTTP_503'], initialDelayMs: 0, maxDelayMs: 0, jitterRatio: 0 }
   assert.deepEqual(await fail(controller, errorPayload({ provider: 'provider-backup', status: 503, retryPolicy: exhaustedRetry })), { kind: 'retry' })
-  const secondFallback = await request(controller)
+  const secondFallback = await request(controller, 'agent-1', 1, 1, firstFallback)
   assert.equal(secondFallback.provider, 'provider-last')
   assert.equal(secondFallback.model, 'model-last')
   assert.equal(secondFallback.reasoningEffort, 'low')
-  assert.equal(secondFallback.maxTokens, PRIMARY.maxTokens, 'unspecified token ceiling is preserved')
+  assert.equal(secondFallback.maxTokens, firstFallback.maxTokens, 'unspecified token ceiling is preserved from the logged fallback config')
   assert.deepEqual(switches.map(({ from, to, status }) => [from.provider, to.provider, status]), [
     ['provider-primary', 'provider-backup', 429],
     ['provider-backup', 'provider-last', 503],
@@ -155,6 +155,31 @@ test('switches only after delegated same-route retries are exhausted, then advan
   assert.equal(await fail(controller, errorPayload({ provider: 'provider-last', status: 503 })), undefined)
   assert.strictEqual(await request(controller), PRIMARY, 'an exhausted chain cannot restart within the same turn/step')
   assert.equal(await fail(controller, errorPayload({ status: 429 })), undefined)
+  controller.dispose()
+})
+
+test('logged attempted routes advance repeatedly and expire older route state', async () => {
+  const controller = createRuntimeFallbackController(policy({
+    chains: [{
+      provider: 'provider-primary', model: 'model-primary',
+      fallbacks: [
+        { provider: 'provider-backup', model: 'model-backup' },
+        { provider: 'provider-last', model: 'model-last' },
+        { provider: 'provider-final', model: 'model-final' },
+      ],
+    }],
+  }))
+  await request(controller)
+  assert.deepEqual(await fail(controller, errorPayload()), { kind: 'retry' })
+  const first = await request(controller)
+  assert.deepEqual(await fail(controller, errorPayload({ provider: 'provider-backup', status: 503 })), { kind: 'retry' })
+  const second = await request(controller, 'agent-1', 1, 1, first)
+  assert.equal(second.provider, 'provider-last')
+  assert.deepEqual(await fail(controller, errorPayload({ provider: 'provider-last', status: 503 })), { kind: 'retry' })
+  const third = await request(controller, 'agent-1', 1, 1, second)
+  assert.equal(third.provider, 'provider-final')
+  assert.strictEqual(await request(controller, 'agent-1', 1, 1, first), first, 'a stale older attempted route resets rather than restarting the chain')
+  assert.equal(await fail(controller, errorPayload({ provider: 'provider-backup', status: 503 })), undefined)
   controller.dispose()
 })
 
