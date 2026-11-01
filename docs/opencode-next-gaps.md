@@ -48,6 +48,10 @@ The pinned OMO hook evaluates pressure after each tool and can summarize within 
 
 ## Still Host-limited
 
+### Ralph-loop adapter is not implemented
+
+There is no local `ralph-loop`, `cancel-ralph`, or `ulw-loop` state machine, no bounded start/next/cancel loop API, and no durable loop execution. The existing process-local pending scheduler retries only on capacity notifications rather than spinning, and DSH Goal continuation is a separate bounded Host lifecycle; neither is a Ralph-loop adapter. Automatic slash handling must not be read as implementing those excluded upstream loop commands. This remains an unimplemented compatibility surface, not a verified loop-lifecycle mapping.
+
 ### OMO permission adapter is not implemented
 
 The non-default `omo-read-search` preset is only a scoped named-Tool dispatch allowlist: exact `read`/`glob`/`grep` names remain subject to other monotonic guards, and every other or malformed name is denied before dispatch. It is not an OMO permission-rule adapter, proof of read-only Tool implementations, or a hard filesystem/network boundary. DSH `tools/pre-execute` supports `allow`/`deny`/`ask`/`cancel`, and Host handles an `ask` without approval support as a denial, but this project does not map pinned OMO permission rules to those decisions. No silent-allow mapping bug was found in the existing preset; full OMO ask/cancel/permission semantics remain unimplemented and must not be claimed from the native gate.
