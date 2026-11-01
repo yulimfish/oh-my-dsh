@@ -3553,7 +3553,7 @@ export function apply(ctx, rawConfig) {
     throw new Error('dsh-omo project agent files require per-request persona, which the current DSH subagents.startActivation contract does not expose')
   }
   if (config.enableContinuableTasks && typeof ctx.subagents?.startContinuable !== 'function') {
-    throw new Error('dsh-omo enableContinuableTasks requires DSH subagents.startContinuable; current startActivation has no continuable creation mode')
+    throw new Error('dsh-omo enableContinuableTasks requires DSH subagents.startContinuable; current startActivation has no continuable creation mode; use dsh_omo_task one-shot launches instead')
   }
   const roleCategoryRouteAliases = normalizeRoleCategoryRouteAliases(
     config.enableRoleCategoryRouteAliases === true,

@@ -6726,7 +6726,7 @@ test('rejects current-API persona and continuable configurations before registra
 
   assert.throws(
     () => apply(current.ctx, { ...baseConfig, enableContinuableTasks: true }),
-    /requires DSH subagents\.startContinuable/u,
+    /requires DSH subagents\.startContinuable.*use dsh_omo_task one-shot launches instead/u,
   )
   assert.equal(current.tools.size, 0)
 })
