@@ -444,10 +444,10 @@ export function resolveCompatibleSkillReferences(content, basePath) {
     const lastSegment = reference.split('/').at(-1) ?? ''
     if (!reference.endsWith('/') && !/\.[a-zA-Z0-9]+$/u.test(lastSegment)) continue
     const nextIndex = match.index + match[0].length
-    const nextCharacter = content[nextIndex]
-    // The pinned pattern stops at '#', but downstream path consumers do not.
-    // Refuse a replacement when the unconsumed suffix could retarget the path.
-    if (nextCharacter === '#' || nextCharacter === '\\' || (windows && nextCharacter === ':')) continue
+    const suffix = content.slice(nextIndex).match(/^\S*/u)?.[0] ?? ''
+    // The pinned pattern stops before path suffixes that downstream consumers
+    // can interpret as traversal. Keep those complete tokens literal.
+    if (/[\\#]/u.test(suffix) || /[!?]\//u.test(suffix) || (windows && suffix.includes(':'))) continue
     const resolved = pathApi.resolve(base, reference)
     const relativePath = pathApi.relative(base, resolved)
     if (relativePath.startsWith('..') || pathApi.isAbsolute(relativePath)) continue

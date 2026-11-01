@@ -4378,6 +4378,12 @@ test('reference compatibility refuses Windows alternate-stream suffixes while pr
   assert.equal(resolveCompatibleSkillReferences('See @docs/readme.md:note now.', '/skills/guide'), 'See /skills/guide/docs/readme.md:note now.')
   for (const base of ['/skills/guide', 'C:\\skills\\guide']) {
     assert.equal(resolveCompatibleSkillReferences('See @docs/../..cache/file.md now.', base), 'See @docs/../..cache/file.md now.')
+    const escapingTokens = ['@docs/readme.md!/../../../../outside.txt', '@docs/readme.md?/../../../../outside.txt', '@docs/readme.md!/docs/inside.txt', '@docs/readme.md;#/../../../../outside.txt', '@docs/readme.md;\\..\\..\\outside.txt', '@docs/readme.md;!/../../../../outside.txt', '@docs/readme.md;?/../../../../outside.txt']
+    if (base.startsWith('C:')) escapingTokens.push('@docs/readme.md;note:$DATA')
+    for (const token of escapingTokens) {
+      assert.equal(resolveCompatibleSkillReferences(`See ${token} now.`, base), `See ${token} now.`)
+    }
+    assert.equal(resolveCompatibleSkillReferences('See @docs/readme.md and @../../outside.txt now.', base), `See ${base.replaceAll('\\', '/')}/docs/readme.md and @../../outside.txt now.`)
   }
 })
 
