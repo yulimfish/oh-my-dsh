@@ -169,6 +169,7 @@ export function createRouteAdmission({
     try { lease.routeRelease?.() } finally {
       Object.defineProperty(lease, 'routeReleased', { value: true })
       pump()
+      onRelease?.()
     }
     return true
   }

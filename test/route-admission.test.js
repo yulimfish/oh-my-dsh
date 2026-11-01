@@ -48,6 +48,26 @@ test('same-route waiters retain FIFO while an independent capped route proceeds'
   admission.dispose()
 })
 
+test('route release notifies pending schedulers before global disposal completes', async () => {
+  const active = new Set()
+  let notifications = 0
+  const admission = createRouteAdmission({
+    active, maxConcurrent: 1, maxPending: 1,
+    onRelease: () => { notifications += 1 },
+    now: () => 0, setTimer: () => 1, clearTimer: () => {},
+    isParentLive: () => true, describeRoute: route,
+  })
+  const lease = await admission.acquire({ parent: parent('a'), route: route('a'), reserveRoute: () => () => {} })
+  const afterAcquire = notifications
+  assert.equal(admission.releaseRoute(lease), true)
+  assert.equal(notifications, afterAcquire + 1)
+  assert.equal(admission.releaseRoute(lease), false)
+  assert.equal(notifications, afterAcquire + 1)
+  assert.equal(active.size, 1, 'the global lease remains until release/disposal completes')
+  admission.release(lease)
+  admission.dispose()
+})
+
 test('reserve reentrancy rolls back route capacity after disposal or abort', async () => {
   for (const event of ['dispose', 'abort']) {
     const active = new Set()
