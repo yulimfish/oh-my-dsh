@@ -67,6 +67,25 @@ function createPersistedRegistry(store, now) {
   return createTaskResultRegistry({ persistentStore: store, now })
 }
 
+test('expired durable rows remain until a later storage activity prunes them', async () => {
+  let time = 1_000
+  const firstBackend = backend()
+  const first = createTaskResultStorage({ storageDomain: firstBackend.storageDomain, now: () => time })
+  assert.equal(await first.put({
+    parentId: 'parent', childId: 'child', status: 'completed', output: 'sensitive excerpt',
+    truncated: false, omittedNonText: false, settledAt: time, expiresAt: time + TASK_RESULT_TTL_MS,
+  }), true)
+  await first.dispose()
+  time += TASK_RESULT_TTL_MS + 1
+  const reopenedBackend = backend(firstBackend.rows)
+  const reopened = createTaskResultStorage({ storageDomain: reopenedBackend.storageDomain, now: () => time })
+  assert.equal(await reopened.ready(), true)
+  assert.equal(firstBackend.rows.size, 1, 'ready alone does not promise an at-rest deletion timer')
+  assert.equal(await reopened.read('parent', 'child'), undefined)
+  assert.equal(firstBackend.rows.size, 0, 'the next exact read performs lazy physical expiry')
+  await reopened.dispose()
+})
+
 test('declares a bounded versioned domain schema for terminal snapshots only', async () => {
   assert.equal(TASK_RESULT_STORAGE_DOMAIN_SPEC.name, 'dsh-omo-task-results')
   assert.equal(TASK_RESULT_STORAGE_DOMAIN_SPEC.version, 1)
