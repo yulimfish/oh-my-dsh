@@ -348,7 +348,7 @@ test('user Agents roots validate paths and reject forged locators and escaping o
   assert.equal(await provider.get(good, {}), undefined)
 })
 
-test('project filters do not hide user Agents skills, while disabled skills affect invocation', async t => {
+test('project filters also hide configured user skills, while disabled skills affect invocation', async t => {
   const cwd = await makeWorkspace(t)
   const root = path.join(await makeWorkspace(t), 'skills')
   await writeSkill(path.join(cwd, '.opencode/skills/shared/SKILL.md'), { name: 'agent-filtered', content: 'project' })
@@ -359,9 +359,30 @@ test('project filters do not hide user Agents skills, while disabled skills affe
     userAgentsSkillRoots: [root], enabledProjectSkills: [], disabledProjectSkills: ['agent-filtered'], disabledSkills: ['agent-filtered'],
   })
   t.after(() => registration.dispose())
-  const skill = await registry.get('agent-filtered', { cwd })
-  assert.equal(skill.content, 'user agents')
-  assert.equal(skill.source, 'user-agents')
+  assert.equal(await registry.get('agent-filtered', { cwd }), undefined)
+})
+
+test('project visibility filters include shared roots while disabledSkills keeps user entries visible', async t => {
+  const root = path.join(await makeWorkspace(t), 'skills')
+  await writeSkill(path.join(root, 'shared/SKILL.md'), { name: 'filtered', content: 'shared' })
+  for (const [field, option] of [['enabledProjectSkills', ['other']], ['disabledProjectSkills', ['filtered']]]) {
+    const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+    const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: [], sharedSkillsRootPath: root, [field]: option })
+    t.after(() => registration.dispose())
+    assert.equal(await registry.get('filtered', {}), undefined)
+    const lifetime = new AbortController()
+    t.after(() => lifetime.abort())
+    const direct = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, { projectSkillDirs: [], sharedSkillsRootPath: root })
+    const candidate = (await direct.list({})).candidates.find(skill => skill.name === 'filtered')
+    assert.ok(candidate)
+    const filtered = createProjectSkillProvider(ctx, { signal: lifetime.signal, invalidate() {} }, { projectSkillDirs: [], sharedSkillsRootPath: root, [field]: option })
+    assert.equal(await filtered.get(candidate, {}), undefined)
+  }
+  const { ctx, registry } = makeRegistry(makeFileSystem().fs)
+  const registration = registerProjectSkillProvider(ctx, { projectSkillDirs: [], sharedSkillsRootPath: root, disabledSkills: ['filtered'] })
+  t.after(() => registration.dispose())
+  const skill = await registry.get('filtered', {})
+  assert.equal(skill.content, 'shared')
   assert.deepEqual(skill.invocation, { modelInvocable: false, userInvocable: false })
 })
 
@@ -455,7 +476,7 @@ test('rejects a user locator from another provider configuration without reading
   assert.equal(calls.filter(call => call === 'readBytes').length, before)
 })
 
-test('configured user skills outrank runtime after project filters remove the project copy', async t => {
+test('project filters remove same-named user copies while leaving other providers visible', async t => {
   const cwd = await makeWorkspace(t)
   const userRoot = path.join(await makeWorkspace(t), 'skills')
   await writeSkill(path.join(cwd, '.opencode/skills/shared/SKILL.md'), { name: 'shared-skill', content: 'project body' })
@@ -466,7 +487,7 @@ test('configured user skills outrank runtime after project filters remove the pr
   registerProjectSkillProvider(ctx, {
     userOpenCodeSkillRoots: [userRoot], enabledProjectSkills: [], disabledProjectSkills: ['shared-skill'],
   })
-  assert.equal((await registry.get('shared-skill', { cwd })).content, 'user body')
+  assert.equal((await registry.get('shared-skill', { cwd })).content, 'runtime body')
 })
 
 test('invalidates an existing user root when its lexical parent replaces it with a symlink', async t => {

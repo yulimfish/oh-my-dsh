@@ -1763,10 +1763,8 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
               if (disabledConfigEntryNames.has(skill.name)) continue
               if (configRoot && disabledConfigEntryNames.has(skill.name)) continue
               if (configRoot && disabledSkills.has(skill.name)) continue
-              if (configRoot && enabledProjectSkillSet && !enabledProjectSkillSet.has(skill.name)) continue
-              if (configRoot && disabledProjectSkillSet.has(skill.name)) continue
-              if (!(configRoot ?? userRoot) && disabledProjectSkillSet.has(skill.name)) continue
-              if (!(configRoot ?? userRoot) && enabledProjectSkillSet && !enabledProjectSkillSet.has(skill.name)) continue
+              if (enabledProjectSkillSet && !enabledProjectSkillSet.has(skill.name)) continue
+              if (disabledProjectSkillSet.has(skill.name)) continue
               if (formatCompatibility && entryInfo.type !== 'directory' && orderedEntry.parentTarget
                 && candidates.some(existing => existing.name === skill.name && existing.locator.rootTarget.targetKey === rootTarget.targetKey
                   && existing.locator.skillDirectoryTarget.targetKey !== skillDirectoryTarget.targetKey)) continue
@@ -1875,12 +1873,10 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       if (disabledConfigEntryNames.has(candidate?.name)) return undefined
       if (configRoot && disabledConfigEntryNames.has(candidate?.name)) return undefined
       if (configRoot && disabledSkills.has(candidate?.name)) return undefined
-      if (configRoot && enabledProjectSkillSet && !enabledProjectSkillSet.has(candidate?.name)) return undefined
-      if (configRoot && disabledProjectSkillSet.has(candidate?.name)) return undefined
+      if (enabledProjectSkillSet && !enabledProjectSkillSet.has(candidate?.name)) return undefined
+      if (disabledProjectSkillSet.has(candidate?.name)) return undefined
       if (configRoot && typeof locator?.resolverPath !== 'string') return undefined
       if (configRoot && !configRootMatches(configRoot, locator.resolverPath)) return undefined
-      if (!externalRoot && disabledProjectSkillSet.has(candidate?.name)) return undefined
-      if (!externalRoot && enabledProjectSkillSet && !enabledProjectSkillSet.has(candidate?.name)) return undefined
       if (!locator?.rootTarget || !locator?.fileTarget || !locator?.skillDirectoryTarget || typeof locator.resolverPath !== 'string'
         || (typeof lookup.cwd === 'string' && lookup.cwd.length === 0 && !externalRoot)) return undefined
       throwIfAborted(signal)
