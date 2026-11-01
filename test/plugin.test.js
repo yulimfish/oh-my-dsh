@@ -33,6 +33,7 @@ function makeContext(options = {}) {
       register: definition => { tools.set(definition.name, definition); return () => tools.delete(definition.name) },
       get: options.getTool ?? (() => undefined),
       guard: guard => { guards.add(guard); return () => guards.delete(guard) },
+      restrict: () => () => {},
     },
     subagents: {
       start: async (provider, request) => {
@@ -6916,6 +6917,20 @@ test('applies configured model route and explicit tool restriction', async () =>
     allow: ['read', 'grep'],
     deny: ['bash', 'web_fetch'],
   })
+})
+
+test('rejects filtered legacy and continuable launches without enforcement support', async () => {
+  const parent = { id: 'parent-agent', followup() {} }
+  const legacy = makeContext({ getProvider: () => ({ name: 'spawn', capabilities: { persona: true, agentOptions: true, toolFilter: false } }) })
+  apply(legacy.ctx, { ...baseConfig, roleRoutes: [{ role: 'explore', allowTools: ['read'] }] })
+  await assert.rejects(legacy.tools.get('dsh_omo_task').execute({ role: 'explore', task: 'Requires a supported tool filter.' }, { agent: parent, signal: new AbortController().signal }), /support toolFilter/u)
+  assert.equal(legacy.starts.length, 0)
+
+  const continuable = makeContext()
+  delete continuable.ctx.tools.restrict
+  apply(continuable.ctx, { ...baseConfig, enableContinuableTasks: true, roleRoutes: [{ role: 'explore', allowTools: ['read'] }] })
+  await assert.rejects(continuable.tools.get('dsh_omo_task_continuable').execute({ role: 'explore', task: 'Requires continuable tool restriction.' }, { agent: parent, signal: new AbortController().signal }), /tools\.restrict/u)
+  assert.equal(continuable.continuableStarts.length, 0)
 })
 
 test('dispatches config-defined user agents through provider persona and existing route filters', async () => {

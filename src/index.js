@@ -2557,6 +2557,9 @@ function specialistTools(ctx, config, roleRoutes, categoryRoutes, userAgents, ac
             await preflightConfiguredAgentPreset(ctx, agentPreset, `Specialist "${roleName}"`, exec.signal, presetPreflight)
             if (lifecycle.disposed) throw new Error('dsh-omo is shutting down.')
           }
+          if (toolFilter !== undefined && ctx.subagents.getProvider(providerName)?.capabilities?.toolFilter !== true) {
+            throw new Error(`DSH subagent provider "${providerName}" does not support toolFilter; refusing to start this specialist.`)
+          }
           assertCurrent()
           activation = await ctx.subagents.start(providerName, {
             label,
@@ -2786,6 +2789,9 @@ function continuableSpecialistTool(ctx, config, roleRoutes, categoryRoutes, user
       const selectedRoute = await resolveSelectedFallbackRoute(ctx, route, roleRoute, exec.signal, config.enablePinnedRoutePreflight, routePreflight)
       const agentOptions = agentOptionsForRoute(selectedRoute, { includeMaxTokens: false })
       const toolFilter = toolFilterForRoute(selectedRoute)
+      if (toolFilter !== undefined && typeof ctx.tools?.restrict !== 'function') {
+        throw new Error('Continuable task tool filtering requires DSH tools.restrict; refusing to start this specialist.')
+      }
       const prompt = await buildTaskPrompt({
         role: args.role,
         task: args.task,
