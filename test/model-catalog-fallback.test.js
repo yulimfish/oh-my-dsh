@@ -115,6 +115,38 @@ test('candidate reasoning wins over role and catalog while selected candidate to
   await tick()
 })
 
+test('omitted fallback candidate reasoning inherits role before catalog default', async () => {
+  const fixture = nativeContext(rejectPrimary)
+  const tool = mount(fixture, { roleRoutes: [{
+    role: 'explore', ...primary, reasoningEffort: 'medium', temperature: 0.2, maxTokens: 1024,
+    fallbackModels: [{ model: 'backup' }],
+  }] })
+  await execute(fixture, tool)
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { ...backup, reasoningEffort: 'medium', temperature: 0.2, maxTokens: 1024 })
+  await tick()
+})
+
+test('explicit undefined fallback reasoning is unset before role and catalog defaults', async () => {
+  const fixture = nativeContext(rejectPrimary)
+  const tool = mount(fixture, { roleRoutes: [{
+    role: 'explore', ...primary, reasoningEffort: 'medium', fallbackModels: [{ model: 'backup', reasoningEffort: undefined }],
+  }] })
+  await execute(fixture, tool)
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { ...backup, reasoningEffort: 'medium' })
+  await tick()
+})
+
+test('omitted fallback candidate reasoning inherits category before catalog default', async () => {
+  const fixture = nativeContext(rejectPrimary)
+  const tool = mount(fixture, { categoryRoutes: [{
+    name: 'research', ...primary, reasoningEffort: 'low', temperature: 0.1, maxTokens: 2048,
+    fallbackModels: [{ model: 'backup' }],
+  }] })
+  await execute(fixture, tool, { category: 'research' })
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { ...backup, reasoningEffort: 'low', temperature: 0.1, maxTokens: 2048 })
+  await tick()
+})
+
 test('explicit fallback provider/model remains literal even if its model names a catalog alias', async () => {
   const fixture = nativeContext(rejectPrimary)
   const tool = mount(fixture, { roleRoutes: [{ role: 'explore', ...primary, fallbackModels: [{ provider: 'literal-provider', model: 'backup' }] }] })

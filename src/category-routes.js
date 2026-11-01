@@ -132,6 +132,7 @@ export function normalizeExplicitFallbackModels(value, label, primary, roleCateg
         throw new TypeError(`${label}[${index}] contains unsupported field "${String(key)}"`)
       }
     }
+    const hadExplicitReasoning = Object.hasOwn(rawEntry, 'reasoningEffort') && rawEntry.reasoningEffort !== undefined
     const entry = resolveModelCatalogReference(modelCatalog, rawEntry, `${label}[${index}]`)
     const hasProvider = Object.hasOwn(entry, 'provider') && entry.provider !== undefined
     const hasModel = Object.hasOwn(entry, 'model') && entry.model !== undefined
@@ -143,10 +144,13 @@ export function normalizeExplicitFallbackModels(value, label, primary, roleCateg
     const routeAlias = resolveRoleCategoryRouteAlias(roleCategoryRouteAliases, sourceProvider, sourceModel)
     const provider = routeAlias?.to.provider ?? sourceProvider
     const model = routeAlias?.to.model ?? sourceModel
-    const rawReasoningEffort = Object.hasOwn(entry, 'reasoningEffort') ? entry.reasoningEffort : undefined
+    const rawReasoningEffort = hadExplicitReasoning ? entry.reasoningEffort : undefined
     const reasoningEffort = rawReasoningEffort === undefined
       ? undefined
       : normalizeString(rawReasoningEffort, `${label}[${index}] reasoningEffort`, MAX_REASONING_EFFORT_CHARS)
+    const catalogReasoning = !hadExplicitReasoning && routeAlias === undefined && entry.reasoningEffort !== undefined
+      ? Object.freeze({ to: Object.freeze({ provider, model }), reasoningEffort: entry.reasoningEffort })
+      : undefined
     if (Object.hasOwn(entry, 'maxTokens') && Object.hasOwn(entry, 'max_tokens')) throw new TypeError(`${label}[${index}] must not set both maxTokens and max_tokens`)
     const rawMaxTokens = Object.hasOwn(entry, 'maxTokens') ? entry.maxTokens : entry.max_tokens
     const maxTokens = rawMaxTokens === undefined
@@ -159,7 +163,7 @@ export function normalizeExplicitFallbackModels(value, label, primary, roleCateg
     candidates.push(Object.freeze({
       provider,
       model,
-      ...(routeAlias !== undefined ? { routeAlias } : {}),
+      ...(routeAlias !== undefined || catalogReasoning !== undefined ? { routeAlias: routeAlias ?? catalogReasoning } : {}),
       ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
       ...(temperature !== undefined ? { temperature } : {}),
