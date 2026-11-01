@@ -66,5 +66,5 @@ test('deduplicates by exact Agent and message ID across steps', async () => {
     if (step === 0) assert.match(decision.messages[0].content[0].text, /Review {2}once/u)
     else assert.match(decision.messages[0].content[0].text, /Review {2}once/u)
   }
-  assert.equal(resolves, 4, 'one expansion plus a final validity recheck per successful rewrite')
+  assert.equal(resolves, 4, 'distinct message objects at different steps each expand and recheck even when they share an ID')
 })
