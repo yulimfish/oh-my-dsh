@@ -6,6 +6,7 @@ const FILE_READ_PATTERNS = Object.freeze([
   /^\s*head\s+(-n\s+\d+\s+)?(?!-)[^\s|&;]+\s*$/u,
   /^\s*tail\s+(-n\s+\d+\s+)?(?!-)[^\s|&;]+\s*$/u,
 ])
+const NON_LITERAL_SHELL = new RegExp('[$`~*?[\\]{}<>#()\'"\\\\]', 'u')
 
 export const BASH_FILE_READ_GUIDANCE = `[BASH FILE-READ GUIDANCE]
 
@@ -33,7 +34,8 @@ export function isSimpleBashFileRead(exec) {
   const args = exec?.arguments
   if (typeof exec?.name !== 'string' || exec.name.toLowerCase() !== 'bash'
     || !hasBashSchema(exec) || !isRecord(args)
-    || typeof args.command !== 'string' || args.command.length > MAX_COMMAND_CHARS) return false
+    || typeof args.command !== 'string' || args.command.length > MAX_COMMAND_CHARS
+    || NON_LITERAL_SHELL.test(args.command)) return false
 
   return FILE_READ_PATTERNS.some(pattern => pattern.test(args.command))
 }
