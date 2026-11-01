@@ -4,6 +4,9 @@ const EDIT_ERROR_PATTERNS = Object.freeze([
   'oldString and newString must be different',
   'oldString not found',
   'oldString found multiple times',
+  'old_string and new_string must differ',
+  'old_string was not found in',
+  'old_string matched ',
 ])
 const MAX_ERROR_MESSAGE_CHARS = 4_096
 

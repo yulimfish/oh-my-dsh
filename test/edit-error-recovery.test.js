@@ -39,6 +39,9 @@ test('adds bounded advisory context for each pinned Edit failure pattern', async
     'oldString and newString must be different',
     'oldString not found',
     'oldString found multiple times',
+    'old_string and new_string must differ',
+    'old_string was not found in "/repo/file.js"',
+    'old_string matched 2 times in "/repo/file.js"; provide a more specific old_string or set replace_all to true',
   ]
   const listener = createEditErrorRecoveryListener()
 
