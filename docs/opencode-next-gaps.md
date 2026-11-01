@@ -48,6 +48,10 @@ The pinned OMO hook evaluates pressure after each tool and can summarize within 
 
 ## Still Host-limited
 
+### OMO permission adapter is not implemented
+
+The non-default `omo-read-search` preset is only a scoped named-Tool dispatch allowlist: exact `read`/`glob`/`grep` names remain subject to other monotonic guards, and every other or malformed name is denied before dispatch. It is not an OMO permission-rule adapter, proof of read-only Tool implementations, or a hard filesystem/network boundary. DSH `tools/pre-execute` supports `allow`/`deny`/`ask`/`cancel`, and Host handles an `ask` without approval support as a denial, but this project does not map pinned OMO permission rules to those decisions. No silent-allow mapping bug was found in the existing preset; full OMO ask/cancel/permission semantics remain unimplemented and must not be claimed from the native gate.
+
 Malformed raw tool-argument repair has no dedicated validated Host repair contract: pre-execute receives parsed arguments and tools/execute can replace only its signal. Malformed JSON may arrive as a frozen string, and exec is JavaScript-mutable before final notification, so assignment can technically alter dispatched arguments; that is not schema validation, a supported repair policy, or reconciliation with the durable original tool-call record. Pre-step user-message editing and postcommit session events are not decoders for generated tool-call JSON. Keep after-failure guidance separate from parser repair; the pinned OMO JSON hook is also guidance-only.
 
 ### Runtime fallback can preempt overflow pruning
