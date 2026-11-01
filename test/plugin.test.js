@@ -7582,6 +7582,26 @@ test('one-shot task skill loading is opt-in and leaves the default prompt unchan
   t.diagnostic(`First-turn dsh_omo_task schema delta: +${deltaBytes} UTF-8 bytes (~${approxTokens} tokens at 4 bytes/token; provider tokenizer unavailable).`)
 })
 
+test('one-shot task loads requested skills from the current effective working directory', async () => {
+  const parent = { id: 'parent-agent' }
+  const session = { id: parent.id, header: { cwd: '/workspace/original' } }
+  const lookups = []
+  const fixture = makeContext({
+    services: {
+      sessions: { get: id => id === parent.id ? session : undefined },
+      workingDirectory: { get: value => value === session ? '/workspace/current' : undefined },
+    },
+    skillGet: async (name, options) => {
+      lookups.push(options)
+      return { name, invocation: { modelInvocable: true }, content: 'Current workspace skill.' }
+    },
+  })
+  apply(fixture.ctx, baseConfig)
+  await fixture.tools.get('dsh_omo_task').execute({ role: 'explore', task: 'Use the current workspace.', load_skills: ['debugging'] }, { agent: parent, signal: new AbortController().signal })
+  assert.equal(lookups[0].cwd, '/workspace/current')
+  assert.equal(lookups[0].scope, undefined)
+})
+
 test('one-shot task loads requested model-invocable skills in order as untrusted guidance', async () => {
   const parent = { id: 'parent-agent' }
   const signal = new AbortController().signal

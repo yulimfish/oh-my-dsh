@@ -1899,7 +1899,10 @@ async function loadTaskSkills(ctx, names, exec, lookupSkill) {
   } catch {
     throw new Error('The parent session could not be resolved for explicit skill loading; the specialist was not started.')
   }
-  const cwd = session?.id === exec.agent.id ? session.header?.cwd : undefined
+  const workingDirectory = typeof ctx.get === 'function' ? ctx.get('workingDirectory') : undefined
+  const cwd = session?.id === exec.agent.id
+    ? (typeof workingDirectory?.get === 'function' ? workingDirectory.get(session) : session.header?.cwd)
+    : undefined
   if (typeof cwd !== 'string' || cwd.length === 0) {
     throw new Error('The parent session has no usable workspace for explicit skill loading; the specialist was not started.')
   }
