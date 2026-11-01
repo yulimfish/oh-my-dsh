@@ -115,6 +115,8 @@ const ROUTE_STATUS_TIMEOUT_MESSAGE = 'Manual route capability preflight timed ou
 const PREFLIGHT_TIMEOUT_ERRORS = new WeakSet()
 const STATUS_SUBAGENT_CAPABILITIES = Object.freeze(['agentOptions', 'agentPreset', 'outputSchema', 'depthLimit'])
 const ROLE_TOOL_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/u
+const ROUTE_TEXT_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u
+const ROLE_ROUTE_SUPPORTED_FIELDS = new Set(['role', 'category', 'agentPreset', 'provider', 'model', 'reasoningEffort', 'maxTokens', 'max_tokens', 'temperature', 'fallbackModels', 'promptAppend', 'prompt_append', 'allowTools', 'denyTools', 'topP', 'top_p', 'thinking', 'textVerbosity', 'provider_options', 'providerOptions', 'variant', 'reasoning', 'disable', 'disabled', 'max_prompt_tokens', 'maxPromptTokens', 'is_unstable_agent', 'isUnstableAgent', 'warn_unavailable', 'warnUnavailable', 'temp', 'fallback_models'])
 const ROLE_TOOL_NAME_ENCODER = new TextEncoder()
 const DISABLEABLE_OMO_COMMAND_NAMES = Object.freeze([
   'goal', 'stop-continuation', 'omo-models', 'ulw', 'ultrawork', 'ulw-execute', 'hyperplan', 'architect', 'review', 'handoff',
@@ -581,9 +583,26 @@ function normalizeToolNames(value, role, field) {
   return Object.freeze(normalized)
 }
 
+function normalizeRoleRouteText(value, field, role, maxLength) {
+  if (typeof value !== 'string' || value.length > maxLength) {
+    throw new Error(`dsh-omo: role route "${role}" ${field} must be a non-empty string of at most ${maxLength} characters`)
+  }
+  const normalized = value.trim()
+  if (!normalized) throw new Error(`dsh-omo: role route "${role}" provider and model must not be blank`)
+  if (ROUTE_TEXT_CONTROL_CHARACTERS.test(normalized)) {
+    throw new Error(`dsh-omo: role route "${role}" ${field} must be a non-empty string without control or bidi characters`)
+  }
+  return normalized
+}
+
 function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames = ROLE_NAMES, roleCategoryRouteAliases, modelCatalog) {
   const result = new Map()
   for (const rawEntry of routes) {
+    for (const key of Reflect.ownKeys(rawEntry)) {
+      if (typeof key !== 'string' || !ROLE_ROUTE_SUPPORTED_FIELDS.has(key)) {
+        throw new Error(`dsh-omo: role route contains unsupported field "${String(key)}"`)
+      }
+    }
     const entry = resolveModelCatalogReference(modelCatalog, rawEntry, 'role route')
     if (!roleNames.includes(entry.role)) {
       throw new Error(`dsh-omo: unknown role route "${entry.role}"`)
@@ -611,8 +630,8 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
         throw new Error(`dsh-omo: role route "${entry.role}" references disabled category "${category}"`)
       }
     }
-    const sourceProvider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
-    const sourceModel = typeof entry.model === 'string' ? entry.model.trim() : ''
+    const sourceProvider = entry.provider === undefined ? '' : normalizeRoleRouteText(entry.provider, 'provider', entry.role, 128)
+    const sourceModel = entry.model === undefined ? '' : normalizeRoleRouteText(entry.model, 'model', entry.role, 256)
     const routeAlias = sourceProvider && sourceModel
       ? resolveRoleCategoryRouteAlias(roleCategoryRouteAliases, sourceProvider, sourceModel)
       : undefined

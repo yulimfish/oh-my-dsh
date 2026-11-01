@@ -17,6 +17,16 @@ test('strict route keys are checked before catalog expansion can discard hidden 
     assert.throws(() => normalizeCategoryRoutes([category], undefined, catalog), /unsupported field/u)
   }
   assert.equal(reads, 0)
+  const role = { role: 'explore', model: 'backup' }
+  Object.defineProperty(role, 'unexpected', { enumerable: true, value: true })
+  const fixture = nativeContext()
+  assert.throws(() => mount(fixture, { roleRoutes: [role] }), /unsupported field/u)
+  assert.equal(fixture.starts.length, 0)
+  const hiddenRole = { role: 'explore', model: 'backup' }
+  Object.defineProperty(hiddenRole, 'unexpected', { enumerable: false, value: true })
+  const rawFixture = nativeContext()
+  assert.throws(() => apply(rawFixture.ctx, { ...Config({ models }), roleRoutes: [hiddenRole] }), /unsupported field/u)
+  assert.equal(rawFixture.starts.length, 0)
 })
 
 const models = {
@@ -25,6 +35,19 @@ const models = {
 }
 const primary = { provider: 'primary-provider', model: 'primary-model' }
 const backup = { provider: 'backup-provider', model: 'vendor/model-v2' }
+
+test('role primary rejects unsupported fields and unbounded provider/model values before activation', () => {
+  for (const [route, expected] of [
+    [{ role: 'explore', provider: 'p', model: 'm', permission: { edit: 'deny' } }, /unsupported field/u],
+    [{ role: 'explore', provider: 'p\u202e', model: 'm' }, /provider/u],
+    [{ role: 'explore', provider: 'p'.repeat(129), model: 'm' }, /provider/u],
+    [{ role: 'explore', provider: 'p', model: 'm'.repeat(257) }, /model/u],
+  ]) {
+    const fixture = nativeContext()
+    assert.throws(() => mount(fixture, { roleRoutes: [route] }), expected)
+    assert.equal(fixture.starts.length, 0)
+  }
+})
 const tick = () => new Promise(resolve => setImmediate(resolve))
 
 function nativeContext(resolveCallConfig) {
