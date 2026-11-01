@@ -7951,6 +7951,36 @@ test('fallback one-shot preserves category skill defaults and continuable reject
   assert.equal(fixture.continuableStarts.length, 0)
 })
 
+test('cross-category fallback preserves only the selected category skill defaults', async () => {
+  const parent = { id: 'parent-agent' }
+  const lookups = []
+  const fixture = makeContext({
+    services: {
+      sessions: { get: id => id === parent.id ? { id, header: { cwd: '/workspace/project' } } : undefined },
+      llm: { resolveCallConfig: async config => { if (config.provider === 'role-primary') throw new Error('use role backup'); return config } },
+    },
+    skillGet: async name => {
+      lookups.push(name)
+      return { name, invocation: { modelInvocable: true }, content: `Category body: ${name}` }
+    },
+  })
+  apply(fixture.ctx, {
+    ...baseConfig,
+    categoryRoutes: [
+      { name: 'research', provider: 'research-primary', model: 'research', skills: ['debugging', 'git-master'] },
+      { name: 'review', provider: 'review-primary', model: 'review', skills: ['visual-qa'] },
+    ],
+    roleRoutes: [{ role: 'explore', category: 'research', provider: 'role-primary', model: 'role', fallbackModels: [{ provider: 'role-backup', model: 'role-backup' }] }],
+  })
+  const tool = fixture.tools.get('dsh_omo_task')
+  const exec = { agent: parent, signal: new AbortController().signal }
+  await tool.execute({ role: 'explore', category: 'review', task: 'Use only review skills.' }, exec)
+  await tool.execute({ role: 'explore', task: 'Use only research skills.' }, exec)
+  assert.deepEqual(lookups, ['visual-qa', 'debugging', 'git-master'])
+  assert.ok(fixture.starts.every(start => start.request.agentOptions.provider === 'role-backup'))
+  assert.ok(!fixture.starts.some(start => start.request.prompt[0].text.includes('Category body: review-primary')))
+})
+
 test('one-shot category skill defaults precede and deduplicate explicit skill selectors', async () => {
   const parent = { id: 'parent-agent' }
   const signal = new AbortController().signal
