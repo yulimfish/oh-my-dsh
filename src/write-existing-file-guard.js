@@ -132,7 +132,7 @@ function isOmoPath(filePath) {
   return path.normalize(filePath).split('/').includes('.omo')
 }
 
-function getAgentContext(exec, agents, sessions) {
+function getAgentContext(exec, agents, sessions, workingDirectory) {
   try {
     const projection = exec?.agent
     const id = getExecAgentId(exec)
@@ -140,11 +140,22 @@ function getAgentContext(exec, agents, sessions) {
     const agent = agents.get(id)
     if (!isObject(agent) || agent.id !== id) return undefined
     const session = sessions.get(id)
-    const header = session?.header
-    if (header?.id !== id || !validCwd(header.cwd)) return undefined
-    return { id, agent, cwd: header.cwd }
+    if (session?.header?.id !== id) return undefined
+    const cwd = workingDirectory.get(session)
+    if (!validCwd(cwd)) return undefined
+    return { id, agent, cwd }
   } catch {
     return undefined
+  }
+}
+
+function sameCwd(session, workingDirectory, cwd, filePath) {
+  if (path.isAbsolute(filePath)) return true
+  try {
+    const current = workingDirectory.get(session)
+    return validCwd(current) && current === cwd
+  } catch {
+    return false
   }
 }
 
@@ -323,9 +334,10 @@ function sameAgentContext(agents, record) {
  * It governs case-insensitive Tool names `read`/`write` with scalar `file_path` arguments
  * (validating a supplied schema) and is not a filesystem or shell authorization boundary.
  */
-export function createWriteExistingFileGuard(agents, sessions, fs, options = {}) {
+export function createWriteExistingFileGuard(agents, sessions, fs, workingDirectory, options = {}) {
   if (!agents || typeof agents.get !== 'function') throw new TypeError('Write guard requires DSH agents.get')
   if (!sessions || typeof sessions.get !== 'function') throw new TypeError('Write guard requires DSH sessions.get')
+  if (!workingDirectory || typeof workingDirectory.get !== 'function') throw new TypeError('Write guard requires DSH workingDirectory.get')
   if (!fs || typeof fs.resolve !== 'function' || typeof fs.contains !== 'function'
     || typeof fs.lstat !== 'function' || typeof fs.stat !== 'function') {
     throw new TypeError('Write guard requires DSH fs.resolve, contains, lstat, and stat')
@@ -501,7 +513,7 @@ export function createWriteExistingFileGuard(agents, sessions, fs, options = {})
         || sharedState.collisionOverflow || !filePath || pendingByToken.size >= maxPendingCalls) {
         return typeof next === 'function' ? next() : { kind: 'allow' }
       }
-      const context = getAgentContext(exec, agents, sessions)
+      const context = getAgentContext(exec, agents, sessions, workingDirectory)
       if (!context) return typeof next === 'function' ? next() : { kind: 'allow' }
       const releaseSlot = acquirePreflightSlot()
       if (!releaseSlot) return typeof next === 'function' ? next() : { kind: 'allow' }
@@ -522,7 +534,7 @@ export function createWriteExistingFileGuard(agents, sessions, fs, options = {})
         if (target.kind === 'file' && !scope.signal.aborted && !disposed
           && filePathSchemaMatches(exec) && getExecPath(exec) === filePath
           && getExecAgentId(exec) === context.id && isLiveAgent(agents, context.id, context.agent)) {
-          setPending(exec, token, { kind: 'read', agentId: context.id, agent: context.agent, filePath, targetKey: target.key })
+          setPending(exec, token, { kind: 'read', agentId: context.id, agent: context.agent, cwd: context.cwd, filePath, targetKey: target.key })
         }
       } catch {
         // Reads remain native; uncertainty simply creates no future write grant.
@@ -536,12 +548,12 @@ export function createWriteExistingFileGuard(agents, sessions, fs, options = {})
     if (!filePath || !token) return denyWrite(exec, token, UNVERIFIED_TARGET_REASON)
     if (!firstTokenUse || sharedState.tokenHistoryOverflow || sharedState.collidedTokens.has(token)
       || sharedState.collisionOverflow) return denyWrite(exec, token, BUSY_REASON)
-    const context = getAgentContext(exec, agents, sessions)
+    const context = getAgentContext(exec, agents, sessions, workingDirectory)
     if (!context) return denyWrite(exec, token, UNVERIFIED_TARGET_REASON)
     const overwriteBypass = getOverwriteValue(exec)
     const bypassKind = isOmoPath(filePath) ? 'omo' : overwriteBypass ? 'overwrite' : undefined
     if (bypassKind) {
-      const record = { kind: 'bypass', bypassKind, overwriteBypass, agentId: context.id, agent: context.agent, filePath }
+      const record = { kind: 'bypass', bypassKind, overwriteBypass, agentId: context.id, agent: context.agent, cwd: context.cwd, filePath }
       if (!setPending(exec, token, record)) return denyWrite(exec, token, BUSY_REASON, context.id)
       return typeof next === 'function' ? next() : { kind: 'allow' }
     }
@@ -569,7 +581,7 @@ export function createWriteExistingFileGuard(agents, sessions, fs, options = {})
       }
       if (target.kind === 'outside' || target.kind === 'missing') {
         const record = {
-          kind: 'pass', agentId: context.id, agent: context.agent, filePath,
+          kind: 'pass', agentId: context.id, agent: context.agent, cwd: context.cwd, filePath,
           overwriteBypass: false, passKind: target.kind,
         }
         if (!setPending(exec, token, record)) return denyWrite(exec, token, BUSY_REASON, context.id)
@@ -582,7 +594,7 @@ export function createWriteExistingFileGuard(agents, sessions, fs, options = {})
       const state = getState(context.id)
       const grant = state?.grants.get(target.key)
       if (!grant || grant.reservedBy) return denyWrite(exec, token, FILE_ALREADY_EXISTS_REASON, context.id)
-      const record = { kind: 'write', agentId: context.id, agent: context.agent, filePath, targetKey: target.key, consumed: false }
+      const record = { kind: 'write', agentId: context.id, agent: context.agent, cwd: context.cwd, filePath, targetKey: target.key, consumed: false }
       if (!setPending(exec, token, record)) return denyWrite(exec, token, BUSY_REASON, context.id)
       grant.reservedBy = token
       return typeof next === 'function' ? next() : { kind: 'allow' }
@@ -618,7 +630,8 @@ export function createWriteExistingFileGuard(agents, sessions, fs, options = {})
 
     const filePath = getExecPath(exec)
     if (!filePathSchemaMatches(exec) || filePath !== record.filePath
-      || getExecAgentId(exec) !== record.agentId || !sameAgentContext(agents, record)) return UNVERIFIED_TARGET_REASON
+      || getExecAgentId(exec) !== record.agentId || !sameAgentContext(agents, record)
+      || !sameCwd(sessions.get(record.agentId), workingDirectory, record.cwd, filePath)) return UNVERIFIED_TARGET_REASON
 
     if (record.kind === 'bypass') {
       const stillBypassed = record.bypassKind === 'omo'
@@ -656,7 +669,8 @@ export function createWriteExistingFileGuard(agents, sessions, fs, options = {})
       if (record.kind === 'read' && tokenIsUnambiguous && record.toolName === READ_TOOL_NAME
         && getToolName(exec) === READ_TOOL_NAME && result?.isError === false && token === recordToken
         && filePathSchemaMatches(exec) && getExecPath(exec) === record.filePath
-        && getExecAgentId(exec) === record.agentId && sameAgentContext(agents, record)) {
+        && getExecAgentId(exec) === record.agentId && sameAgentContext(agents, record)
+        && sameCwd(sessions.get(record.agentId), workingDirectory, record.cwd, record.filePath)) {
         addGrant(record.agentId, record.agent, record.targetKey)
       } else if (record.kind === 'write' && !record.consumed) {
         const grant = states.get(record.agentId)?.grants.get(record.targetKey)
@@ -704,12 +718,12 @@ export function createWriteExistingFileGuard(agents, sessions, fs, options = {})
 }
 
 /** Register the opt-in read-before-write adapter and its monotonic DSH Tool guard. */
-export function registerWriteExistingFileGuard(ctx, agents, sessions, fs) {
+export function registerWriteExistingFileGuard(ctx, agents, sessions, fs, workingDirectory) {
   if (typeof ctx?.on !== 'function' || typeof ctx?.effect !== 'function'
     || typeof ctx?.tools?.guard !== 'function') {
     throw new TypeError('registerWriteExistingFileGuard requires Cordis ctx.on, ctx.effect, and tools.guard')
   }
-  const listener = createWriteExistingFileGuard(agents, sessions, fs)
+  const listener = createWriteExistingFileGuard(agents, sessions, fs, workingDirectory)
   let disposeGuard
   let disposed = false
   const dispose = () => {

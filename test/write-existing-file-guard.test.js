@@ -40,8 +40,9 @@ function makeHarness(options = {}) {
       return info ? { ...info } : undefined
     },
   }
-  const guard = createWriteExistingFileGuard(agents, sessions, fs, options.guardOptions)
-  return { guard, agents, sessions, agentsById, sessionsById, files, fs }
+  const workingDirectory = { get: options.workingDirectory ?? (() => cwd) }
+  const guard = createWriteExistingFileGuard(agents, sessions, fs, workingDirectory, options.guardOptions)
+  return { guard, agents, sessions, agentsById, sessionsById, files, fs, workingDirectory }
 }
 
 test('registration helper returns an idempotent disposer that unregisters the global Tool guard', () => {
@@ -54,7 +55,7 @@ test('registration helper returns an idempotent disposer that unregisters the gl
     effect: execute => { effectCleanup = execute() },
     tools: { guard: guard => { guards.add(guard); return () => guards.delete(guard) } },
   }
-  const dispose = registerWriteExistingFileGuard(ctx, agents, sessions, fs)
+  const dispose = registerWriteExistingFileGuard(ctx, agents, sessions, fs, { get: () => cwd })
   assert.equal(typeof dispose, 'function')
   assert.equal(guards.size, 1)
   assert.deepEqual([...events.keys()], ['tools/pre-execute', 'tools/result', 'agent/created', 'agent/disposed'])
@@ -68,7 +69,7 @@ test('registration helper returns an idempotent disposer that unregisters the gl
     ...ctx,
     tools: { guard: guard => { failedGuards.add(guard); return () => failedGuards.delete(guard) } },
     effect: () => { throw new Error('effect registration failed') },
-  }, agents, sessions, fs), /effect registration failed/u)
+  }, agents, sessions, fs, { get: () => cwd }), /effect registration failed/u)
   assert.equal(failedGuards.size, 0, 'failed effect registration still releases the global guard')
 })
 
@@ -126,6 +127,57 @@ test('grants one existing in-cwd write after a successful final read and consume
   assert.equal(second.decision.reason, 'File already exists. Use edit tool instead.')
   assert.equal(second.final, second.decision.reason)
   guard.onResult(second.exec, { isError: true })
+})
+
+test('pins read, result, and final write authorization to the effective Session CWD', async () => {
+  let currentCwd = cwd
+  const { guard, files } = makeHarness({ workingDirectory: () => currentCwd })
+  files.set('/workspace-b/src/existing.txt', { type: 'file', version: 'v1', size: 10 })
+  await readSuccessfully(guard, 'src/existing.txt')
+  currentCwd = '/workspace-b'
+  const changed = await attemptWrite(guard, 'src/existing.txt')
+  assert.equal(changed.decision.kind, 'deny', 'a read in A cannot authorize the same relative path in B')
+  assert.equal(changed.final, changed.decision.reason)
+
+  currentCwd = cwd
+  const read = makeExec('read', 'src/existing.txt')
+  await guard.before(read, allow)
+  currentCwd = '/workspace-b'
+  guard.onResult(read, { isError: false })
+  assert.equal((await attemptWrite(guard, 'src/existing.txt')).decision.kind, 'deny', 'a CWD change before read result mints no grant')
+
+  const outside = makeExec('write', '/outside/file.txt')
+  assert.deepEqual(await guard.before(outside, allow), { kind: 'allow' })
+  currentCwd = '/workspace-b'
+  assert.equal(guard.guard(outside), undefined, 'absolute out-of-cwd pass remains valid because CWD does not affect its target')
+})
+
+test('absolute read results and final authorizations do not depend on CWD', async () => {
+  let currentCwd = cwd
+  const { guard, files } = makeHarness({ workingDirectory: () => currentCwd })
+  const absolute = `${cwd}/src/existing.txt`
+  const read = makeExec('read', absolute)
+  await guard.before(read, allow)
+  currentCwd = '/workspace-b'
+  guard.onResult(read, { isError: false })
+  const write = await attemptWrite(guard, absolute)
+  assert.deepEqual(write.decision, { kind: 'allow' })
+  currentCwd = cwd
+  assert.equal(write.final, undefined)
+  guard.onResult(write.exec, { isError: true })
+
+  const scenarios = [
+    { path: '/missing/file.txt' },
+    { path: `${cwd}/.omo/file.txt` },
+    { path: `${cwd}/src/existing.txt`, overwrite: true },
+  ]
+  for (const scenario of scenarios) {
+    const exec = makeExec('write', scenario.path, { overwrite: scenario.overwrite })
+    assert.deepEqual(await guard.before(exec, allow), { kind: 'allow' })
+    currentCwd = currentCwd === cwd ? '/workspace-b' : cwd
+    assert.equal(guard.guard(exec), undefined)
+  }
+  assert.equal(files.has('/missing/file.txt'), false)
 })
 
 test('failed, blocked, malformed, and missing-file reads do not grant overwrite permission', async () => {
@@ -215,7 +267,7 @@ test('shares completed-token history across listener instances for one DSH files
   harness.guard.onResult(oldRead, { isError: true })
   harness.guard.dispose()
 
-  const replacement = createWriteExistingFileGuard(harness.agents, harness.sessions, harness.fs)
+  const replacement = createWriteExistingFileGuard(harness.agents, harness.sessions, harness.fs, harness.workingDirectory)
   const reusedRead = makeExec('read', 'src/other.txt', { token })
   assert.deepEqual(await replacement.before(reusedRead, allow), { kind: 'allow' })
   oldRead.arguments.file_path = 'src/other.txt'
@@ -613,7 +665,7 @@ test('keeps the preflight cap reserved while a backend ignores abort', async () 
   assert.deepEqual(await firstPending, { kind: 'allow' }, 'the waiter still settles at the deadline')
   assert.equal(calls, 1)
 
-  const reloadedGuard = createWriteExistingFileGuard(harness.agents, harness.sessions, harness.fs, {
+  const reloadedGuard = createWriteExistingFileGuard(harness.agents, harness.sessions, harness.fs, harness.workingDirectory, {
     maxInFlightPreflights: 1, timeoutMs: 10,
   })
   const skippedRead = makeExec('read', 'src/other.txt')

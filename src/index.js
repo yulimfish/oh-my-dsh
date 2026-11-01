@@ -4158,11 +4158,12 @@ export function apply(ctx, rawConfig) {
   }
   if (config.enableWriteExistingFileGuard && (!agentsService || typeof agentsService.get !== 'function'
     || !sessionsService || typeof sessionsService.get !== 'function'
+    || typeof workingDirectoryService?.get !== 'function'
     || !ctx.fs || typeof ctx.fs.resolve !== 'function' || typeof ctx.fs.contains !== 'function'
     || typeof ctx.fs.lstat !== 'function' || typeof ctx.fs.stat !== 'function'
     || !ctx.tools || typeof ctx.tools.guard !== 'function'
     || typeof ctx.on !== 'function' || typeof ctx.effect !== 'function')) {
-    throw new Error('dsh-omo: enableWriteExistingFileGuard requires DSH agents.get, sessions.get, fs.resolve/contains/lstat/stat, Cordis ctx.tools.guard, ctx.on, and ctx.effect')
+    throw new Error('dsh-omo: enableWriteExistingFileGuard requires DSH agents.get, sessions.get, workingDirectory.get, fs.resolve/contains/lstat/stat, Cordis ctx.tools.guard, ctx.on, and ctx.effect')
   }
   if (config.enableNotepadWriteGuard && (!ctx.tools || typeof ctx.tools.guard !== 'function' || typeof ctx.effect !== 'function')) {
     throw new Error('dsh-omo: enableNotepadWriteGuard requires DSH tools.guard and Cordis ctx.effect')
@@ -4460,7 +4461,7 @@ export function apply(ctx, rawConfig) {
       ctx.logger.warn(`[dsh-omo] runtime fallback after HTTP ${status}: ${from.provider}/${from.model} -> ${to.provider}/${to.model}`)
     },
   })
-  if (config.enableWriteExistingFileGuard) registerWriteExistingFileGuard(ctx, agentsService, sessionsService, ctx.fs)
+  if (config.enableWriteExistingFileGuard) registerWriteExistingFileGuard(ctx, agentsService, sessionsService, ctx.fs, workingDirectoryService)
   if (config.enableNotepadWriteGuard) {
     const disposeNotepadWriteGuard = registerNotepadWriteGuard(ctx)
     ctx.effect(() => disposeNotepadWriteGuard, 'dsh-omo notepad write guard')

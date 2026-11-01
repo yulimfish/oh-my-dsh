@@ -3320,7 +3320,7 @@ test('mounts opt-in OMO, Cursor, GitHub, project, and user Sisyphus rules-on-rea
 })
 
 test('mounts the opt-in existing-file guard only with full DSH contracts and disposes its Tool guard', async () => {
-  const services = { agents: { get: () => undefined }, sessions: { get: () => undefined } }
+  const services = { agents: { get: () => undefined }, sessions: { get: () => undefined }, workingDirectory: { get: () => '/workspace' } }
   const fs = { resolve: async () => ({}), contains: () => true, lstat: async () => undefined, stat: async () => undefined }
   const disabled = makeContext({ services, fs })
   apply(disabled.ctx, baseConfig)
@@ -3331,6 +3331,7 @@ test('mounts the opt-in existing-file guard only with full DSH contracts and dis
   const missingCases = [
     ['agents service', deps => { deps.services.agents = undefined }],
     ['sessions.get', deps => { deps.services.sessions = {} }],
+    ['workingDirectory.get', deps => { deps.services.workingDirectory = {} }],
     ['fs.resolve', deps => { delete deps.fs.resolve }],
     ['fs.contains', deps => { delete deps.fs.contains }],
     ['fs.lstat', deps => { delete deps.fs.lstat }],
