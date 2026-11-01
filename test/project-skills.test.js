@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { SkillRegistry } from '@deepseek-ai/dsh-skill'
-import { createProjectSkillProvider, normalizeConfigSkillPaths, normalizeProjectSkillDirs, normalizeUserSkillRoots, registerProjectSkillProvider, resolveCompatibleSkillReferences } from '../src/project-skills.js'
+import { applyConfigPatch, createProjectSkillProvider, normalizeConfigSkillPaths, normalizeProjectSkillDirs, normalizeUserSkillRoots, registerProjectSkillProvider, resolveCompatibleSkillReferences } from '../src/project-skills.js'
 
 function isWithin(parent, child) {
   const relative = path.relative(parent, child)
@@ -1216,6 +1216,14 @@ test('format compatibility loads direct skills from an explicit config directory
   assert.equal(metadataPatched.argumentHint, 'entry-hint')
   assert.equal(metadataPatched.agent, 'entry-agent')
   assert.equal(metadataPatched.subtask, false)
+  const safeMergePatch = JSON.parse('{"nested":{"list":[3],"__proto__":{"polluted":true},"constructor":{"bad":true},"prototype":{"bad":true}},"list":[]}')
+  const safeMerge = applyConfigPatch({
+    name: 'shared', description: 'Original', invocation: { modelInvocable: true, userInvocable: true },
+    metadata: { nested: { keep: 1, list: [1, 2] }, list: [1, 2] }, allowedTools: ['Read'],
+  }, { description: 'Patched', metadata: safeMergePatch, model: 'entry/model', allowedTools: ['Grep'] }, true, 'config')
+  assert.deepEqual(safeMerge.metadata, { nested: { keep: 1, list: [3] }, list: [], model: 'entry/model' })
+  assert.deepEqual(safeMerge.allowedTools, ['Read', 'Grep'])
+  assert.equal({}.polluted, undefined)
   for (const entry of [{ metadata: { nested: { replace: 'entry' } } }, { description: '', metadata: { nested: { replace: 'entry' } } }]) {
     const fallbackDescriptionRegistry = makeRegistry(makeFileSystem().fs)
     registerProjectSkillProvider(fallbackDescriptionRegistry.ctx, {
