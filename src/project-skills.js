@@ -123,6 +123,42 @@ function lifecycleSignal(signal, lifecycle) {
   return signal ? AbortSignal.any([signal, lifecycle]) : lifecycle
 }
 
+const PROJECT_SKILL_SCAN_TIMEOUT_MS = 30_000
+
+async function withProjectSkillDeadline(parent, operation) {
+  throwIfAborted(parent)
+  const controller = new AbortController()
+  let timer
+  let removeAbortListener
+  const caller = new Promise((_, reject) => {
+    const abort = () => {
+      const reason = parent.reason ?? new Error('Project skill scan was cancelled.')
+      controller.abort(reason)
+      reject(reason)
+    }
+    if (parent.aborted) abort()
+    else {
+      parent.addEventListener('abort', abort, { once: true })
+      removeAbortListener = () => parent.removeEventListener('abort', abort)
+      if (parent.aborted) abort()
+    }
+  })
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error('Project skill scan timed out.')
+      controller.abort(error)
+      reject(error)
+    }, PROJECT_SKILL_SCAN_TIMEOUT_MS)
+  })
+  const signal = AbortSignal.any([parent, controller.signal])
+  try {
+    return await Promise.race([Promise.resolve().then(() => operation(signal)), caller, timeout])
+  } finally {
+    clearTimeout(timer)
+    removeAbortListener?.()
+  }
+}
+
 export function normalizeProjectSkillDirs(value = DEFAULT_PROJECT_SKILL_DIRS) {
   if (!Array.isArray(value) || value.length > MAX_PROJECT_SKILL_DIRS) {
     throw new TypeError(`projectSkillDirs must be an array with at most ${MAX_PROJECT_SKILL_DIRS} relative directories`)
@@ -1317,9 +1353,10 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
     name: PROJECT_SKILL_PROVIDER,
     refresh,
     async list(lookup = {}) {
+      const parent = lifecycleSignal(lookup.signal, control.signal)
+      return withProjectSkillDeadline(parent, async signal => {
       const cwd = typeof lookup.cwd === 'string' ? lookup.cwd : ''
       if (!cwd && userRoots.length === 0 && configRoots.length === 0 && configSkillEntries.length === 0) return { candidates: [], complete: true, priorityComplete: true }
-      const signal = lifecycleSignal(lookup.signal, control.signal)
       const candidates = []
       let hasInlineFrom = false
       for (const entry of configSkillEntries) {
@@ -1767,8 +1804,11 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       }
       const stable = startingWatchRevision === watchRevision && startingObservationRevision === observationRevision
       return { candidates, complete: complete && stable && !hasInlineFrom, priorityComplete: priorityComplete && stable }
+      })
     },
     async get(candidate, lookup = {}) {
+      const parent = lifecycleSignal(lookup.signal, control.signal)
+      return withProjectSkillDeadline(parent, async signal => {
       const locator = candidate?.locator
       if (locator?.inlineEntry) {
         const entry = configSkillEntries.find(item => item === locator.inlineEntry)
@@ -1786,7 +1826,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         let agent = entry.agent
         let subtask = entry.subtask
         if (entry.from) {
-          const loaded = await readInlineFrom(entry, lookup.signal)
+          const loaded = await readInlineFrom(entry, signal)
           if (!loaded) return undefined
           template = loaded.template
           description = loaded.description
@@ -1843,7 +1883,6 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
       if (!externalRoot && enabledProjectSkillSet && !enabledProjectSkillSet.has(candidate?.name)) return undefined
       if (!locator?.rootTarget || !locator?.fileTarget || !locator?.skillDirectoryTarget || typeof locator.resolverPath !== 'string'
         || (typeof lookup.cwd === 'string' && lookup.cwd.length === 0 && !externalRoot)) return undefined
-      const signal = lifecycleSignal(lookup.signal, control.signal)
       throwIfAborted(signal)
       // The registry may have selected this locator immediately before a
       // this provider invalidated the catalog. Never load it across that event.
@@ -1950,6 +1989,7 @@ export function createProjectSkillProvider(ctx, control, options = {}) {
         invalidateObservation()
         return undefined
       }
+      })
     },
   }
 
