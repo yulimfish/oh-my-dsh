@@ -5042,6 +5042,27 @@ test('format compatibility preserves byte limits, strict UTF-8, named-file symli
   assert.equal(reads.includes(await realpath(externalFile)), false)
 })
 
+test('skill reader rejects silently shortened content against stable size metadata', async t => {
+  const cwd = await makeWorkspace(t)
+  const source = await writeCompatibilityDocument(cwd, 'short.md', `SAFE_PREFIX\n${'OMITTED_SUFFIX\n'.repeat(16)}`)
+  const sourceKey = await realpath(source)
+  const { fs } = makeFileSystem()
+  const originalRead = fs.readBytes.bind(fs)
+  let reads = 0
+  fs.readBytes = async (target, signal, maxBytes) => {
+    const bytes = await originalRead(target, signal, maxBytes)
+    if (target.targetKey === sourceKey) {
+      reads += 1
+      assert.ok(bytes.byteLength > 48)
+      return bytes.slice(0, 48)
+    }
+    return bytes
+  }
+  const { registry } = compatibilityRegistry(t, fs)
+  assert.equal(await registry.get('short', { cwd }), undefined)
+  assert.ok(reads > 0)
+})
+
 test('three-level discovery fails closed when an intermediate listing is truncated', async t => {
   const cwd = await makeWorkspace(t)
   await writeCompatibilityDocument(cwd, 'team/reference/operations/SKILL.md', 'Must not be discovered through an uncertain listing.')

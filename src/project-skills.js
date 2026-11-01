@@ -662,6 +662,11 @@ async function readSkillFile(ctx, target, signal, byteLimit = MAX_SKILL_BYTES, f
     throw new SkillFormatError('filesystem backend returned non-byte skill content', byteLimit)
   }
   if (bytes.byteLength > byteLimit) throw new ScanBudgetError('filesystem backend exceeded the project skill read limit', byteLimit)
+  if (info.size !== undefined && bytes.byteLength !== info.size) {
+    const error = new Error('project skill file was truncated while it was being read')
+    error.bytesRead = bytes.byteLength
+    throw error
+  }
   let afterInfo
   try {
     afterInfo = await ctx.fs.stat(target, signal)
