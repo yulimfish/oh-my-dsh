@@ -274,7 +274,9 @@ function createController(policy, options = {}) {
 
     const primaryKey = routeKey(base.provider, base.model)
     let state = states.get(agentId)
-    if (state && (state.turn !== payload.turn || state.step !== payload.step || state.primaryKey !== primaryKey)) {
+    const currentRoute = state?.fallbackIndex > 0 ? state.chain.fallbacks[state.fallbackIndex - 1] : state?.chain.primary
+    if (state && (state.turn !== payload.turn || state.step !== payload.step
+      || (state.primaryKey !== primaryKey && routeKey(currentRoute?.provider, currentRoute?.model) !== primaryKey))) {
       states.delete(agentId)
       state = undefined
     }

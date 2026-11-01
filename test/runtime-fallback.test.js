@@ -139,9 +139,10 @@ test('switches only after delegated same-route retries are exhausted, then advan
     await fail(controller, errorPayload({ provider: 'provider-backup', status: 503 }), { kind: 'retry' }),
     { kind: 'retry' },
   )
-  assert.equal((await request(controller)).provider, 'provider-backup', 'native retry stays on the current fallback')
+  assert.equal((await request(controller, 'agent-1', 1, 1, firstFallback)).provider, 'provider-backup', 'native retry stays on the current fallback')
 
-  assert.deepEqual(await fail(controller, errorPayload({ provider: 'provider-backup', status: 503 })), { kind: 'retry' })
+  const exhaustedRetry = { mode: 'normal', maxRetries: 0, retryableCodes: ['HTTP_503'], initialDelayMs: 0, maxDelayMs: 0, jitterRatio: 0 }
+  assert.deepEqual(await fail(controller, errorPayload({ provider: 'provider-backup', status: 503, retryPolicy: exhaustedRetry })), { kind: 'retry' })
   const secondFallback = await request(controller)
   assert.equal(secondFallback.provider, 'provider-last')
   assert.equal(secondFallback.model, 'model-last')
