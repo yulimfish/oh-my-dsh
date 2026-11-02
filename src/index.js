@@ -1050,6 +1050,7 @@ function createProjectCommandManager(ctx, sessionsService, agentsService, lifecy
     }
     scopes.set(id, state)
     state.automaticDefinitions = new Map()
+    state.automaticRegistrations = new Map()
     let fiber
     try {
       const signals = [lifecycle.controller.signal, AbortSignal.timeout(PROJECT_COMMAND_SCAN_TIMEOUT_MS), state.scanController.signal]
@@ -1130,7 +1131,10 @@ function createProjectCommandManager(ctx, sessionsService, agentsService, lifecy
             ? (command, invocation) => expandProjectCommandFileReferences(command, { promptFileExpander, ...invocation })
             : undefined, enableAutomatic)
           const unregister = commandService.register(definition)
-          if (definition.automatic === true) state.automaticDefinitions.set(projectCommand.name, projectCommand)
+          if (definition.automatic === true) {
+            state.automaticDefinitions.set(projectCommand.name, projectCommand)
+            state.automaticRegistrations.set(projectCommand.name, definition.handler)
+          }
           if (typeof unregister !== 'function') throw new TypeError(`Project command ${projectCommand.name} did not return a disposer`)
           injectedCtx.effect(() => unregister, `dsh-omo project command ${projectCommand.name}`)
           registered += 1
@@ -1287,7 +1291,12 @@ function createProjectCommandManager(ctx, sessionsService, agentsService, lifecy
     const state = scopes.get(agent.id)
     if (!state || state.agent !== agent || !state.scanComplete || commandRoutes?.has(definition.name)) return undefined
     const projectCommand = state.automaticDefinitions?.get(definition.name)
-    if (!projectCommand || ctx.commands.find(agent, definition.name) !== definition) return undefined
+    const registeredHandler = state.automaticRegistrations?.get(definition.name)
+    // Compare against the handler this manager registered: re-finding the
+    // caller-supplied definition would always succeed and could rewrite a
+    // same-name command that another provider registered afterwards. The Host
+    // normalizes the definition object, so handler identity is the stable key.
+    if (!projectCommand || !registeredHandler || ctx.commands.find(agent, definition.name)?.handler !== registeredHandler) return undefined
     return projectCommand
   }
   return { listener, clearAgent, refresh, dispose, backfill, automaticCommand }

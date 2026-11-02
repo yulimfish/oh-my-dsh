@@ -134,3 +134,55 @@ test('fails closed when a referenced file cannot be read', async () => {
     agent: { id: 'agent-1' },
   }), /could not be read safely/u)
 })
+
+test('expands references in a preserved CRLF body and leaves CRLF fenced code untouched', async () => {
+  const source = command([
+    'Read @outside.md.',
+    '```sh',
+    '@inside.md',
+    '```',
+    'Read @after.md.',
+    '',
+  ].join('\r\n'))
+  const reads = []
+  const result = await expandProjectCommandFileReferences(source, {
+    promptFileExpander: {
+      async expand(request) {
+        reads.push(request)
+        return { rolePromptAppend: `contents for ${request.rolePromptAppend}` }
+      },
+    },
+    agent: { id: 'agent-1' },
+  })
+
+  assert.deepEqual(reads.map(read => read.rolePromptAppend), ['file://outside.md', 'file://after.md'])
+  assert.equal(result.body.includes('@inside.md'), true)
+  assert.equal(result.body.includes('Referenced project file "outside.md"'), true)
+  assert.equal(result.body.includes('\r\n'), true, 'preserved CRLF endings survive expansion')
+})
+
+test('leaves references inside indented Markdown code blocks untouched', async () => {
+  const source = command([
+    'Read @outside.md.',
+    '',
+    '    Read @indented.md here.',
+    '',
+    '\tRead @tab-indented.md here.',
+    '',
+    'Read @after.md.',
+  ].join('\n'))
+  const reads = []
+  const result = await expandProjectCommandFileReferences(source, {
+    promptFileExpander: {
+      async expand(request) {
+        reads.push(request)
+        return { rolePromptAppend: `contents for ${request.rolePromptAppend}` }
+      },
+    },
+    agent: { id: 'agent-1' },
+  })
+
+  assert.deepEqual(reads.map(read => read.rolePromptAppend), ['file://outside.md', 'file://after.md'])
+  assert.equal(result.body.includes('@indented.md'), true)
+  assert.equal(result.body.includes('@tab-indented.md'), true)
+})

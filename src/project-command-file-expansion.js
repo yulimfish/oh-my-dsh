@@ -72,7 +72,11 @@ function inlineCodeRanges(line, markerCount) {
 }
 
 function scanMarkdownCodeContexts(body) {
-  const lines = body.split('\n')
+  const rawLines = body.split('\n')
+  // Analyze a CR-stripped view so a preserved CRLF body still closes fences and
+  // matches end-of-line references; the original lines are written back so their
+  // line endings survive.
+  const lines = rawLines.map(line => line.endsWith('\r') ? line.slice(0, -1) : line)
   const codeRanges = []
   const markerCount = { count: 0 }
   let fence
@@ -101,6 +105,13 @@ function scanMarkdownCodeContexts(body) {
       continue
     }
 
+    // A four-space or tab indented line is a Markdown code block; never expand
+    // references inside it.
+    if (/^(?: {4}|\t)/u.test(content)) {
+      codeRanges.push([[0, line.length]])
+      continue
+    }
+
     const inlineRanges = inlineCodeRanges(line, markerCount)
     if (!inlineRanges) return undefined
     for (const match of line.matchAll(TILDE_CODE_MARKER)) {
@@ -112,7 +123,7 @@ function scanMarkdownCodeContexts(body) {
   }
 
   if (fence) return undefined
-  return { lines, codeRanges }
+  return { lines: rawLines, analysis: lines, codeRanges }
 }
 
 function fileReferences(line, codeRanges) {
@@ -135,9 +146,9 @@ export async function expandProjectCommandFileReferences(projectCommand, { promp
   // Pre-scan the whole bounded body so ambiguous Markdown never causes partial reads.
   const markdown = scanMarkdownCodeContexts(projectCommand.body)
   if (!markdown) return projectCommand
-  const { lines, codeRanges } = markdown
+  const { lines, analysis, codeRanges } = markdown
   let referenceCount = 0
-  const referencesByLine = lines.map((line, index) => {
+  const referencesByLine = analysis.map((line, index) => {
     const references = fileReferences(line, codeRanges[index])
     referenceCount += references.length
     if (referenceCount > MAX_REFERENCES) {

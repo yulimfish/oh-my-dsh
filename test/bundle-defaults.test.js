@@ -20,15 +20,25 @@ test('shipped bundle retains all default project skill source roots', async () =
   assert.deepEqual(Config(config).projectSkillDirs, Config({}).projectSkillDirs)
 })
 
-test('release guide replacement config mirrors the shipped project skill roots', async () => {
-  const guide = await readFile(new URL('../docs/release-readiness.md', import.meta.url), 'utf8')
-  const block = guide.match(/```yaml\n([\s\S]*?)```/u)
-  assert.ok(block, 'release guide must contain the copy-paste replacement config')
-  const rows = parse(block[1])
-  assert.ok(Array.isArray(rows), 'release guide config must be a Loader row list')
-  const row = rows.find(entry => entry?.id === 'dsh-omo')
-  assert.ok(row?.config, 'release guide must configure the dsh-omo row')
-  assert.deepEqual(row.config.projectSkillDirs, [...DEFAULT_PROJECT_SKILL_DIRS])
+test('documented project skill roots mirror the shipped defaults', async () => {
+  const roots = [...DEFAULT_PROJECT_SKILL_DIRS]
+  for (const file of ['../docs/release-readiness.md', '../README.md']) {
+    const text = await readFile(new URL(file, import.meta.url), 'utf8')
+    const blocks = [...text.matchAll(/```yaml\n([\s\S]*?)```/gu)]
+    assert.ok(blocks.length > 0, `${file} must contain a YAML example`)
+    let checked = 0
+    for (const block of blocks) {
+      let rows
+      try { rows = parse(block[1]) } catch { continue }
+      if (!Array.isArray(rows)) continue
+      for (const row of rows) {
+        if (row?.id !== 'dsh-omo' || !row.config || !Array.isArray(row.config.projectSkillDirs)) continue
+        assert.deepEqual(row.config.projectSkillDirs, roots, `${file} example must use the shipped skill roots`)
+        checked += 1
+      }
+    }
+    assert.ok(checked > 0, `${file} must document projectSkillDirs in a dsh-omo example`)
+  }
 })
 
 test('release doctor reports the packaged version and compatible Node runtime', async () => {

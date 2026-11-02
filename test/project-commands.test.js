@@ -2503,3 +2503,21 @@ test('integrates project and user-root commands in only the exact live Agent com
   await cleanup()
   assert.ok(watchSubscriptions.every(subscription => subscription.closed), 'Agent disposal and plugin cleanup close every filesystem watcher')
 })
+
+test('a standalone closing delimiter takes precedence over the pinned adjacency match', () => {
+  for (const source of ['opencode', 'claude']) {
+    const trailing = parseProjectCommandDocument('review', '---\ndescription: Section ---\n---\nBody text.\n', source)
+    assert.equal(trailing.description, 'Section ---')
+    assert.equal(trailing.body, 'Body text.\n')
+
+    assert.throws(
+      () => parseProjectCommandDocument('review', '---\ndescription: Review ---\nagent: reviewer\n---\nBody text.\n', source),
+      /only description and argument-hint/u,
+      'metadata outside the real frontmatter block must not become prompt text',
+    )
+
+    const block = parseProjectCommandDocument('review', '---\ndescription: |\n  line one ---\n  line two\n---\nBody.\n', source)
+    assert.equal(block.description, 'line one ---\nline two')
+    assert.equal(block.body, 'Body.\n')
+  }
+})

@@ -570,13 +570,16 @@ export function parseProjectCommandDocument(name, input, source = 'opencode', op
   const lines = normalized.split('\n')
   const hasFrontmatter = lines[0] === '---'
   const closing = hasFrontmatter ? lines.indexOf('---', 1) : -1
-  // Use the pinned match for both recognition and YAML/body extraction: its
-  // closing marker may immediately follow the final YAML character.
+  // A standalone closing line is authoritative. The pinned match is only a
+  // fallback for the adjacent `...---` shape it was written for; preferring it
+  // when a real delimiter exists would corrupt the body and let rejected
+  // metadata (for example `agent:`) render as prompt text.
+  const usePinned = Boolean(pinnedFrontmatter) && closing < 0
   const plainFrontmatterFallback = hasFrontmatter && !pinnedFrontmatter && options?.allowUnterminatedFrontmatter === true
   if (hasFrontmatter && closing < 0 && !plainFrontmatterFallback && !pinnedFrontmatter) throw new TypeError('Project command YAML frontmatter has no closing delimiter.')
   const parseFrontmatter = hasFrontmatter && !plainFrontmatterFallback
   let originalBody
-  if (parseFrontmatter && !pinnedFrontmatter && closing >= 0) {
+  if (parseFrontmatter && closing >= 0) {
     // Map the normalized standalone delimiter back to CR/LF/CRLF source text.
     let offset = 0
     for (let lineIndex = 0; lineIndex <= closing; lineIndex += 1) {
@@ -596,7 +599,7 @@ export function parseProjectCommandDocument(name, input, source = 'opencode', op
   let document
   try {
     document = parseDocument(parseFrontmatter
-      ? (pinnedFrontmatter ? pinnedFrontmatter[1] : lines.slice(1, closing).join('\n'))
+      ? (usePinned ? pinnedFrontmatter[1] : lines.slice(1, closing).join('\n'))
       : '{}', { schema: 'core', uniqueKeys: true })
   } catch {
     throw new TypeError('Project command YAML frontmatter is invalid.')
@@ -651,7 +654,7 @@ export function parseProjectCommandDocument(name, input, source = 'opencode', op
   }
 
   const body = parseFrontmatter
-    ? (pinnedFrontmatter ? pinnedFrontmatter[2] : originalBody ?? lines.slice(closing + 1).join('\n')).replace(/^(?:\r\n|\n|\r)/u, '')
+    ? (usePinned ? pinnedFrontmatter[2] : originalBody ?? lines.slice(closing + 1).join('\n')).replace(/^(?:\r\n|\n|\r)/u, '')
     : unprefixed
   const outputBody = options?.preserveBodyLineEndings === true ? body : body.replace(/\r\n?/gu, '\n')
   const bodyBytes = new TextEncoder().encode(outputBody).byteLength
