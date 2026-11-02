@@ -28,7 +28,7 @@ The shipped [bundle patch](<../cordis.patch.yml>) uses one-shot delegation, four
     enableProjectAgentFiles: false
     enableGoalTools: false
     enableTeamTools: false
-    projectSkillDirs: [.opencode/skills, .claude/skills, .agents/skills]
+    projectSkillDirs: [.opencode/skills, .opencode/skill, .claude/skills, .agents/skills]
     disabledSkills: []
     models: {}
     categoryRoutes: []

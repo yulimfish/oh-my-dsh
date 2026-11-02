@@ -413,3 +413,116 @@ test('stale exact parent after activation cancels the pending record and dispose
     assert.equal(f.failures.length, 0)
   } finally { await f.dispose() }
 })
+
+test('cancel during startup invokes the published run disposer exactly once', async () => {
+  let releaseLaunch
+  let disposals = 0
+  const f = fixture(async (_args, exec) => {
+    const run = { id: 'child-cancel-once', dispose() { disposals += 1 } }
+    exec.onPendingRun(run)
+    await new Promise(resolve => { releaseLaunch = resolve })
+    return { status: 'started', childId: run.id }
+  })
+  const pending = f.scheduler.enqueue({ role: 'quick', task: 'cancel once' }, { agent: parent })
+  try {
+    await flush()
+    assert.equal(f.scheduler.cancel(parent, pending.taskId).status, 'cancelled')
+    releaseLaunch()
+    await flush()
+    assert.equal(disposals, 1, 'the scheduler must not dispose the same late run twice')
+    assert.equal(f.registry.read(parent, pending.taskId).status, 'cancelled')
+  } finally { releaseLaunch?.(); await f.dispose() }
+})
+
+test('clearAgent hands a starting run to the caller without a second disposal', async () => {
+  let releaseLaunch
+  let disposals = 0
+  const f = fixture(async (_args, exec) => {
+    const run = { id: 'child-clear-once', dispose() { disposals += 1 } }
+    exec.onPendingRun(run)
+    await new Promise(resolve => { releaseLaunch = resolve })
+    return { status: 'started', childId: run.id }
+  })
+  f.scheduler.enqueue({ role: 'quick', task: 'clear during startup' }, { agent: parent })
+  try {
+    await flush()
+    const detached = f.scheduler.clearAgent(parent)
+    assert.equal(detached.length, 1)
+    for (const run of detached) await run.dispose()
+    assert.equal(disposals, 1)
+    releaseLaunch()
+    await flush()
+    assert.equal(disposals, 1, 'binding a detached run must not dispose it again')
+  } finally { releaseLaunch?.(); await f.dispose() }
+})
+
+test('a capacity retry does not reuse an outcome published by the abandoned attempt', async () => {
+  let attempts = 0
+  let secondOutcome
+  const f = fixture(async (_args, exec) => {
+    attempts += 1
+    if (attempts === 1) {
+      exec.pendingOutcome('completed')
+      throw new PendingCapacityError()
+    }
+    const run = { id: 'child-retry', dispose() {} }
+    exec.onPendingRun(run)
+    secondOutcome = exec.pendingOutcome
+    return { status: 'started', childId: run.id }
+  })
+  const pending = f.scheduler.enqueue({ role: 'quick', task: 'retry after capacity' }, { agent: parent })
+  try {
+    await flush()
+    assert.equal(attempts, 1)
+    f.scheduler.notify()
+    await flush()
+    assert.equal(attempts, 2)
+    assert.equal(f.registry.read(parent, pending.taskId).status, 'running')
+    secondOutcome('failed')
+    assert.equal(f.registry.read(parent, pending.taskId).status, 'failed')
+  } finally { await f.dispose() }
+})
+
+test('wakeQueued retries capacity-blocked work without advancing the capacity generation', async () => {
+  let attempts = 0
+  const f = fixture(async (_args, exec) => {
+    attempts += 1
+    if (attempts === 1) throw new PendingCapacityError()
+    const run = { id: 'child-wake', dispose() {} }
+    exec.onPendingRun(run)
+    return { status: 'started', childId: run.id }
+  })
+  const pending = f.scheduler.enqueue({ role: 'quick', task: 'wake queued' }, { agent: parent })
+  try {
+    await flush()
+    assert.equal(attempts, 1)
+    f.scheduler.wakeQueued()
+    await flush()
+    assert.equal(attempts, 2)
+    assert.equal(f.registry.read(parent, pending.taskId).status, 'running')
+  } finally { await f.dispose() }
+})
+
+test('wakeQueued never unparks the attempt that is already starting', async () => {
+  let attempts = 0
+  let rejectLaunch
+  const f = fixture(async (_args, exec) => {
+    attempts += 1
+    if (attempts === 1) await new Promise((_resolve, reject) => { rejectLaunch = reject })
+    const run = { id: 'child-wake-starting', dispose() {} }
+    exec.onPendingRun(run)
+    return { status: 'started', childId: run.id }
+  })
+  f.scheduler.enqueue({ role: 'quick', task: 'wake during start' }, { agent: parent })
+  try {
+    await flush()
+    f.scheduler.wakeQueued()
+    rejectLaunch(new PendingCapacityError())
+    await flush()
+    await flush()
+    assert.equal(attempts, 1, 'a wake during startup must not spin the same attempt')
+    f.scheduler.notify()
+    await flush()
+    assert.equal(attempts, 2)
+  } finally { await f.dispose() }
+})

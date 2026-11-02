@@ -113,20 +113,50 @@ async function attemptWrite(guard, filePath, options = {}) {
   return { exec, decision, final: guard.guard(exec) }
 }
 
-test('grants one existing in-cwd write after a successful final read and consumes it once', async () => {
+test('grants one existing in-cwd write after a successful final read and consumes it only on success', async () => {
   const { guard } = makeHarness()
   await readSuccessfully(guard, 'src/existing.txt')
 
   const first = await attemptWrite(guard, 'src/existing.txt')
   assert.deepEqual(first.decision, { kind: 'allow' })
   assert.equal(first.final, undefined)
-  guard.onResult(first.exec, { isError: true })
+  guard.onResult(first.exec, { isError: false })
 
   const second = await attemptWrite(guard, 'src/existing.txt')
   assert.equal(second.decision.kind, 'deny')
   assert.equal(second.decision.reason, 'File already exists. Use edit tool instead.')
   assert.equal(second.final, second.decision.reason)
   guard.onResult(second.exec, { isError: true })
+})
+
+test('a denied or never-dispatched write keeps its one-use grant for a retry', async () => {
+  const { guard } = makeHarness()
+  await readSuccessfully(guard, 'src/existing.txt')
+
+  const denied = await attemptWrite(guard, 'src/existing.txt')
+  assert.equal(denied.decision.kind, 'allow')
+  // A later global guard or a caller abort can still deny the call before dispatch.
+  guard.onResult(denied.exec, { isError: true })
+
+  const retried = await attemptWrite(guard, 'src/existing.txt')
+  assert.deepEqual(retried.decision, { kind: 'allow' })
+  assert.equal(retried.final, undefined)
+  guard.onResult(retried.exec, { isError: false })
+})
+
+test('a throwing downstream pre-execute listener rolls back the reservation without a guard denial', async () => {
+  const { guard } = makeHarness()
+  await readSuccessfully(guard, 'src/existing.txt')
+
+  const failing = makeExec('write', 'src/existing.txt')
+  await assert.rejects(
+    guard.before(failing, () => { throw new Error('downstream preflight failed') }),
+    /downstream preflight failed/u,
+  )
+  const retried = await attemptWrite(guard, 'src/existing.txt')
+  assert.equal(retried.decision.kind, 'allow', 'the failed attempt must not strand the grant or a pending record')
+  assert.equal(retried.final, undefined)
+  guard.onResult(retried.exec, { isError: false })
 })
 
 test('pins read, result, and final write authorization to the effective Session CWD', async () => {

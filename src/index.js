@@ -2463,17 +2463,25 @@ function specialistTools(ctx, config, roleRoutes, categoryRoutes, userAgents, ac
             + requestedSkillNames.reduce((total, name) => total + name.length, 0)
           if (routeConcurrency.describeRoute(selectedRoute)) {
             admission.release(reservation, { notify: false })
-            reservation = await routeAdmission.acquire({
-              parent: exec.agent,
-              signal: exec.signal,
-              route: selectedRoute,
-              canWait: pendingBackground ? false : queuedChars <= MAX_QUEUED_LAUNCH_CHARS,
-              isCapacityError: error => error instanceof RouteConcurrencyCapacityError,
-              reserveRoute: () => {
-                releaseRouteConcurrency = routeConcurrency.reserve(selectedRoute)
-                return releaseRouteConcurrency
-              },
-            })
+            try {
+              reservation = await routeAdmission.acquire({
+                parent: exec.agent,
+                signal: exec.signal,
+                route: selectedRoute,
+                canWait: pendingBackground ? false : queuedChars <= MAX_QUEUED_LAUNCH_CHARS,
+                isCapacityError: error => error instanceof RouteConcurrencyCapacityError,
+                reserveRoute: () => {
+                  releaseRouteConcurrency = routeConcurrency.reserve(selectedRoute)
+                  return releaseRouteConcurrency
+                },
+              })
+            } catch (error) {
+              // The global slot was released above, but the compensating route
+              // admission failed. Route admission emits no release notification
+              // on that path, so wake queued pending work that may now fit.
+              try { pendingScheduler?.wakeQueued?.() } catch {}
+              throw error
+            }
             coordinatedAdmission = routeAdmission
           } else {
             try { releaseRouteConcurrency = routeConcurrency.reserve(selectedRoute) } catch (error) {
@@ -4467,7 +4475,10 @@ export function apply(ctx, rawConfig) {
     ctx.effect(() => disposeNotepadWriteGuard, 'dsh-omo notepad write guard')
   }
   const specialist = specialistTools(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, activeRunOwners, activeRunCompletions, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles, routeConcurrency, promptFileExpander, taskResultRegistry, admission, agentsService, maxPendingTasks, routePreflight, presetPreflight, routeAdmission,
-    config.enablePendingBackgroundTasks ? { enqueue: (args, exec) => pendingScheduler.enqueue(args, exec) } : undefined, taskJobMonitor)
+    config.enablePendingBackgroundTasks ? {
+      enqueue: (args, exec) => pendingScheduler.enqueue(args, exec),
+      wakeQueued: () => pendingScheduler.wakeQueued(),
+    } : undefined, taskJobMonitor)
   if (pendingRegistry) {
     pendingScheduler = createPendingBackgroundScheduler({
       registry: pendingRegistry,

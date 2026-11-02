@@ -182,3 +182,76 @@ test('a route-capacity classifier prevents arbitrary reserve errors from becomin
     assert.equal(active.size, 0)
   } finally { admission.dispose() }
 })
+
+test('a throwing initial liveness probe rejects one acquire without disposing the controller', async () => {
+  const active = new Set()
+  let calls = 0
+  const admission = createRouteAdmission({
+    active, maxConcurrent: 1, maxPending: 1,
+    now: () => 0, setTimer: () => 1, clearTimer: () => {},
+    isParentLive: () => {
+      calls += 1
+      if (calls === 1) throw new Error('probe failed')
+      return true
+    },
+    describeRoute: route,
+  })
+  try {
+    await assert.rejects(
+      admission.acquire({ parent: parent('a'), route: route('a'), reserveRoute: () => () => {} }),
+      /requires a live parent agent/u,
+    )
+    const lease = await admission.acquire({ parent: parent('a'), route: route('a'), reserveRoute: () => () => {} })
+    assert.equal(active.size, 1, 'later launches must not inherit a shutdown from one throwing probe')
+    admission.release(lease)
+  } finally { admission.dispose() }
+})
+
+test('a throwing liveness probe while queued fails closed without reserving route capacity', async () => {
+  const active = new Set()
+  let live = true
+  let routeReleases = 0
+  const admission = createRouteAdmission({
+    active, maxConcurrent: 1, maxPending: 2,
+    now: () => 0, setTimer: () => 1, clearTimer: () => {},
+    isParentLive: () => {
+      if (!live) throw new Error('probe failed')
+      return true
+    },
+    describeRoute: route,
+  })
+  try {
+    const held = await admission.acquire({ parent: parent('held'), route: route('held'), reserveRoute: () => () => { routeReleases += 1 } })
+    const waiter = admission.acquire({ parent: parent('waiter'), route: route('waiter'), reserveRoute: () => () => { routeReleases += 1 } })
+    await tick()
+    live = false
+    admission.release(held)
+    await assert.rejects(waiter, /requires a live parent agent/u)
+    assert.equal(active.size, 0, 'the failed waiter must not retain a lease')
+    assert.equal(routeReleases, 0, 'route capacity must not be reserved for an unverifiable parent')
+  } finally { admission.dispose() }
+})
+
+test('liveness failure after route reservation releases that capacity before rejecting', async () => {
+  const active = new Set()
+  let calls = 0
+  let routeReleases = 0
+  const admission = createRouteAdmission({
+    active, maxConcurrent: 1, maxPending: 1,
+    now: () => 0, setTimer: () => 1, clearTimer: () => {},
+    isParentLive: () => {
+      calls += 1
+      if (calls >= 3) throw new Error('probe failed')
+      return true
+    },
+    describeRoute: route,
+  })
+  try {
+    await assert.rejects(
+      admission.acquire({ parent: parent('a'), route: route('a'), reserveRoute: () => () => { routeReleases += 1 } }),
+      /requires a live parent agent/u,
+    )
+    assert.equal(routeReleases, 1, 'the already-reserved route capacity must be released')
+    assert.equal(active.size, 0)
+  } finally { admission.dispose() }
+})

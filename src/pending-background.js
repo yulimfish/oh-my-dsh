@@ -47,6 +47,17 @@ export function createPendingBackgroundScheduler({
     schedule()
   }
 
+  // Wake only queued work after a capacity release that could not be consumed by
+  // the releasing launch (for example a freed global slot whose compensating
+  // route admission failed). Unlike notify(), this does not advance the capacity
+  // generation, so an attempt that is currently starting still parks itself and
+  // cannot spin against the same saturation.
+  function wakeQueued() {
+    if (disposed) return
+    for (const entry of entries.values()) if (entry.phase === 'queued') entry.blocked = false
+    schedule()
+  }
+
   function settleEntry(entry, status) {
     if (entries.get(entry.taskId) !== entry) return undefined
     entries.delete(entry.taskId)
@@ -89,6 +100,15 @@ export function createPendingBackgroundScheduler({
     try { return Promise.resolve(run.dispose()).catch(() => {}) } catch { return Promise.resolve() }
   }
 
+  // Hand a published run to its single disposer. Clearing the slot here keeps
+  // cancel/expiry/clearAgent and the later late-activation cleanup in bind()
+  // from disposing the same run twice.
+  function takeRun(entry) {
+    const run = entry.run
+    entry.run = undefined
+    return run
+  }
+
   async function bind(entry, launched) {
     const childId = launched?.childId
     if (!launched || launched.status !== 'started' || typeof childId !== 'string' || childId.length === 0) {
@@ -103,7 +123,8 @@ export function createPendingBackgroundScheduler({
         entry.controller.abort()
         try { registry.cancel(entry.parent, entry.taskId) } catch {}
       }
-      if (entry.run) await disposeRun(entry.run)
+      const staleRun = takeRun(entry)
+      if (staleRun) await disposeRun(staleRun)
       return
     }
     if (!entry.run) throw new Error('Pending task child handle was not published by the admitted launcher.')
@@ -138,8 +159,8 @@ export function createPendingBackgroundScheduler({
         pendingTaskId: entry.taskId,
         pendingOutcome: outcome => recordOutcome(entry, outcome),
         onPendingRun: run => {
+          if (!current(entry)) { void disposeRun(run); return }
           entry.run = run
-          if (!current(entry)) void disposeRun(run)
         },
       })
       await bind(entry, launched)
@@ -153,13 +174,16 @@ export function createPendingBackgroundScheduler({
       if (capacityStillPending) {
         entry.phase = 'queued'
         // A saturated route must not head-of-line block unrelated pending work.
-        // Retry this entry only after a later capacity notification.
+        // Retry this entry only after a later capacity notification, and never
+        // carry an outcome from the abandoned attempt into the next child.
+        entry.earlyOutcome = undefined
         entry.blocked = notificationGeneration === attemptGeneration
         return
       }
       fail(entry, error)
       entry.controller.abort()
-      if (entry.run) await disposeRun(entry.run)
+      const failedRun = takeRun(entry)
+      if (failedRun) await disposeRun(failedRun)
     }
   }
 
@@ -228,7 +252,8 @@ export function createPendingBackgroundScheduler({
     entries.delete(taskId)
     entry.controller.abort()
     const cancelled = registry.cancel(parent, taskId)
-    if (entry.run) void disposeRun(entry.run)
+    const cancelledRun = takeRun(entry)
+    if (cancelledRun) void disposeRun(cancelledRun)
     schedule()
     return cancelled
   }
@@ -241,7 +266,8 @@ export function createPendingBackgroundScheduler({
     const notifyExpired = snapshot.status === 'expired' && currentParent(entry)
     entries.delete(entry.taskId)
     entry.controller.abort()
-    if (entry.run) void disposeRun(entry.run)
+    const expiredRun = takeRun(entry)
+    if (expiredRun) void disposeRun(expiredRun)
     if (notifyExpired) {
       try { notifyExpiry?.(entry, { startupInProgress }) } catch {}
     }
@@ -254,7 +280,8 @@ export function createPendingBackgroundScheduler({
       if (entry.parent !== parent) continue
       entries.delete(entry.taskId)
       entry.controller.abort()
-      if (entry.run) detached.push(entry.run)
+      const run = takeRun(entry)
+      if (run) detached.push(run)
     }
     return detached
   }
@@ -280,5 +307,5 @@ export function createPendingBackgroundScheduler({
     return true
   }
 
-  return Object.freeze({ enqueue, cancel, clearAgent, dispose, notify, settle, onRegistryChange })
+  return Object.freeze({ enqueue, cancel, clearAgent, dispose, notify, wakeQueued, settle, onRegistryChange })
 }

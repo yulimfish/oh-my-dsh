@@ -573,6 +573,8 @@ export function createWriteExistingFileGuard(agents, sessions, fs, workingDirect
     }
     const lease = createPreflightLease(releaseSlot)
 
+    let pendingRecord
+    let dispatching = false
     try {
       const target = await inspectTarget(fs, filePath, context.cwd, scope.signal, lease)
       if (scope.signal.aborted) {
@@ -585,6 +587,8 @@ export function createWriteExistingFileGuard(agents, sessions, fs, workingDirect
           overwriteBypass: false, passKind: target.kind,
         }
         if (!setPending(exec, token, record)) return denyWrite(exec, token, BUSY_REASON, context.id)
+        pendingRecord = record
+        dispatching = true
         return typeof next === 'function' ? next() : { kind: 'allow' }
       }
       if (target.kind === 'unsafe') return denyWrite(exec, token, UNSAFE_TARGET_REASON, context.id)
@@ -594,11 +598,25 @@ export function createWriteExistingFileGuard(agents, sessions, fs, workingDirect
       const state = getState(context.id)
       const grant = state?.grants.get(target.key)
       if (!grant || grant.reservedBy) return denyWrite(exec, token, FILE_ALREADY_EXISTS_REASON, context.id)
-      const record = { kind: 'write', agentId: context.id, agent: context.agent, cwd: context.cwd, filePath, targetKey: target.key, consumed: false }
+      const record = { kind: 'write', agentId: context.id, agent: context.agent, cwd: context.cwd, filePath, targetKey: target.key, consumed: false, approved: false }
       if (!setPending(exec, token, record)) return denyWrite(exec, token, BUSY_REASON, context.id)
       grant.reservedBy = token
+      pendingRecord = record
+      dispatching = true
       return typeof next === 'function' ? next() : { kind: 'allow' }
-    } catch {
+    } catch (error) {
+      if (dispatching) {
+        // A downstream pre-execute listener failed after this guard recorded its
+        // decision. Roll the reservation back and let the runtime materialize the
+        // downstream error: converting it into a guard denial would strand the
+        // pending record and the grant while hiding the real failure.
+        if (pendingRecord && pendingByToken.get(token) === pendingRecord) pendingByToken.delete(token)
+        if (pendingRecord?.kind === 'write') {
+          const grant = getState(pendingRecord.agentId)?.grants.get(pendingRecord.targetKey)
+          if (grant?.reservedBy === token) grant.reservedBy = undefined
+        }
+        throw error
+      }
       if (ownDataValue(exec, 'signal')?.aborted || disposed) return { kind: 'cancel' }
       return denyWrite(exec, token, UNVERIFIED_TARGET_REASON, context.id)
     } finally {
@@ -630,8 +648,10 @@ export function createWriteExistingFileGuard(agents, sessions, fs, workingDirect
 
     const filePath = getExecPath(exec)
     if (!filePathSchemaMatches(exec) || filePath !== record.filePath
-      || getExecAgentId(exec) !== record.agentId || !sameAgentContext(agents, record)
-      || !sameCwd(sessions.get(record.agentId), workingDirectory, record.cwd, filePath)) return UNVERIFIED_TARGET_REASON
+      || getExecAgentId(exec) !== record.agentId || !sameAgentContext(agents, record)) return UNVERIFIED_TARGET_REASON
+    let session
+    try { session = sessions.get(record.agentId) } catch { return UNVERIFIED_TARGET_REASON }
+    if (!sameCwd(session, workingDirectory, record.cwd, filePath)) return UNVERIFIED_TARGET_REASON
 
     if (record.kind === 'bypass') {
       const stillBypassed = record.bypassKind === 'omo'
@@ -649,9 +669,10 @@ export function createWriteExistingFileGuard(agents, sessions, fs, workingDirect
     const state = states.get(record.agentId)
     const grant = state?.grants.get(record.targetKey)
     if (!grant || grant.reservedBy !== token) return UNVERIFIED_TARGET_REASON
-    state.grants.delete(record.targetKey)
-    grant.reservedBy = undefined
-    record.consumed = true
+    // Approve exactly one dispatch without consuming the grant: a later global
+    // guard or a caller abort can still deny the call before it runs, and only a
+    // successful final result proves the overwrite actually happened.
+    record.approved = true
     return undefined
   }
 
@@ -673,8 +694,17 @@ export function createWriteExistingFileGuard(agents, sessions, fs, workingDirect
         && sameCwd(sessions.get(record.agentId), workingDirectory, record.cwd, record.filePath)) {
         addGrant(record.agentId, record.agent, record.targetKey)
       } else if (record.kind === 'write' && !record.consumed) {
-        const grant = states.get(record.agentId)?.grants.get(record.targetKey)
-        if (grant?.reservedBy === recordToken) grant.reservedBy = undefined
+        const state = states.get(record.agentId)
+        const grant = state?.grants.get(record.targetKey)
+        if (grant?.reservedBy === recordToken) {
+          // Only a successful final result consumes the one-use grant; a denied,
+          // aborted, failed, or never-dispatched write keeps it for a retry.
+          if (record.approved && result?.isError === false) {
+            state.grants.delete(record.targetKey)
+            record.consumed = true
+          }
+          grant.reservedBy = undefined
+        }
       }
     }
     if (isObject(exec)) decisionByExecution.delete(exec)

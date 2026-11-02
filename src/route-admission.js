@@ -69,10 +69,13 @@ export function createRouteAdmission({
         if (entry.signal?.aborted) { finish(entry, abortError()); continue }
         if (entry.waiting && now() >= entry.deadline) { finish(entry, timeoutError()); continue }
         if (!available(entry)) { armWaiting(entry); continue }
-        let live = true
         if (entry.done || disposed) continue
         if (entry.signal?.aborted) { finish(entry, abortError()); continue }
         if (entry.waiting && now() >= entry.deadline) { finish(entry, timeoutError()); continue }
+        // Check liveness before consuming route capacity, and fail closed when the
+        // caller-supplied predicate throws: the reservation belongs to this entry.
+        let live = false
+        try { live = isParentLive(entry.parent) === true } catch { live = false }
         if (!live) { finish(entry, parentError()); continue }
         if (!available(entry)) continue
         const token = Symbol('dsh-omo combined worker reservation')
@@ -91,8 +94,10 @@ export function createRouteAdmission({
           if (entry.signal?.aborted) finish(entry, abortError())
           continue
         }
-        let stillLive = true
-        try { stillLive = isParentLive(entry.parent) === true } catch {}
+        // Re-check after the route reservation: a predicate failure must release
+        // that capacity instead of admitting a parent whose liveness is unknown.
+        let stillLive = false
+        try { stillLive = isParentLive(entry.parent) === true } catch { stillLive = false }
         if (entry.done || disposed || entry.signal?.aborted || (entry.waiting && now() >= entry.deadline)
           || !available(entry) || !stillLive) {
           try { routeRelease?.() } catch {}
@@ -139,8 +144,15 @@ export function createRouteAdmission({
     if (isCapacityError !== undefined && typeof isCapacityError !== 'function') {
       return Promise.reject(new TypeError('isCapacityError must be a function when provided.'))
     }
-    let initialLive = false
-    try { initialLive = schedule(() => isParentLive(parent)) === true } catch { return Promise.reject(parentError()) }
+    let initialLive
+    try {
+      // Keep a throwing caller predicate local to this call: the schedule helper
+      // disposes the controller on any escaped callback failure, which would turn
+      // one bad probe into permanent shutdown for every later launch.
+      initialLive = schedule(() => {
+        try { return isParentLive(parent) === true } catch { return false }
+      }) === true
+    } catch { return Promise.reject(parentError()) }
     if (!initialLive) return Promise.reject(disposed ? shutdownError() : parentError())
     const description = describeRoute(route)
     const bucket = description?.bucket ?? 'unrestricted'
