@@ -650,3 +650,50 @@ test('real SessionStore and systemPrompt recover accepted progress in the matchi
   await featureFiber.dispose()
   assert.deepEqual((await assemblyFor(agent)).contexts.filter(entry => entry.name === CONTEXT_NAME), [])
 })
+
+test('ordinary Tool traffic does not consume the correlation tombstone budget', () => {
+  const events = [
+    todoEvent(1, 'current', [{ content: 'plan survives traffic', status: 'in_progress' }]),
+    resultEvent(2, 'current'),
+  ]
+  const projection = createProgressProjection(sessionWith(events))
+  try {
+    assert.match(projection.render(), /plan survives traffic/u)
+    for (let index = 0; index < 320; index += 1) {
+      events.push({ seq: events.length + 1, type: 'tool/call', data: { callId: `read-${index}`, name: 'read', arguments: '{"file_path":"README.md"}' } })
+      events.push(resultEvent(events.length + 1, `read-${index}`))
+      if (index % 20 === 19) projection.render()
+    }
+    assert.match(projection.render(), /plan survives traffic/u, 'ordinary read traffic must not blank the plan')
+    events.push(todoEvent(events.length + 1, 'next', [{ content: 'new plan after traffic', status: 'in_progress' }]))
+    events.push(resultEvent(events.length + 1, 'next'))
+    assert.match(projection.render(), /new plan after traffic/u)
+  } finally { /* projection owns no external resources */ }
+})
+
+test('recovers progress context after genuine correlation saturation', () => {
+  const events = []
+  for (let index = 0; index < 256; index += 1) {
+    const id = `completed-${index}`
+    events.push(todoEvent(events.length + 1, id, [{ content: `plan ${index}`, status: 'in_progress' }]))
+    events.push(resultEvent(events.length + 1, id))
+  }
+  const projection = createProgressProjection(sessionWith(events))
+  assert.match(projection.render(), /plan 255/u)
+
+  for (let index = 0; index < 64; index += 1) {
+    const id = `ambiguous-${index}`
+    events.push(todoEvent(events.length + 1, id, [{ content: 'ambiguous', status: 'pending' }]))
+    events.push(todoEvent(events.length + 1, id, [{ content: 'duplicate', status: 'pending' }]))
+  }
+  assert.match(projection.render(), /plan 255/u, 'the tombstone budget is exactly full but not yet saturated')
+
+  events.push(todoEvent(events.length + 1, 'ambiguous-overflow', [{ content: 'ambiguous', status: 'pending' }]))
+  events.push(todoEvent(events.length + 1, 'ambiguous-overflow', [{ content: 'duplicate', status: 'pending' }]))
+  assert.equal(projection.render(), '', 'the saturated fold stays fail-closed for that render')
+  assert.equal(projection.render(), '', 'saturation does not leak the previous plan')
+
+  events.push(todoEvent(events.length + 1, 'recovered', [{ content: 'recovered plan', status: 'in_progress' }]))
+  events.push(resultEvent(events.length + 1, 'recovered'))
+  assert.match(projection.render(), /recovered plan/u, 'a later successful todo_write restores progress context')
+})

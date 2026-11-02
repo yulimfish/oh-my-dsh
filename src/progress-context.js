@@ -130,8 +130,13 @@ export function createProgressProjection(session) {
           }
           if (event.data.name !== 'todo_write') {
             state.otherCallIds.add(callId)
+            // Non-todo IDs never become plans and their results are ignored
+            // without a pending entry, so a plain bounded cache eviction is
+            // enough; charging ordinary read/grep/bash traffic to the shared
+            // correlation-tombstone budget would blank progress context in long
+            // sessions for unrelated reasons.
             while (state.otherCallIds.size > MAX_PENDING_TODO_CALLS) {
-              evictIdentity(state, state.otherCallIds, state.otherCallIds.keys().next().value)
+              state.otherCallIds.delete(state.otherCallIds.keys().next().value)
             }
             continue
           }
@@ -182,12 +187,9 @@ export function createProgressProjection(session) {
       }
       state.offset = session.seq
       if (state.correlationSaturated) {
-        state.current = undefined
-        state.currentCallId = undefined
-        state.pending.clear()
-        state.otherCallIds.clear()
-        state.completedCallIds.clear()
-        state.ambiguousCallIds.clear()
+        // One fail-closed render, then restart at this cursor so the next fold
+        // (for example a fresh todo_write) can produce a list again.
+        state = freshProjection(session, state.offset)
         return ''
       }
     } catch {
