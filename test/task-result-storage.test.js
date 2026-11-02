@@ -673,7 +673,7 @@ test('a stalled storage-domain open bounds each call instead of hanging it', asy
   const writing = store.put(record)
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(errors.length, 0, 'no error is reported before the readiness deadline')
-  timers.advance(15_000)
+  timers.advance(4_000)
   assert.equal(await writing, false, 'a stalled open must not hang the write')
   assert.equal(errors.length, 1)
   assert.match(String(errors[0].message), /readiness timed out/u)

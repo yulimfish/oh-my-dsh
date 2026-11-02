@@ -9,7 +9,10 @@ export const TASK_RESULT_STORAGE_MAX_PENDING_OPERATIONS = 64
 const MAX_STORAGE_SCAN_ROWS = TASK_RESULT_STORAGE_MAX_ROWS * 2
 const TASK_RESULT_OUTPUT_MAX_BYTES = TASK_RESULT_MAX_CHARS * 3
 const STORAGE_DRAIN_TIMEOUT_MS = 1_000
-const STORAGE_READY_TIMEOUT_MS = 15_000
+// Below every task-result Tool deadline (5s persistent result/list, 35s wait),
+// so a stalled open degrades to the documented fallback instead of the Host
+// aborting the call first.
+const STORAGE_READY_TIMEOUT_MS = 4_000
 const TASK_RESULT_STATUS = Object.freeze(['completed', 'incomplete', 'failed'])
 
 const StoredTaskResultSchema = z.object({
