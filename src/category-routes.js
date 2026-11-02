@@ -330,9 +330,11 @@ function normalizeRolePin(roleRoute) {
  * defines its own explicit fallback chain. Category promptAppend and skill
  * defaults are carried separately from role promptAppend and filters. A role
  * with only a nonempty explicit fallback chain may resolve without a category;
- * combining that form with any explicit/default category fails closed.
+ * combining that form with any explicit/default category fails closed. When
+ * that fallback chain is not already normalized, optional normalized route
+ * aliases and a model catalog are applied before duplicate validation.
  */
-export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute) {
+export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute, roleCategoryRouteAliases, modelCatalog) {
   if (roleRoute !== undefined && !isRecord(roleRoute)) {
     throw new TypeError('roleRoute must be an object when provided')
   }
@@ -342,7 +344,7 @@ export function resolveCategoryRoute(categoryRoutes, explicitCategory, roleRoute
     }
     const fallbackModels = NORMALIZED_FALLBACK_MODELS.has(roleRoute.fallbackModels)
       ? roleRoute.fallbackModels
-      : normalizeExplicitFallbackModels(roleRoute.fallbackModels, 'role route fallbackModels', undefined)
+      : normalizeExplicitFallbackModels(roleRoute.fallbackModels, 'role route fallbackModels', undefined, roleCategoryRouteAliases, modelCatalog)
     if (!fallbackModels?.length) {
       throw new TypeError('fallback-only role routes require a nonempty fallbackModels chain')
     }

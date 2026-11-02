@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { normalizeCategoryRoutes, normalizeExplicitFallbackModels, resolveCategoryRoute } from '../src/category-routes.js'
+import { normalizeModelCatalog } from '../src/model-catalog.js'
 import { normalizeRoleCategoryRouteAliases } from '../src/role-category-route-aliases.js'
 
 const routes = () => normalizeCategoryRoutes([
@@ -502,4 +503,26 @@ test('applies role/category route aliases before route selection and fallback va
     model: 'primary-v1',
     fallbackModels: [{ provider: 'current', model: 'primary-v2' }],
   }], aliases), /duplicate provider\/model candidates/u)
+})
+
+test('fallback-only role resolution expands catalog and exact-pair aliases', () => {
+  const aliases = normalizeRoleCategoryRouteAliases(true, [
+    { from: { provider: 'alias', model: 'model' }, to: { provider: 'actual', model: 'target' }, reasoningEffort: 'low' },
+  ])
+  const catalog = normalizeModelCatalog({
+    backup: { model: 'alias/model', reasoning: 'medium' },
+  })
+  const resolved = resolveCategoryRoute(routes(), undefined, {
+    role: 'explore', fallbackModels: [{ model: 'backup' }],
+  }, aliases, catalog)
+  assert.equal(resolved.fallbackModels[0].provider, 'actual')
+  assert.equal(resolved.fallbackModels[0].model, 'target')
+  assert.equal(resolved.fallbackModels[0].routeAlias.reasoningEffort, 'low')
+  assert.equal(Object.isFrozen(resolved.fallbackModels), true)
+  assert.throws(() => resolveCategoryRoute(routes(), undefined, {
+    role: 'explore', fallbackModels: [{ model: 'backup' }, { provider: 'actual', model: 'target' }],
+  }, aliases, catalog), /duplicate/u)
+  assert.throws(() => resolveCategoryRoute(routes(), undefined, {
+    role: 'explore', fallbackModels: [{ model: 'unknown' }],
+  }, aliases, catalog), /must set both provider and model/u)
 })

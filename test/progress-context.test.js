@@ -651,27 +651,40 @@ test('real SessionStore and systemPrompt recover accepted progress in the matchi
   assert.deepEqual((await assemblyFor(agent)).contexts.filter(entry => entry.name === CONTEXT_NAME), [])
 })
 
-test('ordinary Tool traffic does not consume the correlation tombstone budget', () => {
+test('ordinary Tool traffic may saturate tombstones and keeps correlation fail-closed', () => {
   const events = [
-    todoEvent(1, 'current', [{ content: 'plan survives traffic', status: 'in_progress' }]),
+    todoEvent(1, 'current', [{ content: 'plan before saturation', status: 'in_progress' }]),
     resultEvent(2, 'current'),
   ]
   const projection = createProgressProjection(sessionWith(events))
-  try {
-    assert.match(projection.render(), /plan survives traffic/u)
-    for (let index = 0; index < 320; index += 1) {
-      events.push({ seq: events.length + 1, type: 'tool/call', data: { callId: `read-${index}`, name: 'read', arguments: '{"file_path":"README.md"}' } })
-      events.push(resultEvent(events.length + 1, `read-${index}`))
-      if (index % 20 === 19) projection.render()
-    }
-    assert.match(projection.render(), /plan survives traffic/u, 'ordinary read traffic must not blank the plan')
-    events.push(todoEvent(events.length + 1, 'next', [{ content: 'new plan after traffic', status: 'in_progress' }]))
-    events.push(resultEvent(events.length + 1, 'next'))
-    assert.match(projection.render(), /new plan after traffic/u)
-  } finally { /* projection owns no external resources */ }
+  assert.match(projection.render(), /plan before saturation/u)
+  let saturated = false
+  for (let index = 0; index < 320; index += 1) {
+    events.push({ seq: events.length + 1, type: 'tool/call', data: { callId: `read-${index}`, name: 'read', arguments: '{"file_path":"README.md"}' } })
+    events.push(resultEvent(events.length + 1, `read-${index}`))
+    if (index % 20 === 19 && projection.render() === '') saturated = true
+  }
+  assert.equal(saturated, true, 'bounded tombstones fail closed rather than forgetting live call IDs')
+  events.push(todoEvent(events.length + 1, 'next', [{ content: 'new plan after traffic', status: 'in_progress' }]))
+  events.push(resultEvent(events.length + 1, 'next'))
+  assert.equal(projection.render(), '', 'a saturated window cannot safely correlate later results')
 })
 
-test('recovers progress context after genuine correlation saturation', () => {
+test('quarantines a non-todo call ID reused after unrelated traffic evicts it', () => {
+  const events = [{ seq: 1, type: 'tool/call', data: { callId: 'reused-read', name: 'read', arguments: '{}' } }]
+  for (let index = 0; index < 32; index += 1) {
+    events.push({ seq: events.length + 1, type: 'tool/call', data: { callId: `other-${index}`, name: 'read', arguments: '{}' } })
+  }
+  events.push(todoEvent(events.length + 1, 'reused-read', [{ content: 'must not attribute read result', status: 'pending' }]))
+  events.push(resultEvent(events.length + 1, 'reused-read'))
+  const projection = createProgressProjection(sessionWith(events))
+  assert.equal(projection.render(), '')
+  events.push(todoEvent(events.length + 1, 'fresh', [{ content: 'independent task', status: 'in_progress' }]))
+  events.push(resultEvent(events.length + 1, 'fresh'))
+  assert.match(projection.render(), /independent task/u, 'a distinct call still produces progress below saturation')
+})
+
+test('stays fail-closed after saturation until a bounded-window rebuild', () => {
   const events = []
   for (let index = 0; index < 256; index += 1) {
     const id = `completed-${index}`
@@ -693,7 +706,14 @@ test('recovers progress context after genuine correlation saturation', () => {
   assert.equal(projection.render(), '', 'the saturated fold stays fail-closed for that render')
   assert.equal(projection.render(), '', 'saturation does not leak the previous plan')
 
+  events.push(todoEvent(events.length + 1, 'still-saturated', [{ content: 'must not be published', status: 'in_progress' }]))
+  events.push(resultEvent(events.length + 1, 'still-saturated'))
+  assert.equal(projection.render(), '', 'a new todo alone must not bypass the correlation fence')
+
+  for (let index = 0; index < 513; index += 1) {
+    events.push({ seq: events.length + 1, type: 'step/end', data: {} })
+  }
   events.push(todoEvent(events.length + 1, 'recovered', [{ content: 'recovered plan', status: 'in_progress' }]))
   events.push(resultEvent(events.length + 1, 'recovered'))
-  assert.match(projection.render(), /recovered plan/u, 'a later successful todo_write restores progress context')
+  assert.match(projection.render(), /recovered plan/u, 'a bounded-window rebuild starts a new correlation window')
 })
