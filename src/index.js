@@ -603,6 +603,7 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
         throw new Error(`dsh-omo: role route contains unsupported field "${String(key)}"`)
       }
     }
+    const hadExplicitReasoning = Object.hasOwn(rawEntry, 'reasoningEffort') && rawEntry.reasoningEffort !== undefined
     const entry = resolveModelCatalogReference(modelCatalog, rawEntry, 'role route')
     if (!roleNames.includes(entry.role)) {
       throw new Error(`dsh-omo: unknown role route "${entry.role}"`)
@@ -688,8 +689,13 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     if (entry.temperature !== undefined && (typeof entry.temperature !== 'number' || !Number.isFinite(entry.temperature) || entry.temperature < 0 || entry.temperature > 2)) {
       throw new Error(`dsh-omo: role route "${entry.role}" temperature must be a finite number from 0 to 2`)
     }
-    const reasoningEffort = typeof entry.reasoningEffort === 'string' ? entry.reasoningEffort.trim() : ''
-    if (entry.reasoningEffort !== undefined && (typeof entry.reasoningEffort !== 'string' || entry.reasoningEffort.length > 64 || !reasoningEffort || /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u.test(reasoningEffort))) {
+    // Catalog reasoning describes the pre-remap pair; an alias's own reasoning
+    // default is the target-pair default, so catalog value yields to it.
+    const effectiveReasoningEffort = routeAlias !== undefined && !hadExplicitReasoning
+      ? undefined
+      : entry.reasoningEffort
+    const reasoningEffort = typeof effectiveReasoningEffort === 'string' ? effectiveReasoningEffort.trim() : ''
+    if (effectiveReasoningEffort !== undefined && (typeof effectiveReasoningEffort !== 'string' || effectiveReasoningEffort.length > 64 || !reasoningEffort || /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u.test(reasoningEffort))) {
       throw new Error(`dsh-omo: role route "${entry.role}" reasoningEffort must be a non-empty string of at most 64 characters without control characters`)
     }
     if (Object.hasOwn(entry, 'fallback_models')) {
@@ -723,6 +729,7 @@ function normalizeRoleRoutes(routes, categoryRoutes, disabledOmoRoles, roleNames
     delete routeEntry.fallbackModels
     delete routeEntry.max_tokens
     delete routeEntry.routeAlias
+    delete routeEntry.reasoningEffort
     result.set(entry.role, Object.freeze({
       ...routeEntry,
       ...(category !== undefined ? { category } : {}),

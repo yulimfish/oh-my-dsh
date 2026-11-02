@@ -238,3 +238,43 @@ test('catalog fallback cancellation cannot admit a late successful preflight spa
   await tick()
   assert.equal(fixture.starts.length, 0)
 })
+
+test('a route-alias reasoning default outranks catalog reasoning for the pre-remap pair', async () => {
+  const fixture = nativeContext()
+  const tool = mount(fixture, {
+    enableRoleCategoryRouteAliases: true,
+    roleCategoryRouteAliases: [{ from: backup, to: primary, reasoningEffort: 'low' }],
+    roleRoutes: [{ role: 'explore', model: 'backup' }],
+  })
+  await execute(fixture, tool)
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { ...primary, reasoningEffort: 'low' })
+})
+
+test('a category route-alias reasoning default outranks catalog reasoning for the pre-remap pair', async () => {
+  const fixture = nativeContext()
+  const tool = mount(fixture, {
+    enableRoleCategoryRouteAliases: true,
+    roleCategoryRouteAliases: [{ from: backup, to: primary, reasoningEffort: 'low' }],
+    categoryRoutes: [{ name: 'research', model: 'backup' }],
+  })
+  await execute(fixture, tool, { category: 'research' })
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { ...primary, reasoningEffort: 'low' })
+})
+
+test('explicit use-site reasoning still outranks a route-alias default for a catalog reference', async () => {
+  const fixture = nativeContext()
+  const tool = mount(fixture, {
+    enableRoleCategoryRouteAliases: true,
+    roleCategoryRouteAliases: [{ from: backup, to: primary, reasoningEffort: 'low' }],
+    roleRoutes: [{ role: 'explore', model: 'backup', reasoningEffort: 'medium' }],
+  })
+  await execute(fixture, tool)
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { ...primary, reasoningEffort: 'medium' })
+})
+
+test('catalog reasoning still fills an un-aliased catalog reference', async () => {
+  const fixture = nativeContext()
+  const tool = mount(fixture, { roleRoutes: [{ role: 'explore', model: 'backup' }] })
+  await execute(fixture, tool)
+  assert.deepEqual(fixture.starts[0].request.agentOptions, { ...backup, reasoningEffort: 'high' })
+})

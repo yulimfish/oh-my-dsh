@@ -238,6 +238,7 @@ export function normalizeCategoryRoutes(entries, roleCategoryRouteAliases, model
       }
     }
 
+    const hadExplicitReasoning = Object.hasOwn(rawEntry, 'reasoningEffort') && rawEntry.reasoningEffort !== undefined
     const entry = resolveModelCatalogReference(modelCatalog, rawEntry, `categoryRoutes[${index}]`)
     if (!Object.hasOwn(entry, 'name')) throw new TypeError(`categoryRoutes[${index}].name is required`)
     const name = normalizeCategoryName(entry.name, `categoryRoutes[${index}].name`)
@@ -257,7 +258,12 @@ export function normalizeCategoryRoutes(entries, roleCategoryRouteAliases, model
     const routeAlias = resolveRoleCategoryRouteAlias(roleCategoryRouteAliases, sourceProvider, sourceModel)
     const provider = routeAlias?.to.provider ?? sourceProvider
     const model = routeAlias?.to.model ?? sourceModel
-    const rawReasoningEffort = Object.hasOwn(entry, 'reasoningEffort') ? entry.reasoningEffort : undefined
+    // Catalog reasoning describes the pre-remap pair. When a route alias remaps
+    // it, the alias's own reasoningEffort is the target-pair default; only an
+    // explicit use-site value or an un-aliased route may supply one.
+    const rawReasoningEffort = routeAlias !== undefined && !hadExplicitReasoning
+      ? undefined
+      : Object.hasOwn(entry, 'reasoningEffort') ? entry.reasoningEffort : undefined
     const reasoningEffort = rawReasoningEffort === undefined
       ? undefined
       : normalizeString(rawReasoningEffort, `category route "${name}" reasoningEffort`, MAX_REASONING_EFFORT_CHARS)
