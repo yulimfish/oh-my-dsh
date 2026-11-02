@@ -9,6 +9,7 @@ export const TASK_RESULT_STORAGE_MAX_PENDING_OPERATIONS = 64
 const MAX_STORAGE_SCAN_ROWS = TASK_RESULT_STORAGE_MAX_ROWS * 2
 const TASK_RESULT_OUTPUT_MAX_BYTES = TASK_RESULT_MAX_CHARS * 3
 const STORAGE_DRAIN_TIMEOUT_MS = 1_000
+const STORAGE_READY_TIMEOUT_MS = 15_000
 const TASK_RESULT_STATUS = Object.freeze(['completed', 'incomplete', 'failed'])
 
 const StoredTaskResultSchema = z.object({
@@ -80,13 +81,19 @@ export async function openTaskResultStorageDomain(storageDomain) {
  * It never records active work, caps its own KV table at 256 rows, and admits
  * at most 64 queued/in-flight operations; saturation preserves local results.
  */
-export function createTaskResultStorage({ storageDomain, now = Date.now, onStorageError } = {}) {
+export function createTaskResultStorage({
+  storageDomain, now = Date.now, onStorageError,
+  setTimer = globalThis.setTimeout, clearTimer = globalThis.clearTimeout,
+} = {}) {
   if (!storageDomain || typeof storageDomain.open !== 'function') {
     throw new TypeError('Persistent task-result storage requires storageDomain.open.')
   }
   if (typeof now !== 'function') throw new TypeError('Persistent task-result storage requires a clock.')
   if (onStorageError !== undefined && typeof onStorageError !== 'function') {
     throw new TypeError('Persistent task-result storage requires a storage error callback when provided.')
+  }
+  if (typeof setTimer !== 'function' || typeof clearTimer !== 'function') {
+    throw new TypeError('Persistent task-result storage requires timer functions.')
   }
 
   const state = { status: 'unopened', domain: undefined, closePromise: undefined, disposed: false, abandonPending: false }
@@ -95,6 +102,7 @@ export function createTaskResultStorage({ storageDomain, now = Date.now, onStora
   let capacityWarned = false
   let opening
   let disposePromise
+  let readinessTimedOut = false
 
   function abandoning() {
     return state.disposed && state.abandonPending
@@ -127,7 +135,41 @@ export function createTaskResultStorage({ storageDomain, now = Date.now, onStora
     return opening
   }
 
-  function enqueue(operation) {
+  // A Host storageDomain.open may never settle. Bound the readiness wait so a
+  // stalled backend degrades to an unavailable store instead of hanging every
+  // storage-backed Tool call; the underlying open promise is kept for a later
+  // settlement, and later calls skip immediately once this wait times out.
+  function waitForReady(openingPromise) {
+    if (state.status === 'opened') return openingPromise
+    if (readinessTimedOut) return Promise.resolve(undefined)
+    return new Promise(resolve => {
+      let settled = false
+      let timer
+      const finish = value => {
+        if (settled) return
+        settled = true
+        if (timer !== undefined) clearTimer(timer)
+        resolve(value)
+      }
+      timer = setTimer(() => {
+        if (!readinessTimedOut) {
+          readinessTimedOut = true
+          report(onStorageError, new Error('task-result storage readiness timed out'))
+        }
+        finish(undefined)
+      }, STORAGE_READY_TIMEOUT_MS)
+      timer?.unref?.()
+      openingPromise.then(table => {
+        readinessTimedOut = false
+        finish(table)
+      }, () => {
+        readinessTimedOut = false
+        finish(undefined)
+      })
+    })
+  }
+
+  function enqueue(operation, fallback) {
     if (state.disposed) return Promise.resolve(undefined)
     if (pendingOperations >= TASK_RESULT_STORAGE_MAX_PENDING_OPERATIONS) {
       if (!capacityWarned) {
@@ -143,8 +185,9 @@ export function createTaskResultStorage({ storageDomain, now = Date.now, onStora
     }
     const openingAtEnqueue = ensureOpen()
     const next = queue.then(async () => {
-      const table = await openingAtEnqueue
-      if (!table || (state.disposed && state.abandonPending)) return undefined
+      const table = await waitForReady(openingAtEnqueue)
+      if (state.disposed && state.abandonPending) return undefined
+      if (!table) return fallback
       return operation(table)
     })
     queue = next.then(() => {
@@ -213,7 +256,7 @@ export function createTaskResultStorage({ storageDomain, now = Date.now, onStora
   return {
     ready() {
       if (state.disposed) return Promise.resolve(false)
-      return ensureOpen().then(table => Boolean(table))
+      return waitForReady(ensureOpen()).then(table => Boolean(table))
     },
     put(record) {
       const value = normalizeForWrite(record)
@@ -254,11 +297,11 @@ export function createTaskResultStorage({ storageDomain, now = Date.now, onStora
           report(onStorageError, error)
         }
         return true
-      })
+      }, false)
     },
     delete(parentId, childId) {
       if (typeof parentId !== 'string' || typeof childId !== 'string') return Promise.resolve(false)
-      return enqueue(table => table.delete(storageKey(parentId, childId)))
+      return enqueue(table => table.delete(storageKey(parentId, childId)), false)
     },
     read(parentId, childId) {
       if (typeof parentId !== 'string' || typeof childId !== 'string') return Promise.resolve(undefined)
@@ -273,7 +316,7 @@ export function createTaskResultStorage({ storageDomain, now = Date.now, onStora
           return undefined
         }
         return record
-      })
+      }, undefined)
     },
     list(parentId) {
       if (typeof parentId !== 'string') return Promise.resolve([])
@@ -291,7 +334,7 @@ export function createTaskResultStorage({ storageDomain, now = Date.now, onStora
             && storageKey(row.record.parentId, row.record.childId) === row.key)
           .map(row => row.record)
           .sort((left, right) => left.settledAt - right.settledAt || left.childId.localeCompare(right.childId))
-      })
+      }, [])
     },
     flush() {
       return queue

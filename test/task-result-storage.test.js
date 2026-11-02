@@ -633,3 +633,53 @@ test('domain-open failure closes invalid handles and late open after disposal is
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(store.closeCount, 1)
 })
+
+function manualTimers() {
+  let current = 0
+  let timers = []
+  return {
+    setTimer(callback, delay) {
+      const timer = { callback, at: current + delay }
+      timers.push(timer)
+      return timer
+    },
+    clearTimer(timer) { timers = timers.filter(candidate => candidate !== timer) },
+    advance(ms) {
+      current += ms
+      for (const timer of [...timers]) {
+        if (timer.at > current) continue
+        timers = timers.filter(candidate => candidate !== timer)
+        timer.callback()
+      }
+    },
+  }
+}
+
+test('a stalled storage-domain open bounds each call instead of hanging it', async () => {
+  const timers = manualTimers()
+  const errors = []
+  const store = createTaskResultStorage({
+    storageDomain: { open: () => new Promise(() => {}) },
+    now: () => 1_000,
+    onStorageError: error => errors.push(error),
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  })
+  const record = {
+    parentId: 'p', childId: 'c', status: 'completed', output: 'x',
+    truncated: false, omittedNonText: false, stopReason: 'completed',
+    settledAt: 1_000, expiresAt: 1_000 + TASK_RESULT_TTL_MS,
+  }
+  const writing = store.put(record)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(errors.length, 0, 'no error is reported before the readiness deadline')
+  timers.advance(15_000)
+  assert.equal(await writing, false, 'a stalled open must not hang the write')
+  assert.equal(errors.length, 1)
+  assert.match(String(errors[0].message), /readiness timed out/u)
+
+  assert.equal(await store.read('p', 'c'), undefined, 'later reads skip instead of waiting again')
+  assert.deepEqual(await store.list('p'), [], 'later list calls fall back to an empty result')
+  assert.equal(await store.ready(), false)
+  await store.dispose()
+})
