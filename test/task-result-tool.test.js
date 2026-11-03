@@ -49,6 +49,175 @@ test('tracks pending and terminal results only for the exact parent Agent', () =
   assert.equal(registry.read(agent('other-parent'), 'child-1'), undefined)
 })
 
+test('does not restore a previous durable generation when invalidation was skipped', async () => {
+  const parent = agent('parent-skipped-delete')
+  const old = persistedResult(parent.id, 'child-reused')
+  let durableReads = 0
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => false,
+      delete: async () => undefined,
+      read: async () => { durableReads += 1; return old },
+      list: async () => [old],
+    },
+  })
+  assert.equal(registry.recordStart(parent, 'child-reused'), true)
+  await registry.flushPersistence()
+  registry.clearAgent(parent)
+  const replacement = agent(parent.id)
+  assert.equal(await registry.readAsync(replacement, 'child-reused'), undefined)
+  assert.deepEqual(await registry.listAsync(replacement), [])
+  assert.equal(durableReads, 0, 'an unsynchronized store must not supply stale snapshots to a replacement Agent')
+  await registry.dispose()
+})
+
+test('fence capacity overflow blocks durable restoration without blocking local results', async () => {
+  const parent = agent('parent-invalidation-cap')
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => false,
+      delete: async () => undefined,
+      read: async (parentId, childId) => persistedResult(parentId, childId),
+      list: async () => [persistedResult(parent.id, 'unrelated')],
+    },
+  })
+  for (let index = 0; index < 257; index += 1) {
+    assert.equal(registry.recordStart(parent, `child-${index}`), true)
+    registry.clearAgent(parent)
+  }
+  assert.equal(registry.recordStart(parent, 'live'), true)
+  assert.deepEqual(registry.read(parent, 'live'), { childId: 'live', status: 'running' })
+  assert.equal(await registry.readAsync(parent, 'unrelated'), undefined)
+  assert.deepEqual(await registry.listAsync(parent), [{ childId: 'live', status: 'running' }])
+  await registry.dispose()
+})
+
+test('clearAgent during the invalidation-yield prevents a stale restore', async () => {
+  const parent = agent('parent-invalidation-yield')
+  let reads = 0
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => true,
+      read: async (parentId, childId) => { reads += 1; return persistedResult(parentId, childId) },
+      list: async () => [],
+    },
+  })
+  registry.recordStart(parent, 'child')
+  registry.clearAgent(parent)
+  const lookup = registry.readAsync(parent, 'child')
+  registry.clearAgent(parent)
+  assert.equal(await lookup, undefined)
+  assert.equal(reads, 0)
+  await registry.dispose()
+})
+
+test('a late older delete cannot clear a newer unconfirmed invalidation fence', async () => {
+  const parent = agent('parent-invalidation-order')
+  const firstDelete = deferred()
+  let deletes = 0
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => false,
+      delete: () => ++deletes === 1 ? firstDelete.promise : Promise.resolve(undefined),
+      read: async (parentId, childId) => persistedResult(parentId, childId),
+      list: async () => [persistedResult(parent.id, 'child')],
+    },
+  })
+  assert.equal(registry.recordStart(parent, 'child'), true)
+  registry.clearAgent(parent)
+  assert.equal(registry.recordStart(parent, 'child'), true)
+  registry.clearAgent(parent)
+  firstDelete.resolve(true)
+  await new Promise(resolve => setImmediate(resolve))
+  const replacement = agent(parent.id)
+  assert.equal(await registry.readAsync(replacement, 'child'), undefined)
+  assert.deepEqual(await registry.listAsync(replacement), [])
+  await registry.dispose()
+})
+
+test('a delayed non-serial list cannot restore a snapshot captured before deletion completed', async () => {
+  const parent = agent('parent-delayed-list')
+  const deletion = deferred()
+  const listing = deferred()
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: () => deletion.promise,
+      read: async () => undefined,
+      list: () => listing.promise,
+    },
+  })
+  registry.recordStart(parent, 'child')
+  registry.clearAgent(parent)
+  const replacement = agent(parent.id)
+  const lookup = registry.listAsync(replacement)
+  deletion.resolve(true)
+  await new Promise(resolve => setImmediate(resolve))
+  listing.resolve([persistedResult(parent.id, 'child')])
+  assert.deepEqual(await lookup, [])
+  await registry.dispose()
+})
+
+test('list restoration stops when its own eviction overflows the invalidation fence', async () => {
+  const a = agent('parent-list-cap-a')
+  const b = agent('parent-list-cap-b')
+  let failing = false
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: async () => failing ? undefined : true,
+      read: async (parentId, childId) => persistedResult(parentId, childId),
+      list: async () => [persistedResult(a.id, 'new'), persistedResult(a.id, 'a-0')],
+    },
+  })
+  for (let index = 0; index < 32; index += 1) {
+    registry.recordStart(a, `a-${index}`)
+    registry.recordResult(a, `a-${index}`, result)
+  }
+  await new Promise(resolve => setImmediate(resolve))
+  failing = true
+  for (let index = 0; index < 256; index += 1) {
+    registry.recordStart(b, `b-${index}`)
+    registry.clearAgent(b)
+  }
+  const listed = await registry.listAsync(a)
+  assert.equal(listed.some(child => child.childId === 'a-0'), false, 'evicted old result must not be restored by the same batch')
+  assert.equal(listed.some(child => child.childId === 'new'), true)
+  assert.equal(await registry.readAsync(a, 'a-0'), undefined)
+  await registry.dispose()
+})
+
+test('fences pending invalidations without blocking unrelated persisted results', async () => {
+  const parent = agent('parent-pending-delete')
+  const gate = deferred()
+  const registry = createTaskResultRegistry({
+    now: () => 100,
+    persistentStore: {
+      put: async () => true,
+      delete: () => gate.promise,
+      read: async (parentId, childId) => persistedResult(parentId, childId),
+      list: async () => [persistedResult(parent.id, 'unrelated'), persistedResult(parent.id, 'child-reused')],
+    },
+  })
+  registry.recordStart(parent, 'child-reused')
+  registry.clearAgent(parent)
+  const replacement = agent(parent.id)
+  assert.equal(await registry.readAsync(replacement, 'child-reused'), undefined)
+  assert.equal((await registry.readAsync(replacement, 'unrelated')).childId, 'unrelated')
+  assert.deepEqual(await registry.listAsync(replacement), [{ childId: 'unrelated', status: 'completed' }])
+  gate.resolve(false)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal((await registry.readAsync(replacement, 'child-reused')).childId, 'child-reused', 'confirmed absence releases the fence')
+  await registry.dispose()
+})
+
 test('does not restore a terminal result after clearAgent during a persistence read', async () => {
   const readStarted = deferred()
   const pendingRead = deferred()

@@ -81,8 +81,9 @@ export async function openTaskResultStorageDomain(storageDomain) {
 
 /**
  * Best-effort, serialized persistence for terminal one-shot result snapshots.
- * It never records active work, caps its own KV table at 256 rows, and admits
- * at most 64 queued/in-flight operations; saturation preserves local results.
+ * It never records active work, targets a 256-row KV table after best-effort
+ * trimming, and admits at most 64 queued/in-flight operations. Failed trimming
+ * or concurrent writers can exceed the target; saturation preserves local results.
  */
 export function createTaskResultStorage({
   storageDomain, now = Date.now, onStorageError,
@@ -304,7 +305,10 @@ export function createTaskResultStorage({
     },
     delete(parentId, childId) {
       if (typeof parentId !== 'string' || typeof childId !== 'string') return Promise.resolve(false)
-      return enqueue(table => table.delete(storageKey(parentId, childId)), false)
+      // Undefined means the operation was not confirmed (for example readiness
+      // timeout or queue saturation); false from table.delete means it ran and
+      // the row was already absent. The registry must distinguish those cases.
+      return enqueue(table => table.delete(storageKey(parentId, childId)), undefined)
     },
     read(parentId, childId) {
       if (typeof parentId !== 'string' || typeof childId !== 'string') return Promise.resolve(undefined)

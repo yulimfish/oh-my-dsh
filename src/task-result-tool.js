@@ -147,6 +147,40 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
   let total = 0
   let disposed = false
   let disposePromise
+  const pendingInvalidations = new Map()
+  let invalidationRevision = 0
+  let durableRestoreUnsafe = false
+
+  function invalidationKey(parentId, childId) {
+    return JSON.stringify([parentId, childId])
+  }
+
+  function scheduleInvalidation(parentId, childId) {
+    if (!persistentStore || disposed) return
+    const key = invalidationKey(parentId, childId)
+    invalidationRevision += 1
+    // Never discard an unconfirmed key to make room: an overflow instead fences
+    // all durable restoration for this registry's lifetime. Local results work.
+    if (!pendingInvalidations.has(key) && pendingInvalidations.size >= MAX_TOTAL_CHILDREN) {
+      durableRestoreUnsafe = true
+    }
+    const token = {}
+    if (!durableRestoreUnsafe) pendingInvalidations.set(key, token)
+    try {
+      Promise.resolve(persistentStore.delete(parentId, childId)).then(result => {
+        // Both booleans mean the Host delete ran: false means no row existed.
+        // Undefined, rejection or another shape is not confirmation.
+        if ((result === true || result === false) && pendingInvalidations.get(key) === token) {
+          pendingInvalidations.delete(key)
+          // A non-serialized custom store may have captured a stale list while
+          // the fence was present; invalidate such in-flight snapshots too.
+          invalidationRevision += 1
+        }
+      }, () => {})
+    } catch {
+      // Keep the key fenced after synchronous failure.
+    }
+  }
 
   function scheduleStorage(operation) {
     if (!persistentStore || disposed) return
@@ -184,7 +218,7 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
       byParent.delete(parent)
       if (parentById.get(parent.id) === parent) parentById.delete(parent.id)
     }
-    scheduleStorage(() => persistentStore.delete(parent.id, childId))
+    scheduleInvalidation(parent.id, childId)
     return true
   }
 
@@ -320,7 +354,7 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
     recordStart(parent, childId) {
       const record = reserve(parent, childId, { newGeneration: true })
       if (!record) return false
-      scheduleStorage(() => persistentStore.delete(parent.id, childId))
+      scheduleInvalidation(parent.id, childId)
       return true
     },
     recordResult(parent, childId, result) {
@@ -349,15 +383,28 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
     read: readLocal,
     async readAsync(parent, childId) {
       const local = readLocal(parent, childId)
-      if (local || !persistentStore || disposed || !isAgent(parent) || !isChildId(childId)
+      if (local || !persistentStore || disposed || durableRestoreUnsafe
+        || !isAgent(parent) || !isChildId(childId)
         || (parentById.has(parent.id) && parentById.get(parent.id) !== parent)) return local
       const epoch = parentEpochs.get(parent)
       const generation = childEpochs.get(parent)?.get(childId) ?? 0
+      // Give already-resolved invalidations a chance to release their fences;
+      // never wait for an unsettled Host operation here. Lifecycle changes
+      // during this yield still invalidate this exact read.
+      if (pendingInvalidations.size > 0) await Promise.resolve()
+      if (disposed || parentEpochs.get(parent) !== epoch
+        || (parentById.has(parent.id) && parentById.get(parent.id) !== parent)) return undefined
+      // If local work started while yielding, return its current snapshot;
+      // unlike a late durable response this does not misattribute stored data.
+      if ((childEpochs.get(parent)?.get(childId) ?? 0) !== generation) return readLocal(parent, childId)
+      if (durableRestoreUnsafe || pendingInvalidations.has(invalidationKey(parent.id, childId))) return undefined
+      const revision = invalidationRevision
       let stored
       try { stored = await persistentStore.read(parent.id, childId) } catch {
         return readLocal(parent, childId)
       }
-      if (disposed || parentEpochs.get(parent) !== epoch
+      if (disposed || durableRestoreUnsafe || pendingInvalidations.has(invalidationKey(parent.id, childId))
+        || invalidationRevision !== revision || parentEpochs.get(parent) !== epoch
         || (childEpochs.get(parent)?.get(childId) ?? 0) !== generation) return undefined
       const hadLocal = byParent.get(parent)?.has(childId) === true
       const restored = restoreTerminal(parent, stored)
@@ -369,15 +416,26 @@ export function createTaskResultRegistry({ now = Date.now, persistentStore } = {
     list: listLocal,
     async listAsync(parent) {
       const local = listLocal(parent)
-      if (local === undefined || !persistentStore || disposed || !isAgent(parent)
-        || (parentById.has(parent.id) && parentById.get(parent.id) !== parent)) return local
+      if (local === undefined || !persistentStore || disposed || durableRestoreUnsafe
+        || !isAgent(parent) || (parentById.has(parent.id) && parentById.get(parent.id) !== parent)) return local
       const epoch = parentEpochs.get(parent)
+      if (pendingInvalidations.size > 0) await Promise.resolve()
+      if (disposed || durableRestoreUnsafe || parentEpochs.get(parent) !== epoch
+        || (parentById.has(parent.id) && parentById.get(parent.id) !== parent)) return listLocal(parent)
+      const revision = invalidationRevision
       let stored
       try { stored = await persistentStore.list(parent.id) } catch {
         return listLocal(parent)
       }
-      if (disposed || parentEpochs.get(parent) !== epoch) return listLocal(parent)
-      for (const record of Array.isArray(stored) ? stored : []) restoreTerminal(parent, record)
+      if (disposed || durableRestoreUnsafe || invalidationRevision !== revision || parentEpochs.get(parent) !== epoch) return listLocal(parent)
+      for (const record of Array.isArray(stored) ? stored : []) {
+        // Restoring a row may evict a local result and schedule another
+        // invalidation. Do not keep consuming a snapshot captured before that
+        // mutation, especially if its new fence exceeded the bounded capacity.
+        if (disposed || durableRestoreUnsafe || invalidationRevision !== revision || parentEpochs.get(parent) !== epoch) break
+        if (pendingInvalidations.has(invalidationKey(parent.id, record?.childId))) continue
+        restoreTerminal(parent, record)
+      }
       return listLocal(parent)
     },
     clearAgent(parent) {

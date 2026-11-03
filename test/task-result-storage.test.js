@@ -655,6 +655,42 @@ function manualTimers() {
   }
 }
 
+test('a timed-out invalidation does not restore an old generation after late open', async () => {
+  const timers = manualTimers()
+  const rows = new Map()
+  const shared = backend(rows)
+  const parent = agent('late-open-parent')
+  const first = createTaskResultStorage({ storageDomain: shared.storageDomain, now: () => 1_000 })
+  assert.equal(await first.put({
+    parentId: parent.id, childId: 'reused-child', ...result('completed', 'old generation'),
+    settledAt: 1_000, expiresAt: 1_000 + TASK_RESULT_TTL_MS,
+  }), true)
+  await first.dispose()
+
+  const reopened = backend(rows)
+  let releaseOpen
+  const store = createTaskResultStorage({
+    storageDomain: { open: () => new Promise(resolve => { releaseOpen = () => resolve(reopened.handle) }) },
+    now: () => 1_000,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  })
+  const registry = createTaskResultRegistry({ persistentStore: store, now: () => 1_000 })
+  assert.equal(registry.recordStart(parent, 'reused-child'), true)
+  await new Promise(resolve => setImmediate(resolve))
+  timers.advance(4_000)
+  await registry.flushPersistence()
+  registry.clearAgent(parent)
+  releaseOpen()
+  await new Promise(resolve => setImmediate(resolve))
+
+  const replacement = agent(parent.id)
+  assert.equal(await registry.readAsync(replacement, 'reused-child'), undefined)
+  assert.deepEqual(await registry.listAsync(replacement), [])
+  assert.equal(rows.size, 1, 'the fence hides the unremoved row rather than claiming deletion')
+  await registry.dispose()
+})
+
 test('a stalled storage-domain open bounds each call instead of hanging it', async () => {
   const timers = manualTimers()
   const errors = []
