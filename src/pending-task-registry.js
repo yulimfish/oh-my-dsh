@@ -8,6 +8,9 @@ const MAX_PENDING = 16
 const MAX_RETAINED = 64
 const MAX_PARENTS = 64
 const MAX_ID_CHARS = 256
+const MAX_OUTPUT_CHARS = 8192
+const MAX_STOP_REASON_CHARS = 80
+const RESULT_KEYS = new Set(['status', 'output', 'truncated', 'omittedNonText', 'stopReason'])
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'expired'])
 
 function isAgent(agent) {
@@ -25,6 +28,32 @@ function isSignal(value) {
     && typeof value.addEventListener === 'function' && typeof value.removeEventListener === 'function')
 }
 
+// Only copy the already-extracted primitive fields. The Host's result policy
+// belongs to the caller; this validation is not a sandbox for arbitrary objects.
+function copyResult(value, lifecycle) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) return undefined
+    const keys = Reflect.ownKeys(value)
+    if (keys.some(key => !RESULT_KEYS.has(key))) return undefined
+    const fields = Object.getOwnPropertyDescriptors(value)
+    for (const key of keys) if (!('value' in fields[key])) return undefined
+    const status = fields.status?.value
+    const output = fields.output?.value
+    const truncated = fields.truncated?.value
+    const omittedNonText = fields.omittedNonText?.value
+    const stopReason = fields.stopReason?.value
+    if ((lifecycle === 'completed' ? status !== 'completed' : status !== 'incomplete' && status !== 'failed')
+      || typeof output !== 'string' || output.length > MAX_OUTPUT_CHARS
+      || typeof truncated !== 'boolean' || typeof omittedNonText !== 'boolean'
+      || (fields.stopReason && (typeof stopReason !== 'string' || stopReason.length > MAX_STOP_REASON_CHARS))) return undefined
+    return { status, output, truncated, omittedNonText, ...(fields.stopReason ? { stopReason } : {}) }
+  } catch {
+    return undefined
+  }
+}
+
 function abortError() {
   return Object.assign(new Error('Pending task was cancelled before it started.'), { name: 'AbortError' })
 }
@@ -33,7 +62,8 @@ function abortError() {
  * Bounded, process-local pending task identity and lifecycle registry.
  * It owns no child execution and provides no cross-reload persistence. A
  * running task detached by clearAgent/dispose is handed back to its caller;
- * detaching never claims that its child stopped.
+ * detaching never claims that its child stopped. Lifecycle snapshots may
+ * include child IDs, but never include retained result bodies.
  */
 export function createPendingTaskRegistry({
   maxPending = MAX_PENDING,
@@ -248,6 +278,13 @@ export function createPendingTaskRegistry({
     return entry ? snapshot(entry) : undefined
   }
 
+  function readResult(parent, id) {
+    prune()
+    const entry = ownedEntry(parent, id)
+    return entry && (entry.status === 'completed' || entry.status === 'failed') && entry.result
+      ? { ...entry.result } : undefined
+  }
+
   function list(parent) {
     prune()
     const owner = parentRecord(parent)
@@ -266,12 +303,19 @@ export function createPendingTaskRegistry({
     return result
   }
 
-  function settle(parent, id, status) {
+  function settle(parent, id, status, result) {
     prune()
     const entry = ownedEntry(parent, id)
     if (!entry || (entry.status !== 'running' && !(entry.status === 'pending' && status === 'failed'))
       || (status !== 'completed' && status !== 'failed')) return undefined
-    return transition(entry, status, time())
+    const copied = result === undefined ? undefined : copyResult(result, status)
+    if (result !== undefined && !copied) return undefined
+    // Validation may run user-provided proxy traps; recheck ownership and state.
+    if (ownedEntry(parent, id) !== entry
+      || (entry.status !== 'running' && !(entry.status === 'pending' && status === 'failed'))) return undefined
+    const settledAt = time()
+    entry.result = copied
+    return transition(entry, status, settledAt)
   }
 
   function cancel(parent, id) {
@@ -328,7 +372,7 @@ export function createPendingTaskRegistry({
   }
 
   return Object.freeze({
-    enqueue, read, list, start, settle, cancel, clearAgent, dispose,
+    enqueue, read, readResult, list, start, settle, cancel, clearAgent, dispose,
     pendingCount(parent) {
       prune()
       if (parent !== undefined) {
