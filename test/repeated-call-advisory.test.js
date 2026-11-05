@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import { defineContentToolFixture, ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
+import { executeToolOnce, installNativeToolExecutor } from './dsh-runtime-compat.js'
 import { canonicalCallSignature, createRepeatedCallAdvisory } from '../src/repeated-call-advisory.js'
 
 function makeHarness() {
@@ -464,6 +466,7 @@ test('real ToolRuntime carries pre/post identity and adds only the third-call ad
   const ctx = new Context()
   const promptFiber = await ctx.plugin(SystemPrompt)
   const toolsFiber = await ctx.plugin(ToolRuntime)
+  const nativeExecutorFiber = await installNativeToolExecutor(ctx)
   const agent = { id: 'real-runtime-agent', session: { id: 'real-runtime-agent', append() {} } }
   const live = new Map([[agent.id, agent]])
   const feature = createRepeatedCallAdvisory({ get: id => live.get(id) })
@@ -486,12 +489,13 @@ test('real ToolRuntime carries pre/post identity and adds only the third-call ad
   t.after(async () => {
     unregister()
     await featureFiber.dispose()
+    await nativeExecutorFiber.dispose()
     await toolsFiber.dispose()
     await promptFiber.dispose()
   })
 
   let sequence = 0
-  const execute = () => ctx.tools.execute({
+  const execute = () => executeToolOnce(ctx.tools, {
     callId: `call-${++sequence}`,
     name: 'read',
     arguments: { path: 'src/a.js', options: { offset: 0 } },
@@ -516,6 +520,7 @@ test('real tools/result removes pending listeners after a post-bypassing pipelin
   const ctx = new Context()
   const promptFiber = await ctx.plugin(SystemPrompt)
   const toolsFiber = await ctx.plugin(ToolRuntime)
+  const nativeExecutorFiber = await installNativeToolExecutor(ctx)
   const agent = { id: 'pipeline-failure-agent', session: { id: 'pipeline-failure-agent', append() {} } }
   const feature = createRepeatedCallAdvisory({ get: () => agent })
   const featureFiber = await ctx.plugin(pluginCtx => {
@@ -542,11 +547,12 @@ test('real tools/result removes pending listeners after a post-bypassing pipelin
   t.after(async () => {
     await failureFiber.dispose()
     await featureFiber.dispose()
+    await nativeExecutorFiber.dispose()
     await toolsFiber.dispose()
     await promptFiber.dispose()
   })
 
-  const result = await ctx.tools.execute({
+  const result = await executeToolOnce(ctx.tools, {
     callId: 'pipeline-failure-call',
     name: 'read',
     arguments: { path: 'src/a.js' },

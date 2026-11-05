@@ -3,6 +3,7 @@ import test from 'node:test'
 import { apply, Config } from '../src/index.js'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { executeToolOnce, installNativeToolExecutor } from './dsh-runtime-compat.js'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
@@ -337,7 +338,7 @@ for (const shutdown of ['caller abort', 'plugin disposal']) {
       additionalAgents: [parentB], config: { maxConcurrent: 1 },
       getSkill: (name, options) => { hostOptions = options; entered.resolve(); return lookup.promise },
     })
-    const pending = runtimeContext.tools.execute({
+    const pending = executeToolOnce(runtimeContext.tools, {
       callId: `skill-${shutdown}`, name: 'dsh_omo_task',
       arguments: { role: 'explore', task: 'Test non-cooperative skill lookup.', load_skills: ['debugging'] },
       agent: fixture.parent, signal: controller.signal,
@@ -356,7 +357,7 @@ for (const shutdown of ['caller abort', 'plugin disposal']) {
       assert.equal(hostOptions.signal.aborted, true)
       // This proves the worker reservation is reusable by another parent, not
       // that the still-unsettled Host lookup lease has been released.
-      const other = await runtimeContext.tools.execute({
+      const other = await executeToolOnce(runtimeContext.tools, {
         callId: 'other-parent-after-abort', name: 'dsh_omo_task',
         arguments: { role: 'explore', task: 'Check reusable worker capacity.' },
         agent: parentB, signal: new AbortController().signal,
@@ -398,7 +399,7 @@ for (const settlement of ['resolve', 'reject']) {
         config: { maxConcurrent: 1 },
         getSkill: () => { entered.resolve(); return lookup.promise },
       })
-      const call = (callId, loadSkills, signal = new AbortController().signal) => runtimeContext.tools.execute({
+      const call = (callId, loadSkills, signal = new AbortController().signal) => executeToolOnce(runtimeContext.tools, {
         callId, name: 'dsh_omo_task_join',
         arguments: { role: 'explore', task: callId, ...(loadSkills ? { load_skills: ['debugging'] } : {}) },
         agent: fixture.parent, signal,
@@ -433,7 +434,7 @@ for (const shutdown of ['caller abort', 'plugin disposal']) {
       config: { maxConcurrent: 1, maxPendingTasks: 1 },
     })
     t.after(() => { controller.abort(); child.resolve({ stopReason: 'completed', output: [] }) })
-    const call = (callId, name, extra = {}, signal = new AbortController().signal) => runtimeContext.tools.execute({
+    const call = (callId, name, extra = {}, signal = new AbortController().signal) => executeToolOnce(runtimeContext.tools, {
       callId, name, arguments: { role: 'explore', task: callId, ...extra }, agent: fixture.parent, signal,
     })
     const active = await call('skill-queue-active', 'dsh_omo_task')
@@ -477,7 +478,7 @@ test('native ToolRuntime cancellation before one-shot startup settles suppresses
   const { runtimeContext, fixture } = await nativePolicyHarness(t, { startGate: startup.promise, disposeGate: disposal.promise })
   t.after(() => { startup.resolve(); disposal.resolve() })
   const controller = new AbortController()
-  const pending = runtimeContext.tools.execute({
+  const pending = executeToolOnce(runtimeContext.tools, {
     callId: 'ordinary-native-late-cancel', name: 'dsh_omo_task',
     arguments: { role: 'explore', task: 'Verify cancellation while Host startup is pending.' },
     agent: fixture.parent, signal: controller.signal,
@@ -500,6 +501,7 @@ test('native ToolRuntime abort after join body but before final materialization 
   const runtimeContext = new Context()
   const promptFiber = await runtimeContext.plugin(SystemPrompt)
   const runtimeFiber = await runtimeContext.plugin(ToolRuntime)
+  const nativeExecutorFiber = await installNativeToolExecutor(runtimeContext)
   const fixture = nativeContext()
   fixture.ctx.tools = runtimeContext.tools
   const removers = []
@@ -521,12 +523,13 @@ test('native ToolRuntime abort after join body but before final materialization 
     for (const effect of fixture.effects.reverse()) if (typeof effect.dispose === 'function') await effect.dispose()
     for (const remove of removers) if (typeof remove === 'function') remove()
     await policy.dispose()
+    await nativeExecutorFiber.dispose()
     await runtimeFiber.dispose()
     await promptFiber.dispose()
   })
   apply(fixture.ctx, Config({ enableForegroundTaskTool: true }))
   const controller = new AbortController()
-  const pending = runtimeContext.tools.execute({
+  const pending = executeToolOnce(runtimeContext.tools, {
     callId: 'foreground-post-materialization-abort', name: 'dsh_omo_task_join',
     arguments: { role: 'explore', task: 'Verify native final-outcome acknowledgement.' },
     agent: fixture.parent, signal: controller.signal,
@@ -548,6 +551,7 @@ async function nativePolicyHarness(t, options = {}) {
   const runtimeContext = new Context()
   const promptFiber = await runtimeContext.plugin(SystemPrompt)
   const runtimeFiber = await runtimeContext.plugin(ToolRuntime)
+  const nativeExecutorFiber = await installNativeToolExecutor(runtimeContext)
   const fixture = nativeContext(options)
   fixture.ctx.tools = runtimeContext.tools
   const removers = []
@@ -556,6 +560,7 @@ async function nativePolicyHarness(t, options = {}) {
   t.after(async () => {
     for (const effect of [...fixture.effects].reverse()) if (typeof effect.dispose === 'function') await effect.dispose()
     for (const remove of removers) if (typeof remove === 'function') remove()
+    await nativeExecutorFiber.dispose()
     await runtimeFiber.dispose()
     await promptFiber.dispose()
   })
@@ -579,7 +584,7 @@ test('native around-dispatch mutation during startup retains the original parent
   }))
   t.after(() => policy.dispose())
   const controller = new AbortController()
-  const pending = runtimeContext.tools.execute({
+  const pending = executeToolOnce(runtimeContext.tools, {
     callId: 'mutable-startup-parent', name: 'dsh_omo_task',
     arguments: { role: 'explore', task: 'Retain the original owner during pending startup.' },
     agent: fixture.parent, signal: controller.signal,
@@ -626,7 +631,7 @@ test('native maxPendingTasks queues foreground calls, enforces capacity, and can
     },
     config: { maxConcurrent: 1, maxPendingTasks: 1 },
   })
-  const call = (callId, name, signal = new AbortController().signal) => runtimeContext.tools.execute({
+  const call = (callId, name, signal = new AbortController().signal) => executeToolOnce(runtimeContext.tools, {
     callId, name, arguments: { role: 'explore', task: callId }, agent: fixture.parent, signal,
   })
   const first = await call('queue-active', 'dsh_omo_task')
@@ -680,7 +685,7 @@ for (const oversizedTool of ['dsh_omo_task', 'dsh_omo_task_join']) {
     const call = (callId, name, extra = {}) => {
       const controller = new AbortController()
       controllers.push(controller)
-      return runtimeContext.tools.execute({
+      return executeToolOnce(runtimeContext.tools, {
         callId, name, arguments: { role: 'explore', task: callId, ...extra },
         agent: fixture.parent, signal: controller.signal,
       })
@@ -750,7 +755,7 @@ for (const cancelledSignal of ['caller', 'wrapper']) {
       }
     }))
     t.after(() => policy.dispose())
-    const call = (callId, name, signal) => runtimeContext.tools.execute({
+    const call = (callId, name, signal) => executeToolOnce(runtimeContext.tools, {
       callId, name, arguments: { role: 'explore', task: callId }, agent: fixture.parent, signal,
     })
     const first = await call('wrapped-active', 'dsh_omo_task', new AbortController().signal)
@@ -774,7 +779,7 @@ test('native maxPendingTasks rejects a queued foreground call when its exact par
     result: child.promise, config: { maxConcurrent: 1, maxPendingTasks: 1 },
   })
   t.after(() => child.resolve({ stopReason: 'completed', output: [] }))
-  const call = (callId, name) => runtimeContext.tools.execute({
+  const call = (callId, name) => executeToolOnce(runtimeContext.tools, {
     callId, name, arguments: { role: 'explore', task: callId }, agent: fixture.parent, signal: new AbortController().signal,
   })
   assert.equal((await call('identity-active', 'dsh_omo_task')).isError, false)
@@ -810,7 +815,7 @@ test(`native post-execute policy block suppresses original result and relay (cal
     return { kind: 'block', feedback: [{ type: 'text', text: 'Sensitive child result blocked by native policy.' }] }
   }))
   t.after(() => policy.dispose())
-  const result = await runtimeContext.tools.execute({
+  const result = await executeToolOnce(runtimeContext.tools, {
     callId: 'foreground-native-sensitive-block', name: 'dsh_omo_task_join',
     arguments: { role: 'explore', task: 'A native policy must retain authority over foreground output.' },
     agent: fixture.parent, signal: controller.signal,
@@ -828,7 +833,7 @@ test('native caller abort while join body awaits child is classified ABORTED and
   const child = deferred()
   const { runtimeContext, fixture } = await nativePolicyHarness(t, { result: child.promise })
   const controller = new AbortController()
-  const pending = runtimeContext.tools.execute({
+  const pending = executeToolOnce(runtimeContext.tools, {
     callId: 'foreground-native-body-abort', name: 'dsh_omo_task_join',
     arguments: { role: 'explore', task: 'Check canonical native body cancellation classification.' },
     agent: fixture.parent, signal: controller.signal,

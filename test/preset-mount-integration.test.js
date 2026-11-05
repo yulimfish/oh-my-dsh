@@ -4,6 +4,7 @@ import { createRequire } from 'node:module'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 import { parse } from 'yaml'
+import { executeToolOnce } from './dsh-runtime-compat.js'
 
 const patchUrl = new URL('../cordis.patch.yml', import.meta.url)
 const patchRequire = createRequire(patchUrl)
@@ -33,6 +34,8 @@ async function loadPresetRuntime() {
       '@deepseek-ai/dsh-session-projection',
       '@deepseek-ai/dsh-system-prompt',
       '@deepseek-ai/dsh-tools',
+      '@deepseek-ai/dsh-tool-testkit',
+      '@deepseek-ai/dsh-tool-executor-native',
     ].map(name => [name, runtimeRequire.resolve(name)]))
   } catch (error) {
     if (error?.code !== 'MODULE_NOT_FOUND' && error?.code !== 'ERR_MODULE_NOT_FOUND') throw error
@@ -52,7 +55,8 @@ async function loadPresetRuntime() {
     SessionProjectionRegistry: modules['@deepseek-ai/dsh-session-projection'].default,
     SystemPrompt: modules['@deepseek-ai/dsh-system-prompt'].default,
     ToolRuntime: modules['@deepseek-ai/dsh-tools'].ToolRuntime,
-    defineContentToolFixture: modules['@deepseek-ai/dsh-tools'].defineContentToolFixture,
+    defineContentToolFixture: modules['@deepseek-ai/dsh-tool-testkit'].defineContentToolFixture,
+    NativeToolExecutorPlugin: modules['@deepseek-ai/dsh-tool-executor-native'],
   }
 }
 
@@ -75,7 +79,7 @@ async function createHarness(presetDefinition) {
   assert.equal(typeof runtime.Context, 'function', registrySkip || 'real registry runtime is required')
   const {
     Context, Loader, AgentPreset, AgentPresetRegistry, SessionProjectionRegistry,
-    SystemPrompt, ToolRuntime,
+    SystemPrompt, ToolRuntime, NativeToolExecutorPlugin,
   } = runtime
   const ctx = new Context()
   const fibers = []
@@ -101,6 +105,7 @@ async function createHarness(presetDefinition) {
     }))
     fibers.push(await ctx.plugin(SystemPrompt))
     fibers.push(await ctx.plugin(ToolRuntime))
+    fibers.push(await ctx.plugin(NativeToolExecutorPlugin))
     fibers.push(await ctx.plugin(AgentPresetRegistry, { default: presetDefinition.id }))
     const declaringCtx = ctx.extend({ baseUrl: patchUrl.href })
     fibers.push(await declaringCtx.plugin(AgentPreset, presetDefinition))
@@ -125,7 +130,7 @@ async function makeAgent(harness, id, presetId) {
 
 let callSequence = 0
 function execute(harness, name, agent) {
-  return harness.ctx.tools.execute({
+  return executeToolOnce(harness.ctx.tools, {
     callId: `${agent.id}:${name}:${++callSequence}`,
     name,
     arguments: {},

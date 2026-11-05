@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { createTeamStatusContext } from '../src/team-status-context.js'
 
@@ -390,6 +391,7 @@ test('caps live Agent registrations at 256 without eviction and frees capacity o
 test('assembles Team status through the real DSH systemPrompt service in the matching live Agent scope', async () => {
   const ctx = new Context()
   const systemPromptFiber = await ctx.plugin(SystemPrompt)
+  const sessionProjectionFiber = await ctx.plugin(SessionProjectionRegistry)
   const agentRegistryFiber = await ctx.plugin(AgentRegistry)
   const scopes = []
   const detachers = []
@@ -458,6 +460,7 @@ test('assembles Team status through the real DSH systemPrompt service in the mat
     for (const scope of scopes) await scope.dispose()
     for (const detach of detachers) detach()
     await agentRegistryFiber.dispose()
+    await sessionProjectionFiber.dispose()
     await systemPromptFiber.dispose()
   }
 })

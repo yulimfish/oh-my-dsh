@@ -2,7 +2,9 @@
 
 ## Scope and release decision
 
-**dsh-omo 0.1.14 is the source candidate covered by this guide**, targeting DSH `0.2.1-rc.3` and Node 24+. This version statement is not an installation claim. Check the intended Profile's live Plugin Manager inventory, Config and behavior before identifying its active version. Machine-specific test counts, artifact digests and installation/smoke events belong in the separate [deployment record](<deployment-record.md>), whose entries are time-bound, not universal guarantees.
+**dsh-omo 0.1.15 is the source candidate covered by this guide**, targeting DSH `0.2.2-rc.1`, Cordis `4.1.0`, and Node 24+. This version statement is not an installation claim. Check the intended Profile's live Plugin Manager inventory, Config and behavior before identifying its active version. Machine-specific test counts, artifact digests and installation/smoke events belong in the separate [deployment record](<deployment-record.md>), whose entries are time-bound, not universal guarantees.
+
+The 0.1.15 compatibility update aligns the DSH peers and Schemastery with the current runtime. The scoped read/search preset now selects DSH's `NativeToolExecutor` through `tools.setExecutor()` and retains its monotonic `tools.guard()`, replacing removed `tools.presentAs`. Current Inspect still exposes the `settings.section` slot and the Host Agent, descendant, Goal and ConfigEditor APIs used by the Long-horizon page. Actual plugin activation and live slot registration remain separate checks recorded in the [deployment record](<deployment-record.md>).
 
 The acceptance target is **OpenCode plugin-edition behavior**, not the whole Native/Senpi application. Canonical `model_profile` lanes control Native/Senpi main-session startup; child role chains are not those lanes. This package remains a bounded partial adapter, not complete parity, a restart-resumable task engine, or a new permission boundary. Review upstream's [Sustainable Use License](https://github.com/code-yeongyu/oh-my-openagent/blob/e50fc64a26f35ea07ceab26a8f23e8853fd2c4d6/LICENSE.md) before copying source or curated tables; do not assume MIT terms.
 

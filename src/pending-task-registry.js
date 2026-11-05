@@ -308,8 +308,8 @@ export function createPendingTaskRegistry({
     const entry = ownedEntry(parent, id)
     if (!entry || (entry.status !== 'running' && !(entry.status === 'pending' && status === 'failed'))
       || (status !== 'completed' && status !== 'failed')) return undefined
+    // Invalid output is discarded independently of the task lifecycle.
     const copied = result === undefined ? undefined : copyResult(result, status)
-    if (result !== undefined && !copied) return undefined
     // Validation may run user-provided proxy traps; recheck ownership and state.
     if (ownedEntry(parent, id) !== entry
       || (entry.status !== 'running' && !(entry.status === 'pending' && status === 'failed'))) return undefined
@@ -323,6 +323,22 @@ export function createPendingTaskRegistry({
     const entry = ownedEntry(parent, id)
     if (!entry || entry.status !== 'pending') return undefined
     return transition(entry, 'cancelled', time())
+  }
+
+  // Reentrant reads inside prune must not treat an already-expired entry as
+  // eligible: prune may not yet have reached that entry's position.
+  function isPendingFresh(parent, id) {
+    const entry = ownedEntry(parent, id)
+    if (!entry || entry.status !== 'pending') return false
+    const current = time()
+    return ownedEntry(parent, id) === entry && entry.status === 'pending' && current < entry.expiresAt
+  }
+
+  // Only undisclosed staged tasks use this silent removal; an acknowledged
+  // cancellation retains its normal observable terminal snapshot.
+  function discardUndisclosed(parent, id) {
+    const entry = ownedEntry(parent, id)
+    return entry && (entry.status === 'pending' || entry.status === 'expired') ? remove(entry) : false
   }
 
   function clearAgent(parent) {
@@ -372,7 +388,7 @@ export function createPendingTaskRegistry({
   }
 
   return Object.freeze({
-    enqueue, read, readResult, list, start, settle, cancel, clearAgent, dispose,
+    enqueue, read, readResult, list, start, settle, cancel, isPendingFresh, discardUndisclosed, clearAgent, dispose,
     pendingCount(parent) {
       prune()
       if (parent !== undefined) {

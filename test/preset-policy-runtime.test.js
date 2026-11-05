@@ -3,6 +3,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
+import { executeToolOnce, installNativeToolExecutor } from './dsh-runtime-compat.js'
 import { apply as applyPolicy } from '../src/specialist-preset-policy.js'
 import { createRequire } from 'node:module'
 
@@ -14,6 +15,7 @@ for (const name of ['write', 'edit', 'bash', 'subagent', 'run_code', 'unknown'])
     let ctx = new Context()
     const promptFiber = await ctx.plugin(SystemPrompt)
     const runtimeFiber = await ctx.plugin(ToolRuntime)
+    const nativeExecutorFiber = await installNativeToolExecutor(ctx)
     let executions = 0
     const agent = { id: 'preset-agent' }
     const scope = createScope(ctx, agent)
@@ -30,20 +32,22 @@ for (const name of ['write', 'edit', 'bash', 'subagent', 'run_code', 'unknown'])
     t.after(async () => {
       dispose()
       unregister()
+      await nativeExecutorFiber.dispose()
       await runtimeFiber.dispose()
       await promptFiber.dispose()
     })
-    const result = await ctx.tools.execute({ callId: `denied-${name}`, name, arguments: {}, agent, signal: new AbortController().signal })
+    const result = await executeToolOnce(ctx.tools, { callId: `denied-${name}`, name, arguments: {}, agent, signal: new AbortController().signal })
     assert.equal(result.isError, true)
     assert.equal(executions, 0)
     assert.match(JSON.stringify(result), /read, glob, or grep/u)
   })
 }
 
-test('preset policy allows read, glob, grep and presents native Tools without affecting another scope', async t => {
+test('preset policy selects the scoped native executor for read, glob, grep without affecting another scope', async t => {
   let ctx = new Context()
   const promptFiber = await ctx.plugin(SystemPrompt)
   const runtimeFiber = await ctx.plugin(ToolRuntime)
+  const nativeExecutorFiber = await installNativeToolExecutor(ctx)
   const agent = { id: 'preset-agent' }
   const scope = createScope(ctx, agent)
   await scope.ctx.inject(['tools'], injected => { ctx = injected })
@@ -51,6 +55,7 @@ test('preset policy allows read, glob, grep and presents native Tools without af
   t.after(async () => { await scope.dispose() })
   t.after(async () => {
     dispose()
+    await nativeExecutorFiber.dispose()
     await runtimeFiber.dispose()
     await promptFiber.dispose()
   })
@@ -62,7 +67,7 @@ test('preset policy allows read, glob, grep and presents native Tools without af
       output: { schema: { type: 'object', additionalProperties: false, properties: { value: { type: 'string', required: true } } }, render: () => [] },
       async execute() { return { value: name } },
     }))
-    const result = await ctx.tools.execute({ callId: name, name, arguments: {}, agent, signal: new AbortController().signal })
+    const result = await executeToolOnce(ctx.tools, { callId: name, name, arguments: {}, agent, signal: new AbortController().signal })
     assert.equal(result.isError, false)
     assert.equal(result.value.value, name)
   }

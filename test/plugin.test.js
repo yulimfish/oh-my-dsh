@@ -11295,7 +11295,19 @@ test('manual context pruning is opt-in, current-Agent scoped, and requires exact
   assert.equal(calls.filter(([name]) => name === 'pruneSession').length, 1, 'an arbitrary session id is never accepted')
 })
 
-// Exercise ordinary task admission through the registered Tool, not ToolRuntime.
+// Model the native ToolRuntime identity and final rendered result for pending tasks.
+function pendingTaskExec(agent, signal) {
+  return { name: 'dsh_omo_task', token: Symbol('task execution'), agent, signal }
+}
+
+async function confirmPendingTask(fixture, tool, args, exec, value) {
+  assert.equal(value.status, 'pending')
+  const listeners = fixture.eventListeners.get('tools/result') ?? []
+  assert.ok(listeners.length > 0, 'pending work requires a final result listener')
+  const result = { isError: false, value, content: tool.output.render(args, value) }
+  for (const listener of listeners) await listener(exec, result)
+}
+
 function pendingTaskFixture(config = {}) {
   const agents = new Map()
   const project = config.enableProjectAgentFiles ? makeProjectAgentFs() : undefined
@@ -11323,7 +11335,12 @@ function pendingTaskFixture(config = {}) {
     controllers.push(controller)
     const parent = options.agent ?? agent
     agents.set(parent.id, parent)
-    const promise = tool.execute({ role: options.role ?? 'quick', task }, { agent: parent, signal: controller.signal })
+    const args = { role: options.role ?? 'quick', task }
+    const exec = pendingTaskExec(parent, controller.signal)
+    const promise = tool.execute(args, exec).then(async value => {
+      if (value.status === 'pending') await confirmPendingTask(fixture, tool, args, exec, value)
+      return value
+    })
     // A rejected queued invocation must never become an unhandled rejection.
     promise.catch(() => {})
     return { promise, controller }
@@ -11975,19 +11992,21 @@ test('opt-in pending background returns an ID on global saturation and starts af
   q.agent.followup = message => messages.push(message)
   const tool = q.fixture.tools.get('dsh_omo_task')
   const controller = new AbortController()
-  const exec = { agent: q.agent, signal: controller.signal }
+  const exec = pendingTaskExec(q.agent, controller.signal)
+  const args = { role: 'quick', task: 'queued globally' }
   try {
     assert.equal((await q.call('hold global slot').promise).status, 'started')
-    const queued = await tool.execute({ role: 'quick', task: 'queued globally' }, exec)
+    const queued = await tool.execute(args, exec)
     assert.equal(queued.status, 'pending')
     assert.match(queued.taskId, /^bg_/u)
     assert.equal(queued.childId, undefined)
-    const pendingMessage = tool.output.render({}, queued)[0].text
+    const pendingMessage = tool.output.render(args, queued)[0].text
     assert.match(pendingMessage, new RegExp(queued.taskId, 'u'))
     assert.match(pendingMessage, /no child has started yet/u)
     assert.match(pendingMessage, /dsh_omo_task_pending_status/u)
     assert.match(pendingMessage, /dsh_omo_task_pending_cancel/u)
     assert.match(pendingMessage, /successful startup is not announced separately/u)
+    await confirmPendingTask(q.fixture, tool, args, exec, queued)
     await queueTurn()
     assert.equal(q.runs.length, 1, 'capacity failure must not spin or oversubscribe')
 
@@ -12032,12 +12051,15 @@ test('opt-in pending background returns immediately on selected-route saturation
     ],
   })
   const tool = fixture.tools.get('dsh_omo_task')
-  const exec = { agent: parent, signal: new AbortController().signal }
+  const signal = new AbortController().signal
   try {
-    assert.equal((await tool.execute({ role: 'explore', task: 'occupy provider cap' }, exec)).status, 'started')
-    const queued = await tool.execute({ role: 'quick', task: 'route capacity pending' }, exec)
+    assert.equal((await tool.execute({ role: 'explore', task: 'occupy provider cap' }, pendingTaskExec(parent, signal))).status, 'started')
+    const exec = pendingTaskExec(parent, signal)
+    const args = { role: 'quick', task: 'route capacity pending' }
+    const queued = await tool.execute(args, exec)
     assert.equal(queued.status, 'pending')
     assert.match(queued.taskId, /^bg_/u)
+    await confirmPendingTask(fixture, tool, args, exec, queued)
     await queueTurn()
     assert.equal(starts.length, 1, 'full route does not self-retry while global capacity remains free')
 
@@ -12090,9 +12112,11 @@ test('pending background exposes separate pending-ID status and cancellation Too
     const taskTool = q.fixture.tools.get('dsh_omo_task')
     const statusTool = q.fixture.tools.get('dsh_omo_task_pending_status')
     const cancelTool = q.fixture.tools.get('dsh_omo_task_pending_cancel')
-    const exec = { agent: q.agent, signal: new AbortController().signal }
-    const pending = await taskTool.execute({ role: 'quick', task: 'status and cancel this pending task' }, exec)
+    const exec = pendingTaskExec(q.agent, new AbortController().signal)
+    const args = { role: 'quick', task: 'status and cancel this pending task' }
+    const pending = await taskTool.execute(args, exec)
     assert.equal(pending.status, 'pending')
+    await confirmPendingTask(q.fixture, taskTool, args, exec, pending)
     await queueTurn()
     assert.equal((await statusTool.execute({ taskId: pending.taskId }, exec)).status, 'pending')
     assert.deepEqual(await cancelTool.execute({ taskId: pending.taskId }, exec), {

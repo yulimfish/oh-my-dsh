@@ -3,6 +3,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { executeToolOnce, installNativeToolExecutor } from './dsh-runtime-compat.js'
 import { registerLspNavigationTools } from '../src/lsp-tools.js'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
@@ -39,18 +40,20 @@ for (const stage of ['root', 'file']) {
           processPath(target) { calls.push(['processPath']); return target.path },
         }
         const service = { query() { calls.push(['query']); throw new Error('Unexpected LSP query') } }
-        let promptFiber, runtimeFiber, unregister
+        let promptFiber, runtimeFiber, nativeExecutorFiber, unregister
         t.after(async () => {
           gate.resolve({ path: secret })
           unregister?.()
+          await nativeExecutorFiber?.dispose()
           await runtimeFiber?.dispose()
           await promptFiber?.dispose()
         })
         promptFiber = await ctx.plugin(SystemPrompt)
         runtimeFiber = await ctx.plugin(ToolRuntime)
+        nativeExecutorFiber = await installNativeToolExecutor(ctx)
         unregister = registerLspNavigationTools(ctx, service, sessions, fs)
         const controller = new AbortController()
-        const pending = ctx.tools.execute({
+        const pending = executeToolOnce(ctx.tools, {
           callId: `${name}-${stage}-${settlement}`,
           name,
           arguments: { filePath: 'src/example.js', line: 1, character: 0 },

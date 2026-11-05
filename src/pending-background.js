@@ -7,6 +7,7 @@ export function createPendingBackgroundScheduler({
   if (!registry || typeof registry.enqueue !== 'function' || typeof registry.read !== 'function'
     || typeof registry.start !== 'function' || typeof registry.settle !== 'function'
     || typeof registry.cancel !== 'function' || typeof registry.clearAgent !== 'function'
+    || typeof registry.isPendingFresh !== 'function' || typeof registry.discardUndisclosed !== 'function'
     || typeof registry.dispose !== 'function') throw new TypeError('pending scheduler requires a pending task registry')
   if (typeof launchTask !== 'function' || typeof isParentCurrent !== 'function' || typeof withoutInitiator !== 'function') {
     throw new TypeError('pending scheduler requires the admitted launcher and exact parent checks')
@@ -21,6 +22,7 @@ export function createPendingBackgroundScheduler({
   let flight
   let wakeRequested = false
   let notificationGeneration = 0
+  let registryChangeDepth = 0
   let disposed = false
   let disposePromise
 
@@ -214,12 +216,16 @@ export function createPendingBackgroundScheduler({
     if (!currentParent({ parent })) throw new Error('dsh-omo_task requires a live parent agent.')
     const controller = new AbortController()
     const pending = registry.enqueue(parent)
+    if (pending?.status !== 'pending' || !registry.isPendingFresh(parent, pending.id)) {
+      try { registry.discardUndisclosed(parent, pending?.id) } catch {}
+      throw new Error('Pending task expired or became unavailable during enqueue.')
+    }
     const entry = {
       taskId: pending.id,
       args: { ...args, load_skills: Array.isArray(args?.load_skills) ? [...args.load_skills] : args?.load_skills },
       parent,
       controller,
-      phase: 'queued',
+      phase: exec?.deferUntilAcknowledged === true ? 'staged' : 'queued',
       blocked: false,
       childId: undefined,
       interruptRequested: false,
@@ -227,15 +233,73 @@ export function createPendingBackgroundScheduler({
       earlyOutcome: undefined,
     }
     entries.set(entry.taskId, entry)
-    if (exec?.signal?.aborted || !currentParent(entry)) {
-      entries.delete(entry.taskId)
+    const parentIsCurrent = currentParent(entry)
+    const stillFresh = registry.isPendingFresh(parent, entry.taskId)
+    // Liveness and freshness checks may reenter disposal and remove this exact
+    // entry while still returning true. Never hand an orphaned ID to the gate.
+    if (exec?.signal?.aborted || !parentIsCurrent || !stillFresh || !present(entry)
+      || !['staged', 'queued'].includes(entry.phase)) {
+      if (entries.get(entry.taskId) === entry) entries.delete(entry.taskId)
       controller.abort()
-      registry.cancel(parent, entry.taskId)
+      if (entry.phase === 'staged') registry.discardUndisclosed(parent, entry.taskId)
+      else registry.cancel(parent, entry.taskId)
       if (exec?.signal?.aborted) throw Object.assign(new Error('Pending task was cancelled before it started.'), { name: 'AbortError' })
       throw new Error('dsh-omo_task requires a live parent agent.')
     }
-    schedule()
+    if (entry.phase === 'queued') schedule()
     return Object.freeze({ taskId: entry.taskId, role: args.role, status: 'pending' })
+  }
+
+  function activate(parent, taskId) {
+    const entry = entries.get(taskId)
+    // A registry change can run inside prune; a nested read would skip pruning.
+    if (registryChangeDepth || !entry || entry.parent !== parent || entry.phase !== 'staged'
+      || entry.activating || !present(entry)) return false
+
+    entry.activating = true
+    try {
+      // read() prunes expired tasks and can invoke callbacks reentrantly. Recheck
+      // identity after every callback and prune again after the parent check.
+      const state = registry.read(parent, taskId)
+      if (!present(entry) || entry.phase !== 'staged') return false
+      if (state?.status !== 'pending') {
+        entries.delete(taskId)
+        entry.controller.abort()
+        return false
+      }
+      const parentIsCurrent = currentParent(entry)
+      if (!present(entry) || entry.phase !== 'staged') return false
+      if (!parentIsCurrent || entry.controller.signal.aborted) {
+        entries.delete(taskId)
+        entry.controller.abort()
+        try { registry.cancel(parent, taskId) } catch {}
+        return false
+      }
+      const checked = registry.read(parent, taskId)
+      if (!present(entry) || entry.phase !== 'staged') return false
+      const fresh = registry.isPendingFresh(parent, taskId)
+      if (!present(entry) || entry.phase !== 'staged') return false
+      if (checked?.status !== 'pending' || entry.controller.signal.aborted || !fresh) {
+        entries.delete(taskId)
+        entry.controller.abort()
+        if (!fresh) try { registry.discardUndisclosed(parent, taskId) } catch {}
+        return false
+      }
+      entry.phase = 'queued'
+      schedule()
+      return true
+    } finally {
+      entry.activating = false
+    }
+  }
+
+  function rejectStaged(parent, taskId) {
+    const entry = entries.get(taskId)
+    if (!entry || entry.parent !== parent || entry.phase !== 'staged') return false
+    entries.delete(taskId)
+    entry.controller.abort()
+    try { registry.discardUndisclosed(parent, taskId) } catch {}
+    return true
   }
 
   function cancel(parent, taskId) {
@@ -259,19 +323,28 @@ export function createPendingBackgroundScheduler({
   }
 
   function onRegistryChange(snapshot) {
-    const entry = entries.get(snapshot?.id)
-    if (!entry || ['pending', 'running'].includes(snapshot.status)) return
-    if (entry.phase === 'bound' && snapshot.status === 'completed') return
-    const startupInProgress = entry.phase !== 'queued'
-    const notifyExpired = snapshot.status === 'expired' && currentParent(entry)
-    entries.delete(entry.taskId)
-    entry.controller.abort()
-    const expiredRun = takeRun(entry)
-    if (expiredRun) void disposeRun(expiredRun)
-    if (notifyExpired) {
-      try { notifyExpiry?.(entry, { startupInProgress }) } catch {}
+    registryChangeDepth += 1
+    try {
+      const entry = entries.get(snapshot?.id)
+      if (!entry || ['pending', 'running'].includes(snapshot.status)) return
+      if (entry.phase === 'bound' && snapshot.status === 'completed') return
+      const startupInProgress = entry.phase !== 'queued'
+      const undisclosedExpiry = entry.phase === 'staged' && snapshot.status === 'expired'
+      const mayNotifyExpiry = entry.phase !== 'staged' && snapshot.status === 'expired'
+      entries.delete(entry.taskId)
+      entry.controller.abort()
+      if (undisclosedExpiry) {
+        try { registry.discardUndisclosed(entry.parent, entry.taskId) } catch {}
+      }
+      const expiredRun = takeRun(entry)
+      if (expiredRun) void disposeRun(expiredRun)
+      if (mayNotifyExpiry && currentParent(entry)) {
+        try { notifyExpiry?.(entry, { startupInProgress }) } catch {}
+      }
+      schedule()
+    } finally {
+      registryChangeDepth -= 1
     }
-    schedule()
   }
 
   function clearAgent(parent) {
@@ -307,5 +380,5 @@ export function createPendingBackgroundScheduler({
     return true
   }
 
-  return Object.freeze({ enqueue, cancel, clearAgent, dispose, notify, wakeQueued, settle, onRegistryChange })
+  return Object.freeze({ enqueue, activate, rejectStaged, cancel, clearAgent, dispose, notify, wakeQueued, settle, onRegistryChange })
 }

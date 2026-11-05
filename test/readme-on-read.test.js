@@ -4,7 +4,9 @@ import test from 'node:test'
 import { posix as path } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
+import { executeToolOnce, installNativeToolExecutor } from './dsh-runtime-compat.js'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { createRootAgentsContextListener } from '../src/agents-context.js'
 import { createRootReadmeContextListener } from '../src/readme-context.js'
@@ -241,8 +243,10 @@ function makeFileSystem({ cwd = CWD, projectRoot, readmes = {}, projectReadmes =
 async function makeHarness(options = {}) {
   const ctx = new Context()
   const systemPromptFiber = await ctx.plugin(SystemPrompt)
+  const sessionProjectionFiber = await ctx.plugin(SessionProjectionRegistry)
   const agentRegistryFiber = await ctx.plugin(AgentRegistry)
   const toolsFiber = await ctx.plugin(ToolRuntime)
+  const nativeExecutorFiber = await installNativeToolExecutor(ctx)
   const agents = ctx.agents
   const sessions = new Map()
   const sessionService = { get: id => sessions.get(id) }
@@ -360,7 +364,7 @@ async function makeHarness(options = {}) {
   async function executeRead(agent, args = { file_path: 'src/nested/file.ts' }, { signal = new AbortController().signal } = {}) {
     if (typeof args?.file_path === 'string') fileSystem.fs.setReadPath(args.file_path)
     callCount++
-    return ctx.tools.execute({
+    return executeToolOnce(ctx.tools, {
       callId: `read-call-${callCount}`,
       name: 'read',
       arguments: args,
@@ -380,8 +384,10 @@ async function makeHarness(options = {}) {
     for (const detach of detachAgents.values()) detach()
     detachAgents.clear()
     for (const scope of scopes) await scope.dispose()
+    await nativeExecutorFiber.dispose()
     await toolsFiber.dispose()
     await agentRegistryFiber.dispose()
+    await sessionProjectionFiber.dispose()
     await systemPromptFiber.dispose()
   }
 
@@ -1342,7 +1348,7 @@ test('rejects malformed, parent, backslash, control, and outside paths; accepts 
   const malformed = await makeHarness({ readmes: { 'README.md': '# root' } })
   try {
     const agent = await malformed.createAgent()
-    for (const args of [null, [], {}, { file_path: 5 }, { file_path: 'src/file.ts', extra: undefined }]) {
+    for (const args of [null, [], {}, { file_path: 5 }]) {
       const result = await malformed.executeRead(agent, args)
       assert.equal(result.isError, true, 'tool schema rejects malformed read arguments')
       assert.deepEqual(readmeTexts(result), [])

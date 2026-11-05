@@ -2,8 +2,11 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import { defineContentToolFixture, ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
+import { executeToolOnce, installNativeToolExecutor } from './dsh-runtime-compat.js'
 import { apply as applySpecialistPolicy } from '../src/specialist-preset-policy.js'
 
 const systemPromptRequire = createRequire(import.meta.resolve('@deepseek-ai/dsh-system-prompt'))
@@ -33,14 +36,16 @@ function execution(name, agent, args = {}) {
   }
 }
 
-test('allows only read/search names, selects native presentation, and disposes in reverse ownership order', () => {
+test('allows only read/search names, selects NativeToolExecutor, and disposes in reverse ownership order', () => {
   const calls = []
   let guard
+  let selectedExecutor
   const dispose = applySpecialistPolicy({
     tools: {
-      presentAs(mode) {
-        calls.push(`presentAs:${mode}`)
-        return () => calls.push('dispose:presentAs')
+      setExecutor(executor) {
+        selectedExecutor = executor
+        calls.push('setExecutor')
+        return () => calls.push('dispose:setExecutor')
       },
       guard(callback) {
         guard = callback
@@ -50,8 +55,9 @@ test('allows only read/search names, selects native presentation, and disposes i
     },
   })
 
+  assert.ok(selectedExecutor instanceof NativeToolExecutor)
   assert.equal(typeof guard, 'function')
-  assert.deepEqual(calls, ['presentAs:native', 'guard'])
+  assert.deepEqual(calls, ['setExecutor', 'guard'])
   for (const name of ['read', 'glob', 'grep']) {
     assert.equal(guard({ name }), undefined, `${name} must remain subject to other monotonic guards`)
   }
@@ -64,10 +70,10 @@ test('allows only read/search names, selects native presentation, and disposes i
 
   dispose()
   assert.deepEqual(calls, [
-    'presentAs:native',
+    'setExecutor',
     'guard',
     'dispose:guard',
-    'dispose:presentAs',
+    'dispose:setExecutor',
   ])
 })
 
@@ -75,6 +81,7 @@ test('real ToolRuntime scopes the guard to the specialist and global/scoped shad
   const ctx = new Context()
   const promptFiber = await ctx.plugin(SystemPrompt)
   const toolsFiber = await ctx.plugin(ToolRuntime)
+  const nativeExecutorFiber = await installNativeToolExecutor(ctx)
   const bodies = []
   const dispatches = []
   const globalDisposers = []
@@ -101,6 +108,7 @@ test('real ToolRuntime scopes the guard to the specialist and global/scoped shad
     for (const dispose of globalDisposers.reverse()) dispose()
     await dispatchFiber.dispose()
     await preExecuteFiber.dispose()
+    await nativeExecutorFiber.dispose()
     await toolsFiber.dispose()
     await promptFiber.dispose()
   })
@@ -115,10 +123,8 @@ test('real ToolRuntime scopes the guard to the specialist and global/scoped shad
   specialist.ctx.tools.register(fixtureTool('read', 'scoped', bodies))
   specialist.ctx.tools.register(fixtureTool('write', 'scoped', bodies))
 
-  assert.equal(ctx.tools.modeFor(specialist), 'native')
-  assert.equal(ctx.tools.modeFor(main), 'native')
   for (const name of ['read', 'glob', 'grep']) {
-    const result = await ctx.tools.execute(execution(name, specialist))
+    const result = await executeToolOnce(ctx.tools, execution(name, specialist))
     assert.equal(result.isError, false, `${name} should be allowed`)
   }
   assert.deepEqual(bodies, [
@@ -130,7 +136,7 @@ test('real ToolRuntime scopes the guard to the specialist and global/scoped shad
   for (const name of ['write', 'edit', 'bash', 'delegation', 'dsh_omo_task', 'dsh_omo_task_continuable', 'run_code', 'unknownTool']) {
     const bodyCount = bodies.length
     const dispatchCount = dispatches.length
-    const result = await ctx.tools.execute(execution(name, specialist))
+    const result = await executeToolOnce(ctx.tools, execution(name, specialist))
     assert.equal(result.isError, true, `${name} should be denied`)
     assert.equal(result.error.message, DENIAL)
     assert.equal(bodies.length, bodyCount, `${name} body must not execute`)
@@ -138,76 +144,76 @@ test('real ToolRuntime scopes the guard to the specialist and global/scoped shad
   }
 
   for (const name of ['write', 'dsh_omo_task']) {
-    const result = await ctx.tools.execute(execution(name, main))
+    const result = await executeToolOnce(ctx.tools, execution(name, main))
     assert.equal(result.isError, false, `main Agent must remain unaffected by the specialist guard (${name})`)
   }
   assert.deepEqual(bodies.slice(-2), ['global:write:main', 'global:dsh_omo_task:main'])
 })
 
-test('real PTC transport cannot bypass the specialist policy while the main Agent remains usable', async t => {
+test('scoped policy selects NativeToolExecutor while main keeps its deployment executor', async t => {
   const ctx = new Context()
   const promptFiber = await ctx.plugin(SystemPrompt)
-  const ptcRuns = []
-  const releases = []
-  const ptcRuntime = {
-    language: 'typescript',
-    programFormat: 'function-body',
-    resolve: input => input,
-    async run(input) {
-      ptcRuns.push(input.program)
-      const value = await input.bindings[0].functions.write({})
-      return { logs: [], value }
-    },
-    async release(agent) {
-      releases.push(agent.id)
+  const toolsFiber = await ctx.plugin(ToolRuntime)
+  const defaultDispatches = []
+  const defaultExecutor = {
+    describe: () => ({ schemas: [] }),
+    async execute(input) {
+      for (const call of input.calls) defaultDispatches.push(`${call.name}:${input.agent?.id ?? 'none'}`)
+      return {
+        results: input.calls.map(call => ({
+          callId: call.id,
+          result: {
+            isError: false,
+            content: [{ type: 'text', text: 'default deployment executor' }],
+            value: { executor: 'default', name: call.name },
+          },
+        })),
+        additionalContexts: [],
+        concluded: false,
+      }
     },
   }
-  const ptcFiber = await ctx.plugin(pluginCtx => pluginCtx.provide('ptcRuntime', ptcRuntime))
-  const workingDirectoryFiber = await ctx.plugin(pluginCtx => pluginCtx.provide('workingDirectory', {
-    ensure: async () => '/workspace/project',
-  }))
-  const toolsFiber = await ctx.plugin(ToolRuntime, { mode: 'ptc' })
+  const disposeDefaultExecutor = ctx.tools.setExecutor(defaultExecutor)
   const bodies = []
-  const unregisterWrite = ctx.tools.register(fixtureTool('write', 'global', bodies))
+  const unregisterRead = ctx.tools.register(fixtureTool('read', 'global', bodies))
   const scopes = []
   const makeAgent = async id => {
-    const appended = []
-    const agent = { id, session: { id, append: (...event) => appended.push(event) } }
+    const agent = { id, session: { id, append() {} } }
     const scope = createScope(ctx, agent)
     await scope.ctx.inject(['tools'], injected => { agent.ctx = injected })
     scopes.push(scope)
     return agent
   }
-  const specialist = await makeAgent('ptc-specialist')
-  const main = await makeAgent('ptc-main')
+  const specialist = await makeAgent('executor-specialist')
+  const main = await makeAgent('executor-main')
   applySpecialistPolicy(specialist.ctx)
   t.after(async () => {
     for (const scope of scopes.reverse()) await scope.dispose()
-    unregisterWrite()
+    unregisterRead()
+    disposeDefaultExecutor()
     await toolsFiber.dispose()
-    await workingDirectoryFiber.dispose()
-    await ptcFiber.dispose()
     await promptFiber.dispose()
   })
 
-  assert.equal(ctx.tools.modeFor(specialist), 'native', 'the preset shadows a PTC deployment default')
-  assert.equal(ctx.tools.modeFor(main), 'ptc', 'the main Agent keeps the deployment presentation')
-  const denied = await ctx.tools.execute(execution('run_code', specialist, {
+  const mainRunCode = await executeToolOnce(ctx.tools, execution('run_code', main, {
     code: 'return await tools.write({})',
-    description: 'Attempt PTC policy bypass',
+    description: 'Verify default deployment executor',
+  }))
+  assert.equal(mainRunCode.isError, false)
+  assert.equal(mainRunCode.value.executor, 'default')
+  assert.deepEqual(defaultDispatches, ['run_code:executor-main'])
+
+  const specialistRead = await executeToolOnce(ctx.tools, execution('read', specialist))
+  assert.equal(specialistRead.isError, false)
+  assert.deepEqual(bodies, ['global:read:executor-specialist'], 'the specialist call must run through NativeToolExecutor')
+  assert.deepEqual(defaultDispatches, ['run_code:executor-main'])
+
+  const denied = await executeToolOnce(ctx.tools, execution('run_code', specialist, {
+    code: 'return await tools.write({})',
+    description: 'Attempt to bypass the specialist Tool policy',
   }))
   assert.equal(denied.isError, true)
   assert.equal(denied.error.message, DENIAL)
-  assert.deepEqual(ptcRuns, [], 'the guarded Agent must not enter the PTC runtime')
-  assert.deepEqual(bodies, [], 'the PTC write body must not execute')
-
-  const allowed = await ctx.tools.execute(execution('run_code', main, {
-    code: 'return await tools.write({})',
-    description: 'Verify main PTC execution',
-  }))
-  assert.equal(allowed.isError, false, allowed.error?.message)
-  assert.deepEqual(ptcRuns, ['return await tools.write({})'])
-  assert.deepEqual(bodies, ['global:write:ptc-main'], 'main Agent PTC sub-calls are not guarded')
-  await scopes[1].dispose()
-  assert.deepEqual(releases, ['ptc-main'])
+  assert.deepEqual(defaultDispatches, ['run_code:executor-main'], 'the specialist must not fall back to the default executor')
+  assert.deepEqual(bodies, ['global:read:executor-specialist'], 'guarded Tools must not execute')
 })

@@ -12,7 +12,7 @@ function fixture(options = {}) {
     now: () => current,
     createId: options.createId ?? (() => `bg_test-${sequence += 1}`),
     setTimer(callback, delay) {
-      const timer = { callback, delay, unref() {} }
+      const timer = { callback, delay, dueAt: current + delay, unref() {} }
       timers.set(timer, timer)
       return timer
     },
@@ -29,7 +29,7 @@ function fixture(options = {}) {
     advance(ms) {
       current += ms
       for (const timer of [...timers.keys()]) {
-        if (timer.delay <= current) {
+        if (timer.dueAt <= current) {
           timers.delete(timer)
           timer.callback()
         }
@@ -140,6 +140,19 @@ test('pending expiry becomes bounded terminal retention and then disappears', ()
   assert.equal(f.registry.read(parent, pending.id), undefined)
   assert.equal(f.registry.size(), 0)
   assert.equal(f.timers.size, 0)
+})
+
+test('silent undisclosed discard respects exact owner and cannot remove running work', () => {
+  const f = fixture()
+  const pending = f.registry.enqueue(parent)
+  assert.equal(f.registry.discardUndisclosed({ id: parent.id }, pending.id), false)
+  assert.equal(f.registry.isPendingFresh(parent, pending.id), true)
+  f.registry.start(parent, pending.id, 'child-discard')
+  assert.equal(f.registry.isPendingFresh(parent, pending.id), false)
+  assert.equal(f.registry.discardUndisclosed(parent, pending.id), false)
+  assert.equal(f.registry.read(parent, pending.id).status, 'running')
+  f.registry.settle(parent, pending.id, 'completed')
+  assert.equal(f.registry.discardUndisclosed(parent, pending.id), false)
 })
 
 test('running work has no pending TTL and terminal retention is cleared on settlement', () => {
@@ -346,7 +359,7 @@ test('caches bounded terminal results without exposing output in lifecycle snaps
   }
 })
 
-test('strictly rejects invalid result content and lifecycle mismatches without settling', () => {
+test('discards invalid results and lifecycle mismatches while settling exactly once', () => {
   const valid = { status: 'completed', output: 'x'.repeat(8192), truncated: false, omittedNonText: false, stopReason: 's'.repeat(80) }
   const invalid = [
     null, 'text', [], {},
@@ -355,36 +368,132 @@ test('strictly rejects invalid result content and lifecycle mismatches without s
     { ...valid, stopReason: 's'.repeat(81) }, { ...valid, stopReason: null },
     { ...valid, status: 'failed' }, { ...valid, status: 'cancelled' },
     { ...valid, childId: 'secret' }, { ...valid, extra: true },
+    new Proxy({}, { ownKeys() { throw new Error('inspection failed') } }),
   ]
+  for (const value of invalid) {
+    const f = fixture()
+    const task = f.registry.enqueue(parent)
+    f.registry.start(parent, task.id, 'child')
+    assert.equal(f.registry.settle(parent, task.id, 'completed', value).status, 'completed')
+    assert.equal(f.registry.read(parent, task.id).status, 'completed')
+    assert.equal(f.registry.readResult(parent, task.id), undefined)
+    assert.equal(f.registry.settle(parent, task.id, 'completed', valid), undefined)
+    assert.equal(f.registry.readResult(parent, task.id), undefined)
+  }
+  for (const initial of ['pending', 'running']) {
+    const f = fixture()
+    const task = f.registry.enqueue(parent)
+    if (initial === 'running') f.registry.start(parent, task.id, 'child')
+    assert.equal(f.registry.settle(parent, task.id, 'failed', valid).status, 'failed')
+    assert.equal(f.registry.readResult(parent, task.id), undefined)
+    assert.equal(f.registry.settle(parent, task.id, 'failed', { ...valid, status: 'failed' }), undefined)
+    assert.equal(f.registry.readResult(parent, task.id), undefined)
+  }
   const f = fixture()
   const task = f.registry.enqueue(parent)
   f.registry.start(parent, task.id, 'child')
-  for (const value of invalid) {
-    assert.equal(f.registry.settle(parent, task.id, 'completed', value), undefined)
-    assert.equal(f.registry.read(parent, task.id).status, 'running')
-    assert.equal(f.registry.readResult(parent, task.id), undefined)
-  }
-  assert.equal(f.registry.settle(parent, task.id, 'failed', valid), undefined)
   assert.equal(f.registry.settle(parent, task.id, 'completed', valid).status, 'completed')
   assert.deepEqual(f.registry.readResult(parent, task.id), valid)
-  assert.equal(f.registry.settle(parent, task.id, 'completed', valid), undefined)
+  assert.equal(f.registry.settle(parent, task.id, 'failed', { ...valid, status: 'failed' }), undefined)
+  assert.deepEqual(f.registry.readResult(parent, task.id), valid)
 })
 
-test('rejects accessors and rechecks ownership after result inspection reenters', () => {
+test('invalid lifecycle never changes records or inspects results', () => {
+  const f = fixture()
+  const task = f.registry.enqueue(parent)
+  let inspected = false
+  const result = new Proxy({}, { getPrototypeOf() { inspected = true; throw new Error('unexpected') } })
+  const pending = f.registry.read(parent, task.id)
+  assert.equal(f.registry.settle(parent, task.id, 'completed', result), undefined)
+  assert.deepEqual(f.registry.read(parent, task.id), pending)
+  f.registry.start(parent, task.id, 'child')
+  const running = f.registry.read(parent, task.id)
+  for (const status of ['pending', 'running', 'cancelled', 'expired', undefined, null]) {
+    assert.equal(f.registry.settle(parent, task.id, status, result), undefined)
+    assert.deepEqual(f.registry.read(parent, task.id), running)
+  }
+  assert.equal(inspected, false)
+})
+
+test('rejects accessor results without invoking getters while still settling', () => {
   const f = fixture()
   const task = f.registry.enqueue(parent)
   f.registry.start(parent, task.id, 'child')
   let invoked = false
   const accessor = { status: 'completed', get output() { invoked = true; return 'text' }, truncated: false, omittedNonText: false }
-  assert.equal(f.registry.settle(parent, task.id, 'completed', accessor), undefined)
+  assert.equal(f.registry.settle(parent, task.id, 'completed', accessor).status, 'completed')
   assert.equal(invoked, false)
-  assert.equal(f.registry.read(parent, task.id).status, 'running')
-  const reentrant = new Proxy({ status: 'completed', output: 'text', truncated: false, omittedNonText: false }, {
-    ownKeys(target) { f.registry.clearAgent(parent); return Reflect.ownKeys(target) },
-  })
-  assert.equal(f.registry.settle(parent, task.id, 'completed', reentrant), undefined)
   assert.equal(f.registry.readResult(parent, task.id), undefined)
-  assert.equal(f.registry.size(), 0)
+})
+
+test('result inspection rechecks ownership and lifecycle after proxy reentrancy', () => {
+  for (const action of ['clearAgent', 'dispose', 'cancel', 'settle']) {
+    for (const invalid of [false, true]) {
+      const f = fixture()
+      const task = f.registry.enqueue(parent)
+      if (action !== 'cancel') f.registry.start(parent, task.id, 'child')
+      const status = action === 'cancel' ? 'failed' : 'completed'
+      const value = { status: status === 'failed' ? 'failed' : 'completed', output: 'text', truncated: false, omittedNonText: false }
+      const nestedResult = { status: 'failed', output: 'nested', truncated: false, omittedNonText: false }
+      let nested
+      let invoked = false
+      const reentrant = new Proxy(value, {
+        ownKeys(target) {
+          if (!invoked) {
+            invoked = true
+            if (action === 'clearAgent') nested = f.registry.clearAgent(parent)
+            if (action === 'dispose') nested = f.registry.dispose()
+            if (action === 'cancel') nested = f.registry.cancel(parent, task.id)
+            if (action === 'settle') nested = f.registry.settle(parent, task.id, 'failed', nestedResult)
+          }
+          if (invalid) throw new Error('inspection failed')
+          return Reflect.ownKeys(target)
+        },
+      })
+      assert.equal(f.registry.settle(parent, task.id, status, reentrant), undefined, `${action}, invalid=${invalid}`)
+      if (action === 'cancel') {
+        assert.equal(nested.status, 'cancelled')
+        assert.equal(f.registry.read(parent, task.id).status, 'cancelled')
+        assert.equal(f.registry.readResult(parent, task.id), undefined)
+      } else if (action === 'settle') {
+        assert.equal(nested.status, 'failed')
+        assert.deepEqual(f.registry.readResult(parent, task.id), nestedResult)
+      } else {
+        assert.equal(nested.length, 1)
+        assert.equal(nested[0].status, 'running')
+        assert.equal(f.registry.read(parent, task.id), undefined)
+        assert.equal(f.registry.readResult(parent, task.id), undefined)
+        assert.equal(f.registry.size(), 0)
+      }
+    }
+  }
+})
+
+test('invalid output is retained only as a terminal lifecycle until TTL frees capacity', () => {
+  for (const status of ['completed', 'failed']) {
+    const f = fixture({ maxPending: 1, maxRetained: 1, pendingTtlMs: 10, terminalTtlMs: 50 })
+    const task = f.registry.enqueue(parent)
+    f.registry.start(parent, task.id, 'child')
+    f.advance(100)
+    assert.equal(f.registry.read(parent, task.id).status, 'running')
+    const mismatched = { status: status === 'completed' ? 'failed' : 'completed', output: 'x', truncated: false, omittedNonText: false }
+    const settled = f.registry.settle(parent, task.id, status, mismatched)
+    assert.equal(settled.status, status)
+    assert.equal(settled.settledAt, 100)
+    assert.equal(f.registry.readResult(parent, task.id), undefined)
+    assert.equal(f.timers.size, 1)
+    assert.throws(() => f.registry.enqueue(parent), /capacity/u)
+    f.advance(49)
+    assert.equal(f.timers.size, 1)
+    assert.equal(f.registry.read(parent, task.id).status, status)
+    assert.throws(() => f.registry.enqueue(parent), /capacity/u)
+    f.advance(1)
+    assert.equal(f.timers.size, 0)
+    assert.equal(f.registry.read(parent, task.id), undefined)
+    assert.equal(f.registry.readResult(parent, task.id), undefined)
+    assert.equal(f.registry.size(), 0)
+    assert.equal(f.registry.enqueue(parent).status, 'pending')
+  }
 })
 
 test('result is visible to a terminal observer only through exact-owner readResult', () => {

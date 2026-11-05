@@ -4,7 +4,9 @@ import test from 'node:test'
 import { posix as path } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
+import { executeToolOnce, installNativeToolExecutor } from './dsh-runtime-compat.js'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
   createClaudeRulesOnReadContextListener,
@@ -349,8 +351,10 @@ function userContext(text) {
 async function makeHarness(options = {}) {
   const ctx = new Context()
   const systemPromptFiber = await ctx.plugin(SystemPrompt)
+  const sessionProjectionFiber = await ctx.plugin(SessionProjectionRegistry)
   const registryFiber = await ctx.plugin(AgentRegistry)
   const toolsFiber = await ctx.plugin(ToolRuntime)
+  const nativeExecutorFiber = await installNativeToolExecutor(ctx)
   const agents = ctx.agents
   const sessions = new Map()
   const fileSystem = makeFileSystem(options)
@@ -484,7 +488,7 @@ async function makeHarness(options = {}) {
   async function executeFileOperation(agent, name, filePath = fileSystem.fs.activeReadPath, extraArgs = {}, { signal = new AbortController().signal } = {}) {
     if (name === 'read') fileSystem.fs.setReadPath(filePath)
     callCount++
-    return ctx.tools.execute({
+    return executeToolOnce(ctx.tools, {
       callId: `${name}-${callCount}`,
       name,
       arguments: { file_path: filePath, ...extraArgs },
@@ -511,8 +515,10 @@ async function makeHarness(options = {}) {
     for (const detach of detachAgents.values()) detach()
     detachAgents.clear()
     for (const scope of scopes) await scope.dispose()
+    await nativeExecutorFiber.dispose()
     await toolsFiber.dispose()
     await registryFiber.dispose()
+    await sessionProjectionFiber.dispose()
     await systemPromptFiber.dispose()
   }
 

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { createFocusChain, focusChainText } from '../src/focus-chain.js'
 import { quoteBoundedText } from '../src/prompt-text.js'
@@ -410,6 +411,7 @@ test('plugin disposal joins Agent-scope cleanup and removes its prompt context',
 test('assembles the active Goal through real DSH prompt scopes and removes it on disposal', async () => {
   const ctx = new Context()
   const systemPromptFiber = await ctx.plugin(SystemPrompt)
+  const sessionProjectionFiber = await ctx.plugin(SessionProjectionRegistry)
   const agentRegistryFiber = await ctx.plugin(AgentRegistry)
   const goals = new Map()
   const goalCalls = []
@@ -473,6 +475,7 @@ test('assembles the active Goal through real DSH prompt scopes and removes it on
       detach()
     }
     await agentRegistryFiber.dispose()
+    await sessionProjectionFiber.dispose()
     await systemPromptFiber.dispose()
   }
 })

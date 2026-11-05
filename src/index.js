@@ -58,6 +58,7 @@ import { registerGoalCompletionReview } from './goal-completion-review.js'
 import { createVerifyCommand } from './verify-command.js'
 import { createHandoffCommand } from './handoff-command.js'
 import { createLongHorizonConfigService } from './long-horizon-config-service.js'
+import { createAgentTreeSnapshot } from './agent-tree-snapshot.js'
 import { createGeneralToolResultPruningListener, createSearchToolResultPruningListener, normalizeAdditionalToolResultPruningNames } from './search-tool-result-pruning.js'
 import { createManualContextPruningHandler } from './manual-context-pruning-command.js'
 import { normalizeImageQueryRoute, registerImageQueryTool } from './image-query-tool.js'
@@ -78,6 +79,7 @@ import { createAutomaticSlashCommandListener } from './automatic-slash-commands.
 import { createRouteAdmission } from './route-admission.js'
 import { createPendingTaskRegistry } from './pending-task-registry.js'
 import { createPendingBackgroundScheduler } from './pending-background.js'
+import { createPendingAcknowledgement } from './pending-acknowledgement.js'
 import { createPendingTaskCancelTool, createPendingTaskStatusTool } from './pending-task-tools.js'
 import { createTaskJobMonitor } from './task-job-monitor.js'
 
@@ -2728,7 +2730,7 @@ function specialistTools(ctx, config, roleRoutes, categoryRoutes, userAgents, ac
         result = await launchTask(snapshot, { agent: exec?.agent, signal: exec?.signal, pendingBackground: true })
       } catch (error) {
         if (!(error instanceof PendingCapacityError) || exec?.signal?.aborted || lifecycle.disposed) throw error
-        result = await pendingScheduler.enqueue(snapshot, { agent: exec?.agent, signal: exec?.signal })
+        result = pendingScheduler.enqueue(snapshot, exec)
       }
       if (result.status === 'pending' ? typeof result.taskId !== 'string' || result.childId !== undefined
         : result.status !== 'started' || typeof result.childId !== 'string' || result.taskId !== undefined) {
@@ -3480,7 +3482,14 @@ export function apply(ctx, rawConfig) {
     ctx.effect(() => settings.configure({ auto: true }), 'dsh-omo automatic settings form')
   }
   if (typeof ctx.get === 'function' && ctx.get('configEditor')) {
-    const settings = createLongHorizonConfigService(ctx.get('configEditor'))
+    const agentTree = createAgentTreeSnapshot({
+      agents: optionalService(ctx, 'agents'),
+      subagents: optionalService(ctx, 'subagents'),
+      goals: optionalService(ctx, 'goals'),
+    })
+    const settings = createLongHorizonConfigService(ctx.get('configEditor'), {
+      readAgentTree: () => agentTree.read(),
+    })
     ctx.provide('longHorizonConfig', settings)
   }
   const config = rawConfig
@@ -4386,11 +4395,21 @@ export function apply(ctx, rawConfig) {
   const presetPreflight = createHostPreflightGate(MAX_PENDING_PRESET_PREFLIGHTS, () => new PresetPreflightBusyError())
   const lifecycle = { disposed: false, controller: new AbortController() }
   let pendingScheduler
+  let pendingAcknowledgement
   const pendingRegistry = config.enablePendingBackgroundTasks ? createPendingTaskRegistry({
     maxPending: maxPendingTasks,
     withoutInitiator: fn => agentsService.withoutInitiator(fn),
-    onChange: snapshot => pendingScheduler?.onRegistryChange(snapshot),
+    onChange: snapshot => {
+      if (!['pending', 'running'].includes(snapshot?.status)) pendingAcknowledgement?.forgetTask(snapshot?.id)
+      pendingScheduler?.onRegistryChange(snapshot)
+    },
   }) : undefined
+  if (pendingRegistry) {
+    pendingAcknowledgement = createPendingAcknowledgement({
+      activate: (parent, taskId) => pendingScheduler?.activate(parent, taskId) === true,
+      cancel: (parent, taskId) => pendingScheduler?.rejectStaged(parent, taskId),
+    })
+  }
   let globalPendingCount = 0
   let routePendingCount = 0
   const sharedChildOwners = new Map()
@@ -4492,7 +4511,19 @@ export function apply(ctx, rawConfig) {
   }
   const specialist = specialistTools(ctx, config, roleRoutes, categoryRoutes, userAgents, activeChildren, activeRuns, activeRunOwners, activeRunCompletions, lifecycle, providerName, activeRoleNames, activeRoleSet, projectAgentFiles, routeConcurrency, promptFileExpander, taskResultRegistry, admission, agentsService, maxPendingTasks, routePreflight, presetPreflight, routeAdmission,
     config.enablePendingBackgroundTasks ? {
-      enqueue: (args, exec) => pendingScheduler.enqueue(args, exec),
+      enqueue: (args, exec) => {
+        if (exec?.name !== 'dsh_omo_task' || typeof exec.token !== 'symbol') {
+          throw new Error('Pending background tasks require a native Tool execution token.')
+        }
+        const pending = pendingScheduler.enqueue(args, { agent: exec.agent, signal: exec.signal, deferUntilAcknowledged: true })
+        try {
+          pendingAcknowledgement.track(exec, pending, taskStartOutput(config, taskResultRegistry, true).render(args, pending))
+        } catch (error) {
+          pendingScheduler.rejectStaged(exec.agent, pending.taskId)
+          throw error
+        }
+        return pending
+      },
       wakeQueued: () => pendingScheduler.wakeQueued(),
     } : undefined, taskJobMonitor)
   if (pendingRegistry) {
@@ -4527,9 +4558,11 @@ export function apply(ctx, rawConfig) {
     admission?.notify()
     routeAdmission?.notify()
     pendingScheduler.notify()
+    ctx.on('tools/result', pendingAcknowledgement.onResult)
   }
   if (typeof ctx.on === 'function') ctx.on('agent/disposed', payload => {
     specialist.clearDisposedParent(payload?.agent)
+    pendingAcknowledgement?.clearAgent(payload?.agent)
     if (pendingScheduler) {
       const detached = pendingScheduler.clearAgent(payload?.agent)
       pendingRegistry.clearAgent(payload?.agent)
@@ -4945,6 +4978,7 @@ export function apply(ctx, rawConfig) {
   ctx.effect(() => async () => {
     lifecycle.disposed = true
     lifecycle.controller.abort()
+    pendingAcknowledgement?.dispose()
     const pendingDrain = pendingScheduler?.dispose()
     admission?.dispose()
     routeConcurrency.releaseAll()

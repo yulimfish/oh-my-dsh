@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import {
   createTeamModeContext,
@@ -220,6 +221,7 @@ test('caps live registrations without eviction and releases capacity on scope cl
 test('assembles the Team context only in the matching live Agent scope before first input', async () => {
   const ctx = new Context()
   const systemPromptFiber = await ctx.plugin(SystemPrompt)
+  const sessionProjectionFiber = await ctx.plugin(SessionProjectionRegistry)
   const agentRegistryFiber = await ctx.plugin(AgentRegistry)
   const scopes = []
   const detachers = []
@@ -260,6 +262,7 @@ test('assembles the Team context only in the matching live Agent scope before fi
     for (const scope of scopes) await scope.dispose()
     for (const detach of detachers) detach()
     await agentRegistryFiber.dispose()
+    await sessionProjectionFiber.dispose()
     await systemPromptFiber.dispose()
   }
 })

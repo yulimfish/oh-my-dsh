@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt, { renderContextSections } from '@deepseek-ai/dsh-system-prompt'
 import { normalizeProjectAgentsRoot, normalizeProjectRootPath, registerProjectRootAgentsContext, registerRootAgentsContext } from '../src/agents-context.js'
 
@@ -134,6 +135,7 @@ async function makeHarness(records, {
 } = {}) {
   const ctx = new Context()
   const systemPromptFiber = await ctx.plugin(SystemPrompt)
+  const sessionProjectionFiber = await ctx.plugin(SessionProjectionRegistry)
   const agentRegistryFiber = await ctx.plugin(AgentRegistry)
   const agents = ctx.agents
   const sessions = new Map()
@@ -213,6 +215,7 @@ async function makeHarness(records, {
       for (const detach of detachById.values()) detach()
       detachById.clear()
       await agentRegistryFiber.dispose()
+      await sessionProjectionFiber.dispose()
       await systemPromptFiber.dispose()
     },
   }

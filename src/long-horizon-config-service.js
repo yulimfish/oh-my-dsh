@@ -6,6 +6,8 @@ export const LONG_HORIZON_CONFIG_KEYS = Object.freeze([
   'enableGoalCompletionReview',
   'enableVerifyCommand',
   'enableTaskHandoffCommand',
+  'enableGoalTools',
+  'enableCompactionResumeAdvisory',
 ])
 const CONFIG_KEYS = Object.freeze([...LONG_HORIZON_CONFIG_KEYS, 'enableTaskResultTool'])
 
@@ -21,7 +23,7 @@ function bool(value) {
   return value === true
 }
 
-export function createLongHorizonConfigService(configEditor) {
+export function createLongHorizonConfigService(configEditor, { readAgentTree } = {}) {
   if (!configEditor || typeof configEditor.entries !== 'function'
     || typeof configEditor.configuration !== 'function' || typeof configEditor.edit !== 'function') {
     throw new TypeError('Long-horizon settings require DSH configEditor entries, configuration, and edit.')
@@ -36,6 +38,20 @@ export function createLongHorizonConfigService(configEditor) {
         values[key] = layer?.override?.[key] === undefined ? bool(layer?.inherited?.[key]) : bool(layer.override[key])
       }
       return { found: true, entry, values }
+    },
+    async readAgentTree() {
+      if (typeof readAgentTree !== 'function') {
+        return {
+          available: false,
+          scope: 'live-roots',
+          updatedAt: Date.now(),
+          truncated: false,
+          limits: { maxRoots: 0, maxDescendantsPerRoot: 0 },
+          note: 'The Host Agent-tree dependencies are unavailable.',
+          roots: [],
+        }
+      }
+      return readAgentTree()
     },
     async update(changes) {
       if (!isPlainObject(changes)) throw new TypeError('Settings changes must be an object.')

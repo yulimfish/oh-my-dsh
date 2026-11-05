@@ -25,7 +25,7 @@ function fixture(launchTask, options = {}) {
     },
     clearTimer(timer) { timers.delete(timer) },
     withoutInitiator: fn => fn(),
-    onChange: snapshot => scheduler?.onRegistryChange(snapshot),
+    onChange: snapshot => { scheduler?.onRegistryChange(snapshot); options.onChange?.(snapshot, scheduler) },
   })
   scheduler = createPendingBackgroundScheduler({
     registry,
@@ -38,6 +38,7 @@ function fixture(launchTask, options = {}) {
   })
   return {
     registry, scheduler, failures, expiries,
+    setNow(value) { now = value },
     async advance(ms) {
       now += ms
       for (const [timer, value] of [...timers]) {
@@ -524,5 +525,267 @@ test('wakeQueued never unparks the attempt that is already starting', async () =
     f.scheduler.notify()
     await flush()
     assert.equal(attempts, 2)
+  } finally { await f.dispose() }
+})
+
+test('reentrant parent disposal cannot return an orphaned staged ID', async () => {
+  let probes = 0
+  let f
+  f = fixture(async () => { throw new Error('must not launch') }, {
+    isParentCurrent: candidate => {
+      probes += 1
+      if (probes === 2) {
+        f.scheduler.clearAgent(candidate)
+        f.registry.clearAgent(candidate)
+      }
+      return true
+    },
+  })
+  try {
+    assert.throws(() => f.scheduler.enqueue({ role: 'quick' }, { agent: parent, deferUntilAcknowledged: true }), /live parent/u)
+    assert.equal(f.registry.size(), 0)
+    await flush()
+  } finally { await f.dispose() }
+})
+
+test('enqueue rejects an entry expiring inside its final parent check', async () => {
+  let probes = 0
+  let f
+  f = fixture(async () => { throw new Error('must not launch') }, {
+    isParentCurrent: () => {
+      probes += 1
+      if (probes === 2) f.setNow(30 * 60 * 1000)
+      return true
+    },
+  })
+  try {
+    assert.throws(() => f.scheduler.enqueue({ role: 'quick' }, { agent: parent, deferUntilAcknowledged: true }), /live parent/u)
+    assert.equal(f.registry.size(), 0)
+    await flush()
+  } finally { await f.dispose() }
+})
+
+test('staged tasks require exact acknowledgement and do not block later queued tasks', async () => {
+  const attempts = []
+  const f = fixture(async (args, exec) => {
+    attempts.push(args.task)
+    const run = { id: `child-${args.task}`, dispose() {} }
+    exec.onPendingRun(run)
+    return { status: 'started', childId: run.id }
+  })
+  const staged = f.scheduler.enqueue({ role: 'quick', task: 'staged' }, { agent: parent, deferUntilAcknowledged: true })
+  try {
+    assert.equal(f.registry.pendingCount(parent), 1)
+    f.scheduler.notify()
+    f.scheduler.wakeQueued()
+    await flush()
+    assert.deepEqual(attempts, [])
+    assert.equal(f.registry.read(parent, staged.taskId).status, 'pending')
+    assert.equal(f.scheduler.activate({ id: parent.id }, staged.taskId), false)
+    assert.equal(f.scheduler.activate(parent, 'bg_missing'), false)
+    const later = f.scheduler.enqueue({ role: 'quick', task: 'later' }, { agent: parent })
+    await flush()
+    assert.deepEqual(attempts, ['later'])
+    assert.equal(f.registry.read(parent, later.taskId).status, 'running')
+    assert.equal(f.scheduler.activate(parent, staged.taskId), true)
+    assert.equal(f.scheduler.activate(parent, staged.taskId), false)
+    await flush()
+    assert.deepEqual(attempts, ['later', 'staged'])
+    assert.equal(f.registry.read(parent, staged.taskId).status, 'running')
+  } finally { await f.dispose() }
+})
+
+test('staged tasks consume pending capacity and cancellation prevents activation', async () => {
+  let attempts = 0
+  const f = fixture(async () => { attempts += 1 })
+  try {
+    const pending = Array.from({ length: 4 }, (_, index) => f.scheduler.enqueue(
+      { role: 'quick', task: `${index}` }, { agent: parent, deferUntilAcknowledged: true },
+    ))
+    assert.throws(() => f.scheduler.enqueue({ role: 'quick' }, { agent: parent }), /capacity/i)
+    assert.equal(f.scheduler.cancel({ id: parent.id }, pending[0].taskId), undefined)
+    assert.equal(f.scheduler.cancel(parent, pending[0].taskId).status, 'cancelled')
+    assert.equal(f.scheduler.activate(parent, pending[0].taskId), false)
+    assert.equal(f.registry.pendingCount(parent), 3)
+    f.scheduler.notify()
+    await flush()
+    assert.equal(attempts, 0)
+  } finally { await f.dispose() }
+})
+
+test('rejected undisclosed staged tasks are silently discarded and release retention', async () => {
+  let attempts = 0
+  const f = fixture(async () => { attempts += 1 })
+  try {
+    for (let index = 0; index < 80; index += 1) {
+      const pending = f.scheduler.enqueue({ role: 'quick' }, { agent: parent, deferUntilAcknowledged: true })
+      assert.equal(f.scheduler.rejectStaged({ id: parent.id }, pending.taskId), false)
+      assert.equal(f.scheduler.rejectStaged(parent, pending.taskId), true)
+      assert.equal(f.registry.read(parent, pending.taskId), undefined)
+    }
+    assert.equal(f.registry.size(), 0)
+    assert.deepEqual(f.expiries, [])
+    await flush()
+    assert.equal(attempts, 0)
+  } finally { await f.dispose() }
+})
+
+test('undisclosed staged expiry frees global retained capacity immediately', async () => {
+  const f = fixture(async () => { throw new Error('expired staged work must not start') }, { isParentCurrent: () => true })
+  try {
+    for (let index = 0; index < 16; index += 1) {
+      const owner = { id: `owner-${index}` }
+      for (let count = 0; count < 4; count += 1) {
+        f.scheduler.enqueue({ role: 'quick' }, { agent: owner, deferUntilAcknowledged: true })
+      }
+    }
+    assert.equal(f.registry.size(), 64)
+    f.setNow(30 * 60 * 1000)
+    assert.equal(f.registry.pendingCount(), 0)
+    assert.equal(f.registry.size(), 0)
+    assert.equal(f.scheduler.enqueue({ role: 'quick' }, { agent: parent, deferUntilAcknowledged: true }).status, 'pending')
+    assert.deepEqual(f.expiries, [])
+  } finally { await f.dispose() }
+})
+
+test('lazy staged expiry is silent and cannot be undone by clock rollback', async () => {
+  let attempts = 0
+  const f = fixture(async () => { attempts += 1 })
+  const pending = f.scheduler.enqueue({ role: 'quick' }, { agent: parent, deferUntilAcknowledged: true })
+  try {
+    f.setNow(30 * 60 * 1000)
+    assert.equal(f.scheduler.activate(parent, pending.taskId), false, 'read prunes even without the timer firing')
+    f.setNow(0)
+    assert.equal(f.scheduler.activate(parent, pending.taskId), false)
+    assert.equal(f.registry.read(parent, pending.taskId), undefined)
+    assert.deepEqual(f.expiries, [])
+    f.scheduler.notify()
+    await flush()
+    assert.equal(attempts, 0)
+  } finally { await f.dispose() }
+})
+
+test('staged activation cancels when the exact parent is no longer current', async () => {
+  let live = parent
+  let attempts = 0
+  const f = fixture(async () => { attempts += 1 }, { isParentCurrent: candidate => candidate === live })
+  const pending = f.scheduler.enqueue({ role: 'quick' }, { agent: parent, deferUntilAcknowledged: true })
+  try {
+    live = { id: parent.id }
+    assert.equal(f.scheduler.activate(parent, pending.taskId), false)
+    assert.equal(f.registry.read(parent, pending.taskId).status, 'cancelled')
+    live = parent
+    assert.equal(f.scheduler.activate(parent, pending.taskId), false)
+    await flush()
+    assert.equal(attempts, 0)
+  } finally { await f.dispose() }
+})
+
+test('expiry callbacks cannot activate staged tasks reentrantly during registry prune', async () => {
+  let staged
+  let activated
+  const f = fixture(async () => { throw new PendingCapacityError() }, {
+    notifyExpiry: () => { activated = f.scheduler.activate(parent, staged.taskId) },
+  })
+  f.scheduler.enqueue({ role: 'quick' }, { agent: parent })
+  staged = f.scheduler.enqueue({ role: 'quick' }, { agent: parent, deferUntilAcknowledged: true })
+  try {
+    await flush()
+    f.setNow(30 * 60 * 1000)
+    f.registry.pendingCount()
+    assert.equal(activated, false)
+    assert.equal(f.registry.read(parent, staged.taskId), undefined)
+    assert.equal(f.expiries.length, 1)
+  } finally { await f.dispose() }
+})
+
+test('nested registry observer cannot activate an already-expired staged entry', async () => {
+  let firstId
+  let secondId
+  let nested
+  let f
+  f = fixture(async () => { throw new Error('expired work must not launch') }, {
+    onChange: (snapshot, scheduler) => {
+      if (snapshot.id === firstId && snapshot.status === 'expired') nested = scheduler.activate(parent, secondId)
+    },
+  })
+  firstId = f.scheduler.enqueue({ role: 'quick' }, { agent: parent, deferUntilAcknowledged: true }).taskId
+  secondId = f.scheduler.enqueue({ role: 'quick' }, { agent: parent, deferUntilAcknowledged: true }).taskId
+  try {
+    f.setNow(30 * 60 * 1000)
+    f.registry.pendingCount()
+    assert.equal(nested, false)
+    assert.equal(f.registry.read(parent, secondId), undefined)
+    assert.deepEqual(f.expiries, [])
+    await flush()
+  } finally { await f.dispose() }
+})
+
+test('activation cannot resurrect an entry cancelled reentrantly during a registry read', async () => {
+  let staged
+  let cancelDuringChange = false
+  const f = fixture(async () => { throw new Error('must not launch') }, {
+    onChange: (snapshot, scheduler) => {
+      if (cancelDuringChange && snapshot.status === 'expired') scheduler.cancel(parent, staged.taskId)
+    },
+  })
+  const first = f.scheduler.enqueue({ role: 'quick' }, { agent: parent, deferUntilAcknowledged: true })
+  f.setNow(1)
+  staged = f.scheduler.enqueue({ role: 'quick' }, { agent: parent, deferUntilAcknowledged: true })
+  try {
+    cancelDuringChange = true
+    f.setNow(30 * 60 * 1000)
+    assert.equal(f.scheduler.activate(parent, staged.taskId), false)
+    assert.equal(f.registry.read(parent, first.taskId), undefined)
+    assert.equal(f.registry.read(parent, staged.taskId).status, 'cancelled')
+    assert.deepEqual(f.expiries, [])
+  } finally { await f.dispose() }
+})
+
+test('clearAgent and dispose detach staged entries without launching or expiry notification', async () => {
+  let attempts = 0
+  const f = fixture(async () => { attempts += 1 })
+  const first = f.scheduler.enqueue({ role: 'quick' }, { agent: parent, deferUntilAcknowledged: true })
+  try {
+    assert.deepEqual(f.scheduler.clearAgent(parent), [])
+    f.registry.clearAgent(parent)
+    assert.equal(f.scheduler.activate(parent, first.taskId), false)
+    const other = { id: 'other' }
+    // A separate fixture permits the second parent for the disposal case.
+    const g = fixture(async () => { attempts += 1 }, { isParentCurrent: p => p === other })
+    try {
+      const second = g.scheduler.enqueue({ role: 'quick' }, { agent: other, deferUntilAcknowledged: true })
+      await g.scheduler.dispose()
+      assert.equal(g.scheduler.activate(other, second.taskId), false)
+      g.registry.dispose()
+      assert.deepEqual(g.expiries, [])
+    } finally { await g.dispose() }
+    await flush()
+    assert.equal(attempts, 0)
+  } finally { await f.dispose() }
+})
+
+test('activation rechecks expiry after a reentrant parent check and rejects nested activation', async () => {
+  let f
+  let staged
+  let duringActivation = false
+  let nested
+  f = fixture(async () => { throw new Error('must not launch') }, {
+    isParentCurrent: candidate => {
+      if (duringActivation) {
+        duringActivation = false
+        nested = f.scheduler.activate(parent, staged.taskId)
+        f.setNow(30 * 60 * 1000)
+      }
+      return candidate === parent
+    },
+  })
+  staged = f.scheduler.enqueue({ role: 'quick' }, { agent: parent, deferUntilAcknowledged: true })
+  try {
+    duringActivation = true
+    assert.equal(f.scheduler.activate(parent, staged.taskId), false)
+    assert.equal(nested, false)
+    assert.equal(f.registry.read(parent, staged.taskId), undefined)
+    assert.deepEqual(f.expiries, [])
   } finally { await f.dispose() }
 })

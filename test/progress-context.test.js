@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { createProgressContext, createProgressProjection, progressContextText } from '../src/progress-context.js'
 
@@ -585,6 +586,7 @@ test('reentrant notification during context creation cannot overwrite a pending 
 test('real SessionStore and systemPrompt recover accepted progress in the matching Agent scope', async t => {
   const ctx = new Context()
   const promptFiber = await ctx.plugin(SystemPrompt)
+  const sessionProjectionFiber = await ctx.plugin(SessionProjectionRegistry)
   const agentFiber = await ctx.plugin(AgentRegistry)
   const sessionFiber = await ctx.plugin(SessionStore)
   const owned = []
@@ -602,6 +604,7 @@ test('real SessionStore and systemPrompt recover accepted progress in the matchi
     }
     await sessionFiber.dispose()
     await agentFiber.dispose()
+    await sessionProjectionFiber.dispose()
     await promptFiber.dispose()
   })
 

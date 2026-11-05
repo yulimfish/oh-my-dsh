@@ -6,6 +6,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { SkillRegistry } from '@deepseek-ai/dsh-skill'
 import { ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { executeToolOnce, installNativeToolExecutor } from './dsh-runtime-compat.js'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { apply, Config } from '../src/index.js'
 
@@ -78,6 +79,7 @@ for (const maxPendingTasks of [0, 1]) {
     const runtime = new Context()
     const promptFiber = await runtime.plugin(SystemPrompt)
     const toolsFiber = await runtime.plugin(ToolRuntime)
+    const nativeExecutorFiber = await installNativeToolExecutor(runtime)
     const registryContext = new Context()
     registryContext.logger = { warn() {} }
     const skills = new SkillRegistry(registryContext)
@@ -108,6 +110,7 @@ for (const maxPendingTasks of [0, 1]) {
     t.after(async () => {
       for (const dispose of effects.reverse()) if (typeof dispose === 'function') await dispose()
       for (const remove of removers) if (typeof remove === 'function') remove()
+      await nativeExecutorFiber.dispose()
       await toolsFiber.dispose()
       await promptFiber.dispose()
     })
@@ -121,7 +124,7 @@ for (const maxPendingTasks of [0, 1]) {
     const loaded = await skills.get('checklist', { cwd })
     assert.equal(loaded.content.trim(), `Consult ${canonicalDirectory}/references/guide.md now.`)
     assert.deepEqual(loaded.resourceBase, { kind: 'directory', path: canonicalDirectory })
-    const call = (callId, extra = {}) => runtime.tools.execute({
+    const call = (callId, extra = {}) => executeToolOnce(runtime.tools, {
       callId, name: 'dsh_omo_task', arguments: { role: 'explore', task: 'Review the project.', ...extra },
       agent: parent, signal: new AbortController().signal,
     })
@@ -136,7 +139,7 @@ for (const maxPendingTasks of [0, 1]) {
     const acceptedPrivate = await call('accepted-private', { load_skills: ['private-skill'] })
     assert.equal(acceptedPrivate.isError, false, JSON.stringify(acceptedPrivate.error))
     assert.equal(starts.length, 2, 'compatibility frontmatter invocation keys are inert and do not block activation')
-    const foreground = await runtime.tools.execute({
+    const foreground = await executeToolOnce(runtime.tools, {
       callId: 'foreground', name: 'dsh_omo_task_join', arguments: { role: 'explore', task: 'Review the project.', load_skills: ['checklist'] },
       agent: parent, signal: new AbortController().signal,
     })
